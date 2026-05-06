@@ -1,4 +1,5 @@
 """墨韵小说写作器 - FastAPI 主入口"""
+import os
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
