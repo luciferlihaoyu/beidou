@@ -28,4 +28,25 @@ def get_db():
 def init_db():
     import os
     os.makedirs("data", exist_ok=True)
+    # Import models so tables are created
+    import models.user  # noqa
+    import models.settings  # noqa
     Base.metadata.create_all(bind=engine)
+    # Seed admin user if not exists
+    _seed_admin()
+
+
+def _seed_admin():
+    from sqlalchemy.orm import Session
+    from models.user import User
+    db = SessionLocal()
+    try:
+        admin = db.query(User).filter(User.username == "admin").first()
+        if not admin:
+            admin = User(username="admin", role="admin", status="active")
+            admin.set_password("admin888")
+            db.add(admin)
+            db.commit()
+            print("🔐 Admin user created: admin / admin888")
+    finally:
+        db.close()

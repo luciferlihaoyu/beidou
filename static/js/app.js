@@ -4,20 +4,27 @@
 
 // ========== API ==========
 var API = {
-  get: function(p) { return fetch(p).then(function(r){ if(!r.ok)throw Error('HTTP '+r.status); return r.json(); }); },
-  post: function(p,d) { return fetch(p,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)}).then(function(r){ if(!r.ok)throw Error('HTTP '+r.status); return r.json(); }); },
-  put: function(p,d) { return fetch(p,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)}).then(function(r){ if(!r.ok)throw Error('HTTP '+r.status); return r.json(); }); },
-  del: function(p) { return fetch(p,{method:'DELETE'}).then(function(r){ if(!r.ok)throw Error('HTTP '+r.status); return r.json(); }); }
+  headers: function() {
+    var h={'Content-Type':'application/json'};
+    if(S.token) h['Authorization']='Bearer '+S.token;
+    return h;
+  },
+  get: function(p) { return fetch(p,{headers:API.headers()}).then(function(r){ if(r.status===401){logout();throw Error('登录已过期');} if(!r.ok)throw Error('HTTP '+r.status); return r.json(); }); },
+  post: function(p,d) { return fetch(p,{method:'POST',headers:API.headers(),body:JSON.stringify(d)}).then(function(r){ if(r.status===401){logout();throw Error('登录已过期');} if(!r.ok)throw Error('HTTP '+r.status); return r.json(); }); },
+  put: function(p,d) { return fetch(p,{method:'PUT',headers:API.headers(),body:JSON.stringify(d)}).then(function(r){ if(r.status===401){logout();throw Error('登录已过期');} if(!r.ok)throw Error('HTTP '+r.status); return r.json(); }); },
+  del: function(p) { return fetch(p,{method:'DELETE',headers:API.headers()}).then(function(r){ if(r.status===401){logout();throw Error('登录已过期');} if(!r.ok)throw Error('HTTP '+r.status); return r.json(); }); }
 };
 
 // ========== State ==========
 var S = {
   theme: localStorage.getItem('moyun-theme')||'light',
+  token: localStorage.getItem('moyun-token')||null,
+  user: null,
   books: [],
   currentBook: null,
   currentChapter: null,
   aiProvider: 'volcengine',
-  aiModel: null,       // 选择的模型名（null=使用默认）
+  aiModel: null,
   aiProviders: [],     // 来自 /api/ai/providers
   aiChat: [],
   autoSaveTimer: null,
@@ -101,6 +108,26 @@ function render(){
 }
 
 function _doRender(){
+  // Auth check - skip for login/register pages
+  if(!S.token || !S.user){
+    checkAuth(function(loggedIn){
+      if(!loggedIn){
+        var r=getRoute();
+        if(r.page==='register'){
+          registerPage(function(h){ setPage('注册',false,h); });
+        } else {
+          loginPage(function(h){ setPage('登录',false,h); });
+        }
+        return;
+      }
+      _routePage();
+    });
+    return;
+  }
+  _routePage();
+}
+
+function _routePage(){
   var r=getRoute();
   var page=r.page, params=r.params;
   var title='墨韵', showBack=false, noBottom=false;
@@ -114,6 +141,26 @@ function _doRender(){
     case 'write': title='创作'; writePage(function(h){ setPage(title,false,h); }); return;
     default: setPage('404',false,'<div class="empty-state"><p>页面未找到</p></div>');
   }
+}
+
+function checkAuth(cb){
+  if(!S.token){ cb(false); return; }
+  fetch('/api/auth/me',{headers:{'Authorization':'Bearer '+S.token}})
+    .then(function(r){
+      if(!r.ok){ S.token=null; localStorage.removeItem('moyun-token'); cb(false); return; }
+      return r.json();
+    })
+    .then(function(data){
+      if(data&&data.username){ S.user=data; cb(true); }
+      else { S.token=null; localStorage.removeItem('moyun-token'); cb(false); }
+    })
+    .catch(function(){ S.token=null; localStorage.removeItem('moyun-token'); cb(false); });
+}
+
+function logout(){
+  S.token=null; S.user=null;
+  localStorage.removeItem('moyun-token');
+  render();
 }
 
 function setPage(title,showBack,content){
@@ -724,23 +771,131 @@ function attachAI(){
   var inp=document.getElementById('ai-input'); if(inp)inp.focus();
 }
 
+// ========== LOGIN PAGE ==========
+function loginPage(cb){
+  var html='<div class="auth-page" style="padding:40px 20px;text-align:center">';
+  html+='<div style="font-size:64px;margin-bottom:12px">📖</div>';
+  html+='<h2 style="margin-bottom:4px">墨韵小说写作器</h2>';
+  html+='<p style="color:var(--text-muted);margin-bottom:24px;font-size:13px">登录后开始创作</p>';
+  html+='<div class="form-group"><label class="form-label">用户名</label>';
+  html+='<input class="form-input" id="login-user" placeholder="输入用户名" autofocus></div>';
+  html+='<div class="form-group"><label class="form-label">密码</label>';
+  html+='<input class="form-input" id="login-pass" type="password" placeholder="输入密码" onkeydown="if(event.key===\'Enter\')doLogin()"></div>';
+  html+='<button class="btn btn-primary" onclick="doLogin()" style="width:100%;margin-top:8px">登 录</button>';
+  html+='<div id="register-link" style="margin-top:16px;font-size:13px"></div>';
+  html+='<div id="login-msg" style="margin-top:12px;font-size:13px;color:var(--error)"></div></div>';
+  cb(html);
+  // Check if registration is open
+  fetch('/api/auth/settings').then(function(r){return r.json();}).then(function(d){
+    var el=document.getElementById('register-link');
+    if(el&&d.registration_open!==false){
+      el.innerHTML='<span style="color:var(--text-muted)">还没有账号？</span> <a href="#register" style="color:var(--accent)">注册</a>';
+    }
+  }).catch(function(){});
+}
+
+function doLogin(){
+  var user=document.getElementById('login-user');
+  var pass=document.getElementById('login-pass');
+  var msg=document.getElementById('login-msg');
+  if(!user||!pass) return;
+  if(!user.value.trim()||!pass.value.trim()){
+    if(msg) msg.textContent='请填写用户名和密码';
+    return;
+  }
+  fetch('/api/auth/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:user.value.trim(),password:pass.value})})
+    .then(function(r){ return r.json().then(function(d){ d.status=r.status; return d; }); })
+    .then(function(d){
+      if(d.token){
+        S.token=d.token; S.user=d.user;
+        localStorage.setItem('moyun-token',d.token);
+        if(msg) msg.textContent='';
+        render();
+      } else {
+        if(msg) msg.textContent=d.detail||'登录失败';
+      }
+    })
+    .catch(function(e){
+      if(msg) msg.textContent='请求失败: '+e.message;
+    });
+}
+
+// ========== REGISTER PAGE ==========
+function registerPage(cb){
+  var html='<div class="auth-page" style="padding:40px 20px;text-align:center">';
+  html+='<div style="font-size:48px;margin-bottom:12px">✍️</div>';
+  html+='<h2 style="margin-bottom:4px">注册账号</h2>';
+  html+='<p style="color:var(--text-muted);margin-bottom:24px;font-size:13px">注册后等待管理员审批</p>';
+  html+='<div class="form-group"><label class="form-label">用户名</label>';
+  html+='<input class="form-input" id="reg-user" placeholder="至少2个字符" autofocus></div>';
+  html+='<div class="form-group"><label class="form-label">密码</label>';
+  html+='<input class="form-input" id="reg-pass" type="password" placeholder="至少4个字符"></div>';
+  html+='<div class="form-group"><label class="form-label">确认密码</label>';
+  html+='<input class="form-input" id="reg-confirm" type="password" placeholder="再次输入密码" onkeydown="if(event.key===\'Enter\')doRegister()"></div>';
+  html+='<button class="btn btn-primary" onclick="doRegister()" style="width:100%;margin-top:8px">注 册</button>';
+  html+='<div id="reg-msg" style="margin-top:12px;font-size:13px;color:var(--error)"></div>';
+  html+='<div style="margin-top:16px;font-size:13px"><a href="#login" style="color:var(--accent)">← 返回登录</a></div></div>';
+  cb(html);
+}
+
+function doRegister(){
+  var user=document.getElementById('reg-user');
+  var pass=document.getElementById('reg-pass');
+  var confirm=document.getElementById('reg-confirm');
+  var msg=document.getElementById('reg-msg');
+  if(!user||!pass||!confirm) return;
+  if(!user.value.trim()||!pass.value.trim()){
+    if(msg) msg.textContent='请填写所有字段';
+    return;
+  }
+  if(pass.value!==confirm.value){
+    if(msg) msg.textContent='两次密码不一致';
+    return;
+  }
+  fetch('/api/auth/register',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:user.value.trim(),password:pass.value})})
+    .then(function(r){ return r.json().then(function(d){ d.status=r.status; return d; }); })
+    .then(function(d){
+      if(d.ok){
+        if(msg){ msg.style.color='var(--success, #27ae60)'; msg.textContent='✅ 注册成功！请等待管理员审核'; }
+        user.value=''; pass.value=''; confirm.value='';
+      } else {
+        if(msg) msg.textContent=d.detail||'注册失败';
+      }
+    })
+    .catch(function(e){
+      if(msg) msg.textContent='请求失败: '+e.message;
+    });
+}
+
 // ========== ME PAGE ==========
 function mePage(cb){
   API.get('/api/books').then(function(books){
     S.books=books;
     var totalWords=books.reduce(function(s,b){return s+(b.word_count||0);},0);
     var totalChs=books.reduce(function(s,b){return s+(b.chapter_count||0);},0);
+    var username=S.user?S.user.username:'用户';
+    var role=S.user&&S.user.role==='admin'?'管理员':'普通用户';
 
     var html='<div class="profile-header">';
-    html+='<div class="profile-avatar">墨</div>';
-    html+='<h3 style="font-size:18px;font-weight:600">墨韵用户</h3>';
-    html+='<span style="font-size:12px;color:var(--text-muted)">小说写作助手 v1.0</span></div>';
+    html+='<div class="profile-avatar">'+username.charAt(0).toUpperCase()+'</div>';
+    html+='<h3 style="font-size:18px;font-weight:600">'+esc(username)+'</h3>';
+    html+='<span style="font-size:12px;color:var(--text-muted)">'+role+' · 小说写作助手</span></div>';
 
     html+='<div class="stats-grid">';
     html+='<div class="stats-card"><div class="stats-value">'+books.length+'</div><div class="stats-label">作品数</div></div>';
     html+='<div class="stats-card"><div class="stats-value">'+fmt(totalWords)+'</div><div class="stats-label">总字数</div></div>';
     html+='<div class="stats-card"><div class="stats-value">'+totalChs+'</div><div class="stats-label">总章节</div></div>';
     html+='</div>';
+
+    // Admin panel
+    if(S.user&&S.user.role==='admin'){
+      html+='<div class="admin-section" style="margin:16px 0;padding:14px;background:var(--surface);border-radius:8px;border:1px solid var(--border)">';
+      html+='<h4 style="font-size:14px;font-weight:600;margin-bottom:12px">⚙️ 管理员控制</h4>';
+      html+='<div id="admin-pending" style="margin-bottom:12px">加载中...</div>';
+      html+='<div class="theme-toggle" style="margin-top:8px"><span class="label">🔓 开放注册</span>';
+      html+='<button class="toggle-switch" id="reg-toggle" onclick="toggleRegistration()"></button></div>';
+      html+='</div>';
+    }
 
     html+='<div class="theme-toggle"><span class="label">🌓 深色模式</span><button class="toggle-switch" id="theme-switch" onclick="toggleTheme()"></button></div>';
 
@@ -751,24 +906,72 @@ function mePage(cb){
       {icon:'👁️',text:'阅读设置',f:function(){toast('即将上线');}},
       {icon:'📊',text:'数据统计',f:function(){toast('即将上线');}},
       {icon:'💬',text:'帮助与反馈',f:function(){toast('即将上线');}},
-      {icon:'ℹ️',text:'关于墨韵',f:function(){toast('墨韵小说写作器 v1.0\\nAI-powered · 火山引擎 & DeepSeek\\nMade with ❤️');}}
+      {icon:'ℹ️',text:'关于墨韵',f:function(){toast('墨韵小说写作器 v1.0\nAI-powered · 火山引擎 & DeepSeek\nMade with ❤️');}}
     ];
     html+='<div class="menu-list">';
     menus.forEach(function(m,i){
       html+='<div class="menu-item" id="menu-'+i+'"><span style="font-size:20px">'+m.icon+'</span><span class="text">'+m.text+'</span><span class="chevron">›</span></div>';
     });
     html+='</div>';
-    html+='<div style="text-align:center;padding:20px 0"><span style="font-size:11px;color:var(--text-muted)">墨韵 · 让写作成为一种享受</span></div>';
+    html+='<div style="text-align:center;padding:16px 0">';
+    html+='<button class="btn btn-secondary" onclick="logout()" style="width:100%">🚪 退出登录</button>';
+    html+='</div>';
+    html+='<div style="text-align:center;padding:10px 0 20px"><span style="font-size:11px;color:var(--text-muted)">墨韵 · 让写作成为一种享受</span></div>';
     cb(html);
 
-    // Bind menu clicks after DOM update
     setTimeout(function(){
       menus.forEach(function(m,i){
         var el=document.getElementById('menu-'+i);
         if(el)el.onclick=m.f;
       });
+      if(S.user&&S.user.role==='admin') loadAdminPanel();
     },0);
   }).catch(function(e){ cb('<div class="empty-state"><p>加载失败</p></div>'); });
+}
+
+function loadAdminPanel(){
+  var el=document.getElementById('admin-pending');
+  if(!el) return;
+  fetch('/api/auth/settings').then(function(r){return r.json();}).then(function(s){
+    var toggle=document.getElementById('reg-toggle');
+    if(toggle) toggle.classList.toggle('active',s.registration_open!==false);
+  }).catch(function(){});
+  fetch('/api/auth/pending',{headers:{'Authorization':'Bearer '+S.token}})
+    .then(function(r){return r.json();})
+    .then(function(list){
+      if(!list||!list.length){ el.innerHTML='<span style="font-size:12px;color:var(--text-muted)">✅ 暂无待审批用户</span>'; return; }
+      var h='<div style="font-size:12px;font-weight:500;margin-bottom:6px">待审批用户 ('+list.length+')</div>';
+      list.forEach(function(u){
+        h+='<div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid var(--border)">';
+        h+='<span>'+esc(u.username)+'</span>';
+        h+='<span><button class="btn btn-small btn-primary" onclick="approveUser('+u.id+',\'approve\')">通过</button> ';
+        h+='<button class="btn btn-small btn-secondary" onclick="approveUser('+u.id+',\'reject\')">拒绝</button></span>';
+        h+='</div>';
+      });
+      el.innerHTML=h;
+    })
+    .catch(function(){ el.innerHTML='<span style="font-size:12px;color:var(--error)">加载失败</span>'; });
+}
+
+function approveUser(userId,action){
+  fetch('/api/auth/approve/'+userId,{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+S.token},body:JSON.stringify({action:action})})
+    .then(function(r){return r.json();})
+    .then(function(d){
+      if(d.ok){ toast(action==='approve'?'✅ 已通过审批':'已拒绝'); loadAdminPanel(); }
+      else toast('操作失败',true);
+    })
+    .catch(function(){ toast('请求失败',true); });
+}
+
+function toggleRegistration(){
+  var toggle=document.getElementById('reg-toggle');
+  var newVal=!toggle.classList.contains('active');
+  fetch('/api/auth/settings',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+S.token},body:JSON.stringify({registration_open:newVal})})
+    .then(function(r){return r.json();})
+    .then(function(d){
+      if(d.ok){ toggle.classList.toggle('active',newVal); toast(newVal?'注册已开放':'注册已关闭'); }
+    })
+    .catch(function(){ toast('操作失败',true); });
 }
 
 // ========== APP INIT ==========
@@ -803,6 +1006,11 @@ window.saveAIChatChar=saveAIChatChar;
 window.saveAIChatSetting=saveAIChatSetting;
 window.save=save;
 window.saveProviderModel=saveProviderModel;
+window.doLogin=doLogin;
+window.doRegister=doRegister;
+window.approveUser=approveUser;
+window.toggleRegistration=toggleRegistration;
+window.logout=logout;
 window.handleFileUpload=handleFileUpload;
 window.toggleFeishuInput=toggleFeishuInput;
 window.readFeishuDoc=readFeishuDoc;
