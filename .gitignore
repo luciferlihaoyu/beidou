@@ -8,6 +8,7 @@ venv/
 
 # Database
 data/
+!data/.gitkeep
 *.db
 *.db-journal
 *.db-wal

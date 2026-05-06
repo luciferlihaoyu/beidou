@@ -3,7 +3,11 @@ from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker, declarative_base
 import os
 
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./data/novelwriter.db")
+# Use __file__-relative path so DB path works regardless of CWD (e.g. in Zeabur containers)
+_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+_DATA_DIR = os.path.join(_BASE_DIR, "data")
+_DB_PATH = os.path.join(_DATA_DIR, "novelwriter.db")
+DATABASE_URL = os.getenv("DATABASE_URL", f"sqlite:///{_DB_PATH}")
 
 engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
 
@@ -26,8 +30,7 @@ def get_db():
         db.close()
 
 def init_db():
-    import os
-    os.makedirs("data", exist_ok=True)
+    os.makedirs(_DATA_DIR, exist_ok=True)
     # Import models so tables are created
     import models.user  # noqa
     import models.settings  # noqa
