@@ -3,8 +3,7 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from database import init_db
-from routes import books, chapters, characters, ai
-import os
+from routes import books, chapters, characters, ai, upload
 
 app = FastAPI(title="墨韵小说写作器", version="2.0.0")
 
@@ -13,6 +12,7 @@ app.include_router(books.router)
 app.include_router(chapters.router)
 app.include_router(characters.router)
 app.include_router(ai.router)
+app.include_router(upload.router)
 
 
 @app.on_event("startup")

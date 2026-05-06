@@ -517,6 +517,19 @@ function renderAIPage(cb,b,providers){
 
   // Model selector for current provider
   var curr=providers.find(function(p){return p.id===S.aiProvider;});
+
+  // File upload section
+  html+='<div class="upload-section" style="margin:10px 0 14px;padding:10px;background:var(--surface);border-radius:8px;border:1px dashed var(--border)">';
+  html+='<div style="font-size:13px;font-weight:500;margin-bottom:8px">📎 上传参考材料</div>';
+  html+='<div style="display:flex;gap:6px;margin-bottom:6px">';
+  html+='<label class="btn btn-small btn-outline" style="cursor:pointer;flex:1;text-align:center">📄 上传 Word 文档<input type="file" accept=".docx" style="display:none" onchange="handleFileUpload(this.files[0])"></label>';
+  html+='<button class="btn btn-small btn-outline" style="flex:1" onclick="toggleFeishuInput()">🔗 飞书文档</button>';
+  html+='</div>';
+  html+='<div id="upload-info" style="font-size:11px;color:var(--text-muted)"></div>';
+  html+='<div id="feishu-input-area" style="display:none;margin-top:6px">';
+  html+='<input class="form-input" id="feishu-url" placeholder="粘贴飞书文档链接..." style="margin-bottom:6px;font-size:12px">';
+  html+='<button class="btn btn-small btn-primary" onclick="readFeishuDoc()">读取文档</button>';
+  html+='</div></div>';
   if(curr&&curr.models&&curr.models.length>1){
     html+='<div class="model-selector"><label class="form-label" style="font-size:12px">选择模型</label><select class="form-select" id="ai-model-select" onchange="saveProviderModel()">';
     curr.models.forEach(function(m){
@@ -553,6 +566,69 @@ function renderAIPage(cb,b,providers){
 
 function setProvider(p){ S.aiProvider=p; S.aiModel=null; render(); }
 
+// File upload handlers
+S.uploadedContent=null;
+
+function handleFileUpload(file){
+  if(!file) return;
+  var info=document.getElementById('upload-info');
+  if(info) info.innerHTML='⏳ 正在解析 '+esc(file.name)+'...';
+  var form=new FormData();
+  form.append('file',file);
+  fetch('/api/upload/docx',{method:'POST',body:form})
+    .then(function(r){return r.json();})
+    .then(function(data){
+      if(data.ok){
+        S.uploadedContent=data.content;
+        if(info) info.innerHTML='✅ '+esc(file.name)+' 已解析 ('+data.length+'字) <button class="btn btn-small btn-outline" onclick="clearUpload()">× 清除</button>';
+        S.aiInfo=document.getElementById('feishu-input-area');
+        if(S.aiInfo) S.aiInfo.style.display='none';
+      } else {
+        if(info) info.innerHTML='❌ '+(data.detail||'解析失败');
+      }
+    })
+    .catch(function(e){
+      if(info) info.innerHTML='❌ '+(e.message||'请求失败');
+    });
+}
+
+var feishuVisible=false;
+function toggleFeishuInput(){
+  feishuVisible=!feishuVisible;
+  var el=document.getElementById('feishu-input-area');
+  if(el) el.style.display=feishuVisible?'block':'none';
+}
+
+function readFeishuDoc(){
+  var url=document.getElementById('feishu-url');
+  if(!url||!url.value.trim()) return;
+  var info=document.getElementById('upload-info');
+  if(info) info.innerHTML='⏳ 正在读取飞书文档...';
+  fetch('/api/upload/feishu',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url:url.value.trim()})})
+    .then(function(r){return r.json();})
+    .then(function(data){
+      if(data.ok){
+        S.uploadedContent=data.content;
+        if(info) info.innerHTML='✅ 飞书文档已读取 ('+data.length+'字) <button class="btn btn-small btn-outline" onclick="clearUpload()">× 清除</button>';
+        url.value='';
+        feishuVisible=false;
+        var el=document.getElementById('feishu-input-area');
+        if(el) el.style.display='none';
+      } else {
+        if(info) info.innerHTML='❌ '+(data.detail||'读取失败');
+      }
+    })
+    .catch(function(e){
+      if(info) info.innerHTML='❌ '+(e.message||'请求失败');
+    });
+}
+
+function clearUpload(){
+  S.uploadedContent=null;
+  var info=document.getElementById('upload-info');
+  if(info) info.innerHTML='';
+}
+
 function saveProviderModel(){
   var sel=document.getElementById('ai-model-select');
   if(sel) S.aiModel=sel.value||null;
@@ -566,7 +642,12 @@ function aiAction(act){
     expand:'请根据以下内容进行场景扩写\n'+(S.currentChapter&&S.currentChapter.content?S.currentChapter.content.slice(-500):'（请提供需要扩写的场景描述）')
   };
   S.aiChat.push({role:'user',text:prompts[act].slice(0,100)+'...'});
-  doAIChat(act,prompts[act]);
+  doAIChat(act,uploadPrefix()+(prompts[act]||''));
+}
+
+function uploadPrefix(){
+  if(S.uploadedContent) return '[参考材料]\n'+S.uploadedContent.slice(0,3000)+'\n\n---\n\n';
+  return '';
 }
 
 function aiSend(){
@@ -722,5 +803,10 @@ window.saveAIChatChar=saveAIChatChar;
 window.saveAIChatSetting=saveAIChatSetting;
 window.save=save;
 window.saveProviderModel=saveProviderModel;
+window.handleFileUpload=handleFileUpload;
+window.toggleFeishuInput=toggleFeishuInput;
+window.readFeishuDoc=readFeishuDoc;
+window.clearUpload=clearUpload;
+window.uploadPrefix=uploadPrefix;
 
 })();
