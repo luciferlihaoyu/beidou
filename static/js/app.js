@@ -17,6 +17,8 @@ var S = {
   currentBook: null,
   currentChapter: null,
   aiProvider: 'volcengine',
+  aiModel: null,       // 选择的模型名（null=使用默认）
+  aiProviders: [],     // 来自 /api/ai/providers
   aiChat: [],
   autoSaveTimer: null,
   _aiResult: ''
@@ -428,7 +430,7 @@ function editorAI(action){
     continue:'请根据以下内容自然续写下一段（500-1000字）：\n'+content.slice(-800)+(extra?'\n方向要求：'+extra:'')
   };
 
-  API.post('/api/ai/generate',{provider:S.aiProvider,action:action,prompt:prompts[action]})
+  API.post('/api/ai/generate',{provider:S.aiProvider,model:S.aiModel,action:action,prompt:prompts[action]})
     .then(function(data){
       loading.style.display='none';
       if(data.error){toast(data.error,true);return;}
@@ -486,14 +488,53 @@ function quickWrite(bookId){
 // ========== AI PAGE ==========
 function aiPage(cb){
   var b=S.currentBook;
+
+  // Load providers from API
+  API.get('/api/ai/providers').then(function(providers){
+    S.aiProviders=providers;
+    // Ensure current provider exists
+    if(!providers.find(function(p){return p.id===S.aiProvider;})){
+      S.aiProvider=providers.length?providers[0].id:'volcengine';
+      S.aiModel=null;
+    }
+    renderAIPage(cb,b,providers);
+  }).catch(function(){
+    S.aiProviders=[];
+    renderAIPage(cb,b,[]);
+  });
+}
+
+function renderAIPage(cb,b,providers){
   var html='<div class="provider-selector">';
-  html+='<button class="provider-option'+(S.aiProvider==='volcengine'?' active':'')+'" onclick="setProvider(\'volcengine\')">🌋 火山引擎</button>';
-  html+='<button class="provider-option'+(S.aiProvider==='deepseek'?' active':'')+'" onclick="setProvider(\'deepseek\')">🤖 DeepSeek</button>';
+  providers.forEach(function(p){
+    var active=S.aiProvider===p.id?' active':'';
+    html+='<button class="provider-option'+active+'" onclick="setProvider(\''+p.id+'\')">'+p.name+'</button>';
+  });
+  if(!providers.length){
+    html+='<span style="font-size:12px;color:var(--text-muted)">暂无可用提供商</span>';
+  }
   html+='</div>';
+
+  // Model selector for current provider
+  var curr=providers.find(function(p){return p.id===S.aiProvider;});
+  if(curr&&curr.models&&curr.models.length>1){
+    html+='<div class="model-selector"><label class="form-label" style="font-size:12px">选择模型</label><select class="form-select" id="ai-model-select" onchange="saveProviderModel()">';
+    curr.models.forEach(function(m){
+      var sel=(S.aiModel||curr.model)===m?' selected':'';
+      html+='<option value="'+m+'"'+sel+'>'+m+'</option>';
+    });
+    html+='</select></div>';
+  }
+
   if(b) html+='<div style="font-size:13px;color:var(--text-secondary);margin-bottom:14px">📖 当前作品：<b>'+esc(b.title)+'</b> · '+(b.chapter_count||0)+'章 · '+fmt(b.word_count)+'字</div>';
 
   html+='<div class="char-grid" style="margin-bottom:16px">';
-  var items=[{icon:'👤',label:'人物生成',sub:'角色设定',act:'characters'},{icon:'🌍',label:'世界观',sub:'世界观设定',act:'settings'},{icon:'📋',label:'大纲生成',sub:'剧情大纲',act:'outline'},{icon:'✏️',label:'场景扩写',sub:'段落扩写',act:'expand'}];
+  var items=[
+    {icon:'👤',label:'人物生成',sub:'角色设定',act:'characters'},
+    {icon:'🌍',label:'世界观',sub:'世界观设定',act:'settings'},
+    {icon:'📋',label:'大纲生成',sub:'剧情大纲',act:'outline'},
+    {icon:'✏️',label:'场景扩写',sub:'段落扩写',act:'expand'}
+  ];
   items.forEach(function(t){
     html+='<div class="char-grid-item" onclick="aiAction(\''+t.act+'\')"><div class="icon">'+t.icon+'</div><div class="label">'+t.label+'</div><div class="sub">'+t.sub+'</div></div>';
   });
@@ -504,10 +545,18 @@ function aiPage(cb){
   html+='<input class="chat-input" id="ai-input" placeholder="输入创作需求，AI帮你完成..." onkeydown="if(event.key===\'Enter\')aiSend()">';
   html+='<button class="chat-send" onclick="aiSend()">➤</button></div>';
   html+='<div style="height:60px"></div>';
+  html+='<div style="text-align:center;padding:8px 0;font-size:11px;color:var(--text-muted)">';
+  html+='💡 在 <code>services/ai_providers.py</code> 中添加自定义提供商或模型';
+  html+='</div>';
   cb(html);
 }
 
-function setProvider(p){ S.aiProvider=p; render(); }
+function setProvider(p){ S.aiProvider=p; S.aiModel=null; render(); }
+
+function saveProviderModel(){
+  var sel=document.getElementById('ai-model-select');
+  if(sel) S.aiModel=sel.value||null;
+}
 
 function aiAction(act){
   var prompts={
@@ -531,7 +580,9 @@ function aiSend(){
 function doAIChat(action,prompt){
   S.aiChat.push({role:'ai',text:'...',loading:true});
   renderAIChat();
-  API.post('/api/ai/generate',{provider:S.aiProvider,action:action,prompt:prompt})
+  var body={provider:S.aiProvider,action:action,prompt:prompt};
+  if(S.aiModel) body.model=S.aiModel;
+  API.post('/api/ai/generate',body)
     .then(function(data){
       S.aiChat.pop();
       if(data.error){ S.aiChat.push({role:'ai',text:'❌ '+data.error,error:true}); }
@@ -670,5 +721,6 @@ window.copyText=copyText;
 window.saveAIChatChar=saveAIChatChar;
 window.saveAIChatSetting=saveAIChatSetting;
 window.save=save;
+window.saveProviderModel=saveProviderModel;
 
 })();
