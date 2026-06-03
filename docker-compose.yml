@@ -1,0 +1,46 @@
+version: "3.9"
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: beidou-backend
+    restart: unless-stopped
+    environment:
+      - APP_NAME=${APP_NAME:-北斗 (Beidou)}
+      - APP_VERSION=${APP_VERSION:-0.1.0}
+      - DEBUG=${DEBUG:-false}
+      - SECRET_KEY=${SECRET_KEY:-change-me}
+      - DATABASE_URL=${DATABASE_URL:-sqlite+aiosqlite:///./data/novelwriter.db}
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY:-change-me}
+      - JWT_ALGORITHM=${JWT_ALGORITHM:-HS256}
+      - JWT_ACCESS_TOKEN_EXPIRE_MINUTES=${JWT_ACCESS_TOKEN_EXPIRE_MINUTES:-1440}
+      - DEFAULT_ADMIN_USERNAME=${DEFAULT_ADMIN_USERNAME:-admin}
+      - DEFAULT_ADMIN_PASSWORD=${DEFAULT_ADMIN_PASSWORD:-admin123}
+      - DEFAULT_ADMIN_EMAIL=${DEFAULT_ADMIN_EMAIL:-admin@novelwriter.local}
+      - OPENCLAW_WS_URL=${OPENCLAW_WS_URL:-ws://openclaw:4000/ws}
+      - CORS_ORIGINS=${CORS_ORIGINS:-["http://localhost"]}
+    volumes:
+      - backend_data:/app/data
+    expose:
+      - "8000"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: beidou-frontend
+    restart: unless-stopped
+    ports:
+      - "${FRONTEND_PORT:-8080}:80"
+    depends_on:
+      - backend
+
+volumes:
+  backend_data:

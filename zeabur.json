@@ -1,5 +1,0 @@
-{
-  "name": "墨韵小说写作器",
-  "description": "Novel Writer - AI-powered novel writing assistant",
-  "start": "uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000}"
-}

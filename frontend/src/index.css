@@ -1,0 +1,292 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ── Base Theme ─────────────────────────────── */
+@layer base {
+  :root {
+    --background: 240 30% 6%;
+    --foreground: 40 30% 92%;
+    --card: 240 30% 10%;
+    --card-foreground: 40 30% 92%;
+    --popover: 240 30% 10%;
+    --popover-foreground: 40 30% 92%;
+    --primary: 34 55% 63%;
+    --primary-foreground: 240 30% 6%;
+    --secondary: 240 20% 16%;
+    --secondary-foreground: 40 30% 85%;
+    --muted: 240 20% 16%;
+    --muted-foreground: 40 10% 55%;
+    --accent: 240 20% 18%;
+    --accent-foreground: 40 30% 92%;
+    --destructive: 0 63% 40%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 240 15% 22%;
+    --input: 240 15% 22%;
+    --ring: 34 55% 63%;
+    --radius: 0.5rem;
+    --chart-1: 34 55% 63%;
+    --chart-2: 160 60% 45%;
+    --chart-3: 260 60% 55%;
+    --chart-4: 195 75% 48%;
+    --chart-5: 280 65% 55%;
+  }
+}
+
+/* ── Base Styles ────────────────────────────── */
+@layer base {
+  * {
+    border-color: hsl(var(--border));
+  }
+  body {
+    color: hsl(var(--foreground));
+    overflow: hidden;
+    font-family: 'Inter', 'Noto Serif SC', system-ui, sans-serif;
+    background: linear-gradient(135deg, #0a0a1a 0%, #1a1a2e 50%, #0f0f23 100%);
+    min-height: 100vh;
+  }
+
+  /* 输入框深色底 + 金色 focus 边框 */
+  input,
+  textarea,
+  select {
+    background: rgba(26, 26, 46, 0.6);
+    border-color: rgba(212, 165, 116, 0.15);
+    color: #e8e8e8;
+  }
+
+  input:focus,
+  textarea:focus,
+  select:focus {
+    border-color: rgba(212, 165, 116, 0.4);
+    outline: none;
+    box-shadow: 0 0 0 2px rgba(212, 165, 116, 0.1);
+  }
+}
+
+/* ── 星空粒子动画 ──────────────────────────── */
+@layer components {
+  .starfield-bg {
+    position: fixed;
+    inset: 0;
+    z-index: 0;
+    background: linear-gradient(180deg, #070b1a 0%, #0f1328 40%, #1a1a2e 100%);
+    overflow: hidden;
+  }
+
+  /* 主星层 — 50+ 闪烁小白点 */
+  .starfield-bg::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background-image:
+      radial-gradient(2px 2px at 20px 30px, #eee, transparent),
+      radial-gradient(2px 2px at 40px 70px, rgba(255,255,255,0.8), transparent),
+      radial-gradient(1px 1px at 90px 40px, #fff, transparent),
+      radial-gradient(1px 1px at 130px 80px, rgba(255,255,255,0.6), transparent),
+      radial-gradient(2px 2px at 160px 30px, #ddd, transparent),
+      radial-gradient(2px 2px at 200px 60px, #fff, transparent),
+      radial-gradient(1px 1px at 250px 20px, rgba(255,255,255,0.7), transparent),
+      radial-gradient(2px 2px at 300px 70px, #eee, transparent),
+      radial-gradient(1px 1px at 350px 45px, #fff, transparent),
+      radial-gradient(2px 2px at 400px 90px, rgba(255,255,255,0.5), transparent),
+      radial-gradient(2px 2px at 450px 15px, #eee, transparent),
+      radial-gradient(1px 1px at 500px 55px, #fff, transparent),
+      radial-gradient(2px 2px at 550px 35px, rgba(255,255,255,0.8), transparent),
+      radial-gradient(1px 1px at 600px 75px, #ddd, transparent),
+      radial-gradient(2px 2px at 650px 25px, #fff, transparent),
+      radial-gradient(1px 1px at 700px 50px, rgba(255,255,255,0.6), transparent),
+      radial-gradient(2px 2px at 750px 85px, #eee, transparent),
+      radial-gradient(1px 1px at 800px 40px, #fff, transparent),
+      radial-gradient(2px 2px at 20px 150px, rgba(255,255,255,0.7), transparent),
+      radial-gradient(1px 1px at 80px 180px, #fff, transparent),
+      radial-gradient(2px 2px at 150px 120px, #eee, transparent),
+      radial-gradient(1px 1px at 220px 160px, #fff, transparent),
+      radial-gradient(2px 2px at 310px 140px, rgba(255,255,255,0.6), transparent),
+      radial-gradient(1px 1px at 420px 170px, #eee, transparent),
+      radial-gradient(2px 2px at 530px 130px, #fff, transparent),
+      radial-gradient(1px 1px at 640px 190px, rgba(255,255,255,0.5), transparent),
+      radial-gradient(2px 2px at 720px 110px, #ddd, transparent),
+      /* 第二组 — 更多分布 */
+      radial-gradient(1px 1px at 35px 240px, #fff, transparent),
+      radial-gradient(2px 2px at 110px 280px, rgba(255,255,255,0.7), transparent),
+      radial-gradient(1px 1px at 190px 250px, #eee, transparent),
+      radial-gradient(2px 2px at 280px 300px, #fff, transparent),
+      radial-gradient(1px 1px at 370px 260px, rgba(255,255,255,0.5), transparent),
+      radial-gradient(2px 2px at 460px 310px, #ddd, transparent),
+      radial-gradient(1px 1px at 550px 280px, #fff, transparent),
+      radial-gradient(2px 2px at 630px 290px, rgba(255,255,255,0.6), transparent),
+      radial-gradient(1px 1px at 710px 250px, #eee, transparent),
+      radial-gradient(2px 2px at 780px 310px, #fff, transparent),
+      radial-gradient(1px 1px at 50px 350px, rgba(255,255,255,0.4), transparent),
+      radial-gradient(1px 1px at 140px 380px, #fff, transparent),
+      radial-gradient(2px 2px at 230px 360px, #eee, transparent),
+      radial-gradient(1px 1px at 340px 390px, rgba(255,255,255,0.6), transparent),
+      radial-gradient(1px 1px at 440px 350px, #fff, transparent),
+      radial-gradient(2px 2px at 520px 380px, #ddd, transparent),
+      radial-gradient(1px 1px at 610px 370px, #fff, transparent),
+      radial-gradient(1px 1px at 690px 340px, rgba(255,255,255,0.5), transparent),
+      radial-gradient(2px 2px at 770px 370px, #eee, transparent);
+    animation: twinkle 4s ease-in-out infinite alternate;
+  }
+
+  .starfield-bg::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background-image:
+      radial-gradient(1px 1px at 60px 50px, #fff, transparent),
+      radial-gradient(1px 1px at 180px 90px, #eee, transparent),
+      radial-gradient(2px 2px at 270px 40px, #fff, transparent),
+      radial-gradient(1px 1px at 360px 100px, rgba(255,255,255,0.5), transparent),
+      radial-gradient(2px 2px at 480px 20px, #eee, transparent),
+      radial-gradient(1px 1px at 570px 80px, #fff, transparent),
+      radial-gradient(1px 1px at 680px 60px, rgba(255,255,255,0.7), transparent),
+      radial-gradient(2px 2px at 770px 30px, #ddd, transparent),
+      radial-gradient(1px 1px at 30px 200px, #fff, transparent),
+      radial-gradient(2px 2px at 140px 220px, #eee, transparent),
+      radial-gradient(1px 1px at 260px 210px, #fff, transparent),
+      radial-gradient(2px 2px at 390px 230px, rgba(255,255,255,0.4), transparent),
+      radial-gradient(1px 1px at 510px 190px, #eee, transparent),
+      radial-gradient(2px 2px at 620px 240px, #fff, transparent),
+      radial-gradient(1px 1px at 740px 200px, rgba(255,255,255,0.6), transparent);
+    animation: twinkle 6s ease-in-out infinite alternate-reverse;
+  }
+
+  @keyframes twinkle {
+    0% { opacity: 0.6; }
+    50% { opacity: 1; }
+    100% { opacity: 0.7; }
+  }
+
+  /* 流星效果 */
+  .shooting-star {
+    position: fixed;
+    width: 2px;
+    height: 2px;
+    background: #d4a574;
+    border-radius: 50%;
+    z-index: 1;
+    box-shadow: 0 0 6px 2px rgba(212, 165, 116, 0.6);
+    animation: shoot 3s ease-out infinite;
+  }
+
+  .shooting-star:nth-child(1) { top: 10%; left: 70%; animation-delay: 0s; }
+  .shooting-star:nth-child(2) { top: 25%; left: 50%; animation-delay: 4s; }
+  .shooting-star:nth-child(3) { top: 15%; left: 85%; animation-delay: 8s; }
+
+  @keyframes shoot {
+    0% {
+      transform: translateX(0) translateY(0) scale(1);
+      opacity: 1;
+    }
+    10% {
+      transform: translateX(-100px) translateY(40px) scale(0.5);
+      opacity: 0.3;
+    }
+    15% {
+      transform: translateX(-200px) translateY(80px) scale(0);
+      opacity: 0;
+    }
+    100% {
+      transform: translateX(-200px) translateY(80px) scale(0);
+      opacity: 0;
+    }
+  }
+}
+
+/* ── 毛玻璃卡片 ────────────────────────────── */
+@layer components {
+  .glass-card {
+    background: rgba(26, 26, 46, 0.7);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border: 1px solid rgba(212, 165, 116, 0.2);
+    border-radius: 12px;
+  }
+
+  /* 金色渐变按钮 */
+  .btn-gold {
+    background: linear-gradient(135deg, #d4a574, #b8864e);
+    border: none;
+    border-radius: 8px;
+    color: #1a1a2e;
+    font-weight: 600;
+    transition: all 0.3s ease;
+  }
+
+  .btn-gold:hover {
+    background: linear-gradient(135deg, #e8c89e, #d4a574);
+    box-shadow: 0 4px 20px rgba(212, 165, 116, 0.3);
+    transform: translateY(-1px);
+  }
+
+  .btn-gold:active {
+    transform: translateY(0);
+  }
+
+  /* 金边卡片 */
+  .gold-border {
+    border: 1px solid transparent;
+    background: linear-gradient(rgba(26, 26, 46, 0.8), rgba(26, 26, 46, 0.8)) padding-box,
+                linear-gradient(135deg, #d4a574, #b8864e, #d4a574) border-box;
+    border-radius: var(--radius);
+  }
+
+  /* 金色渐变文字 */
+  .gold-text {
+    background: linear-gradient(135deg, #e8c89e 0%, #d4a574 50%, #b8864e 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+
+  /* 北斗 Logo 样式 */
+  .beidou-logo {
+    font-family: 'Noto Serif SC', 'Source Han Serif SC', Georgia, serif;
+    color: #d4a574;
+    text-shadow: 0 0 20px rgba(212, 165, 116, 0.3);
+  }
+
+  /* ── 深色细滚动条 ──────────────────────── */
+  .custom-scrollbar::-webkit-scrollbar {
+    width: 6px;
+  }
+  .custom-scrollbar::-webkit-scrollbar-track {
+    background: rgba(26, 26, 46, 0.3);
+  }
+  .custom-scrollbar::-webkit-scrollbar-thumb {
+    background: rgba(212, 165, 116, 0.25);
+    border-radius: 3px;
+  }
+  .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+    background: rgba(212, 165, 116, 0.45);
+  }
+
+  /* Firefox 滚动条 */
+  .custom-scrollbar {
+    scrollbar-width: thin;
+    scrollbar-color: rgba(212, 165, 116, 0.25) rgba(26, 26, 46, 0.3);
+  }
+}
+
+/* ── 动画 ──────────────────────────────────── */
+@layer utilities {
+  .animate-fade-in {
+    animation: fadeIn 0.5s ease-out;
+  }
+
+  @keyframes fadeIn {
+    from { opacity: 0; transform: translateY(8px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  .animate-slide-up {
+    animation: slideUp 0.4s ease-out;
+  }
+
+  @keyframes slideUp {
+    from { opacity: 0; transform: translateY(16px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+}
