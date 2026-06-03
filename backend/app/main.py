@@ -4,8 +4,12 @@ import logging
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
-from fastapi import FastAPI
+from pathlib import Path
+
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
 from app.api import admin, agents, ai, auth, backup, chapters, database, export, knowledge, models_config, novels, settings
 from app.core.config import get_settings
@@ -73,6 +77,22 @@ def create_app() -> FastAPI:
     @app.get("/api/health")
     async def health():
         return {"status": "ok", "version": settings.APP_VERSION}
+
+    # ── 静态文件 & SPA 回退 ──
+    static_dir = Path(__file__).parent.parent / "static"
+    if static_dir.exists() and (static_dir / "index.html").exists():
+        # 挂载静态资源
+        app.mount("/assets", StaticFiles(directory=str(static_dir / "assets")), name="static-assets")
+
+        @app.get("/{full_path:path}")
+        async def serve_spa(request: Request, full_path: str):
+            """SPA 回退：非 API 路径一律返回 index.html"""
+            if full_path.startswith("api/"):
+                return None
+            file_path = static_dir / full_path
+            if file_path.is_file():
+                return FileResponse(str(file_path))
+            return FileResponse(str(static_dir / "index.html"))
 
     return app
 
