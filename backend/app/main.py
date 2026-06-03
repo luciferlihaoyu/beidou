@@ -43,18 +43,18 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
 def create_app() -> FastAPI:
     """Build and return the FastAPI application instance."""
-    settings = get_settings()
+    app_settings = get_settings()
 
     app = FastAPI(
-        title=settings.APP_NAME,
-        version=settings.APP_VERSION,
+        title=app_settings.APP_NAME,
+        version=app_settings.APP_VERSION,
         lifespan=lifespan,
     )
 
     # CORS
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=[str(o) for o in settings.CORS_ORIGINS],
+        allow_origins=[str(o) for o in app_settings.CORS_ORIGINS],
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
@@ -76,7 +76,7 @@ def create_app() -> FastAPI:
 
     @app.get("/api/health")
     async def health():
-        return {"status": "ok", "version": settings.APP_VERSION}
+        return {"status": "ok", "version": app_settings.APP_VERSION}
 
     # ── 静态文件 & SPA 回退 ──
     static_dir = Path(__file__).parent.parent / "static"
