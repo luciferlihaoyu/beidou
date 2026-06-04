@@ -13,11 +13,11 @@ class Settings(BaseSettings):
     APP_NAME: str = "北斗 (Beidou)"
     APP_VERSION: str = "0.1.0"
     DEBUG: bool = False
-    SECRET_KEY: str
+    SECRET_KEY: str = "change-me-in-production"
     DATABASE_URL: str = "sqlite+aiosqlite:///./novelwriter.db"
 
     # JWT
-    JWT_SECRET_KEY: str
+    JWT_SECRET_KEY: str = "change-me-in-production"
     JWT_ALGORITHM: str = "HS256"
     JWT_ACCESS_TOKEN_EXPIRE_MINUTES: int = 1440
 

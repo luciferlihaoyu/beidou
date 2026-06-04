@@ -85,10 +85,8 @@ def create_app() -> FastAPI:
         app.mount("/assets", StaticFiles(directory=str(static_dir / "assets")), name="static-assets")
 
         @app.get("/{full_path:path}")
-        async def serve_spa(request: Request, full_path: str):
-            """SPA 回退：非 API 路径一律返回 index.html"""
-            if full_path.startswith("api/"):
-                return None
+        async def serve_spa(full_path: str):
+            """SPA 回退：非 API 路径返回 index.html"""
             file_path = static_dir / full_path
             if file_path.is_file():
                 return FileResponse(str(file_path))

@@ -1,0 +1,9 @@
+node_modules/
+.git/
+*.log
+.env
+.DS_Store
+frontend/node_modules/
+backend/.env
+backend/__pycache__/
+**/__pycache__/
