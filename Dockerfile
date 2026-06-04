@@ -32,15 +32,15 @@ COPY --from=frontend-builder /app/dist /app/static
 RUN mkdir -p /app/data
 
 # 环境变量（可在 Zeabur 中覆盖）
-ENV APP_NAME=北斗
-ENV APP_VERSION=1.0.0
-ENV DATABASE_URL=sqlite+aiosqlite:///./data/novelwriter.db
-ENV SECRET_KEY=change-me-in-production
-ENV JWT_SECRET_KEY=change-me-in-production
-ENV DEFAULT_ADMIN_USERNAME=admin
-ENV DEFAULT_ADMIN_PASSWORD=admin123
-ENV DEFAULT_ADMIN_EMAIL=admin@beidou.local
-ENV CORS_ORIGINS=["*"]
+ENV APP_NAME=北斗 \
+    APP_VERSION=1.0.0 \
+    DATABASE_URL=sqlite+aiosqlite:///./data/novelwriter.db \
+    SECRET_KEY=change-me-in-production \
+    JWT_SECRET_KEY=change-me-in-production \
+    DEFAULT_ADMIN_USERNAME=admin \
+    DEFAULT_ADMIN_PASSWORD=admin123 \
+    DEFAULT_ADMIN_EMAIL=admin@beidou.local \
+    CORS_ORIGINS='["*"]'
 
 EXPOSE 8080
 
