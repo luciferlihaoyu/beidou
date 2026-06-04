@@ -6,10 +6,19 @@ from app.core.config import get_settings
 
 settings = get_settings()
 
+db_url = settings.DATABASE_URL
+
+# 自动处理 Zeabur 提供的 postgres:// 格式
+if db_url.startswith("postgres://"):
+    db_url = db_url.replace("postgres://", "postgresql+asyncpg://", 1)
+elif db_url.startswith("postgresql://") and "+asyncpg" not in db_url:
+    db_url = db_url.replace("postgresql://", "postgresql+asyncpg://", 1)
+
 engine = create_async_engine(
-    settings.DATABASE_URL,
+    db_url,
     echo=settings.DEBUG,
     future=True,
+    pool_pre_ping=True,
 )
 
 async_session_factory = async_sessionmaker(
