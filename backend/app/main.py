@@ -1,15 +1,18 @@
 """FastAPI application factory and lifecycle."""
 
 import logging
+import time
 from contextlib import asynccontextmanager
-from typing import AsyncGenerator
+from datetime import datetime, timezone
+from typing import AsyncGenerator, Optional
 
 from pathlib import Path
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from sqlalchemy import text
 
 from app.api import admin, agents, ai, auth, backup, chapters, database, export, knowledge, models_config, novels, settings
 from app.core.config import get_settings
@@ -18,6 +21,9 @@ from app.db.session import engine
 from app.services.startup import ensure_default_admin
 
 logger = logging.getLogger(__name__)
+
+# Track startup time for health endpoint
+_startup_time = time.time()
 
 
 @asynccontextmanager
@@ -28,12 +34,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         await conn.run_sync(Base.metadata.create_all)
 
     # Ensure the default admin account exists
-    async with engine.begin() as conn:
-        from sqlalchemy.ext.asyncio import AsyncSession
-        from app.db.session import async_session_factory
-        session = async_session_factory(bind=conn)
+    from app.db.session import async_session_factory
+    async with async_session_factory() as session:
         await ensure_default_admin(session)
-        await session.close()
 
     logger.info("Startup complete.")
     yield
@@ -76,7 +79,27 @@ def create_app() -> FastAPI:
 
     @app.get("/api/health")
     async def health():
-        return {"status": "ok", "version": app_settings.APP_VERSION}
+        """Health check with database status, version, and uptime."""
+        db_status = "ok"
+        db_error: Optional[str] = None
+        try:
+            async with engine.connect() as conn:
+                await conn.execute(text("SELECT 1"))
+                await conn.commit()
+        except Exception as exc:
+            db_status = "error"
+            db_error = str(exc)
+
+        uptime_seconds = int(time.time() - _startup_time)
+
+        return {
+            "status": "ok",
+            "version": app_settings.APP_VERSION,
+            "database": db_status,
+            "database_error": db_error,
+            "uptime_seconds": uptime_seconds,
+            "server_time": datetime.now(timezone.utc).isoformat(),
+        }
 
     # ── 静态文件 & SPA 回退 ──
     static_dir = Path(__file__).parent.parent / "static"

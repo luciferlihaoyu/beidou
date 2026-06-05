@@ -14,6 +14,7 @@ interface EditorState {
   autoSaveTimer: ReturnType<typeof setTimeout> | null
 
   loadNovels: () => Promise<void>
+  searchNovels: (q: string) => Promise<void>
   selectNovel: (id: number) => Promise<void>
   createNovel: (data: Partial<NovelOut>) => Promise<NovelOut>
   updateNovel: (id: number, data: Partial<NovelOut>) => Promise<void>
@@ -48,6 +49,12 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   loadNovels: async () => {
     set({ loading: true })
     const novels = await novelsApi.list()
+    set({ novels, loading: false })
+  },
+
+  searchNovels: async (q: string) => {
+    set({ loading: true })
+    const novels = await novelsApi.list(q)
     set({ novels, loading: false })
   },
 

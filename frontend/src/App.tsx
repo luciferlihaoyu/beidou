@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { Loader2 } from 'lucide-react'
 import { AppLayout } from '@/components/layout/AppLayout'
+import { ErrorBoundary } from '@/components/ErrorBoundary'
 import { LoginPage } from '@/pages/LoginPage'
 import { RegisterPage } from '@/pages/RegisterPage'
 import { NovelListPage } from '@/pages/NovelListPage'
@@ -67,6 +68,7 @@ export default function App() {
 
   return (
     <BrowserRouter>
+    <ErrorBoundary>
       <Routes>
         {/* 公开路由 */}
         <Route path="/login" element={user ? <Navigate to="/" replace /> : <LoginPage />} />
@@ -90,6 +92,7 @@ export default function App() {
         {/* 404 */}
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
+    </ErrorBoundary>
     </BrowserRouter>
   )
 }

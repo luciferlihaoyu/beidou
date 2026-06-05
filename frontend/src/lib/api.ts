@@ -93,7 +93,7 @@ export interface NovelOut {
 }
 
 export const novelsApi = {
-  list: () => apiFetch<NovelOut[]>('/novels'),
+  list: (q?: string) => apiFetch<NovelOut[]>(`/novels${q ? `?q=${encodeURIComponent(q)}` : ''}`),
   get: (id: number) => apiFetch<NovelOut>(`/novels/${id}`),
   create: (body: Partial<NovelOut>) =>
     apiFetch<NovelOut>('/novels', { method: 'POST', body: JSON.stringify(body) }),
@@ -207,9 +207,27 @@ export interface AiChatMessage {
 
 export const aiApi = {
   chat: (novelId: number, messages: AiChatMessage[], agentId?: number) =>
-    apiFetch<{ response: string }>(`/ai/chat`, {
+    apiFetch<{ response: string }>(`/ai/chat-http`, {
       method: 'POST',
       body: JSON.stringify({ novel_id: novelId, messages, agent_id: agentId }),
+    }),
+
+  continue: (novelId: number, chapterId: number, agentId?: number) =>
+    apiFetch<{ response: string }>('/ai/continue', {
+      method: 'POST',
+      body: JSON.stringify({ novel_id: novelId, chapter_id: chapterId, agent_id: agentId }),
+    }),
+
+  outline: (novelId: number, agentId?: number) =>
+    apiFetch<{ response: string }>('/ai/outline', {
+      method: 'POST',
+      body: JSON.stringify({ novel_id: novelId, agent_id: agentId }),
+    }),
+
+  review: (novelId: number, chapterId: number, agentId?: number) =>
+    apiFetch<{ response: string }>('/ai/review', {
+      method: 'POST',
+      body: JSON.stringify({ novel_id: novelId, chapter_id: chapterId, agent_id: agentId }),
     }),
 }
 

@@ -1,9 +1,12 @@
 """Application configuration via pydantic-settings."""
 
+import logging
 from functools import lru_cache
 from typing import List
 
 from pydantic_settings import BaseSettings
+
+logger = logging.getLogger(__name__)
 
 
 class Settings(BaseSettings):
@@ -38,4 +41,21 @@ class Settings(BaseSettings):
 @lru_cache()
 def get_settings() -> Settings:
     """Return cached Settings singleton."""
-    return Settings()
+    s = Settings()
+    # Warn if secret keys are still at defaults
+    if s.SECRET_KEY == "change-me-in-production":
+        logger.warning(
+            "SECRET_KEY is set to the default value. "
+            "Set a strong SECRET_KEY in production environment variables."
+        )
+    if s.JWT_SECRET_KEY == "change-me-in-production":
+        logger.warning(
+            "JWT_SECRET_KEY is set to the default value. "
+            "Set a strong JWT_SECRET_KEY in production environment variables."
+        )
+    if s.DEFAULT_ADMIN_PASSWORD == "admin123":
+        logger.warning(
+            "DEFAULT_ADMIN_PASSWORD is set to the default 'admin123'. "
+            "Change it via DEFAULT_ADMIN_PASSWORD environment variable."
+        )
+    return s

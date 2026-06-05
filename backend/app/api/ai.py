@@ -31,11 +31,43 @@ router = APIRouter()
 async def ai_chat_websocket(websocket: WebSocket):
     """WebSocket endpoint for streaming AI chat.
 
+    Client connects with ?token=<JWT> query parameter for authentication.
     Client sends: {"type": "chat", "agent_id": 1, "content": "...", "messages": [...]}
     Server streams back: {"type": "chat_response", "content": "...", "done": false/true}
     """
+    # Verify JWT token before accepting
+    from jose import JWTError, jwt
+    from app.core.config import get_settings
+
+    app_settings = get_settings()
+    token = websocket.query_params.get("token")
+    if not token:
+        await websocket.close(code=4001, reason="Missing token")
+        return
+
+    try:
+        payload = jwt.decode(token, app_settings.JWT_SECRET_KEY, algorithms=[app_settings.JWT_ALGORITHM])
+        user_id: int = payload.get("sub")
+        if user_id is None:
+            await websocket.close(code=4001, reason="Invalid token")
+            return
+    except JWTError:
+        await websocket.close(code=4001, reason="Invalid token")
+        return
+
+    # Verify user exists and is approved
+    async with async_session_factory() as db:
+        result = await db.execute(select(User).where(User.id == user_id))
+        user = result.scalar_one_or_none()
+        if user is None:
+            await websocket.close(code=4001, reason="User not found")
+            return
+        if user.role != "admin" and user.status != "approved":
+            await websocket.close(code=4003, reason="Account pending approval")
+            return
+
     await websocket.accept()
-    logger.info("AI chat WebSocket connected")
+    logger.info("AI chat WebSocket connected (user %d)", user_id)
 
     try:
         while True:
@@ -185,7 +217,8 @@ async def ai_chat_http(
     db: AsyncSession = Depends(get_db),
 ):
     """Non-streaming AI chat endpoint."""
-    return await _call_ai(body.agent_id, body.messages, db)
+    content = await _call_ai(body.agent_id, body.messages, db)
+    return {"response": content}
 
 
 # ---------------------------------------------------------------------------
@@ -230,8 +263,8 @@ async def ai_continue(
         }
     ]
 
-    response_text = await _call_ai(body.agent_id, prompt_messages, db)
-    return {"response": response_text}
+    content = await _call_ai(body.agent_id, prompt_messages, db)
+    return {"response": content}
 
 
 # ---------------------------------------------------------------------------
@@ -287,8 +320,8 @@ async def ai_outline(
         }
     ]
 
-    response_text = await _call_ai(body.agent_id, prompt_messages, db)
-    return {"response": response_text}
+    content = await _call_ai(body.agent_id, prompt_messages, db)
+    return {"response": content}
 
 
 # ---------------------------------------------------------------------------
@@ -350,8 +383,8 @@ async def ai_review(
         }
     ]
 
-    response_text = await _call_ai(body.agent_id, prompt_messages, db)
-    return {"response": response_text}
+    content = await _call_ai(body.agent_id, prompt_messages, db)
+    return {"response": content}
 
 
 # ---------------------------------------------------------------------------
@@ -363,8 +396,9 @@ async def _call_ai(
     agent_id: Optional[int],
     messages: List[dict],
     db: AsyncSession,
-) -> dict:
-    """Call the AI model (non-streaming) using agent and model config from DB."""
+) -> str:
+    """Call the AI model (non-streaming) using agent and model config from DB.
+    Returns the raw text content of the AI response."""
     system_prompt = ""
     api_base: Optional[str] = None
     api_key: Optional[str] = None
@@ -422,7 +456,7 @@ async def _call_ai(
 
             data = resp.json()
             content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
-            return {"response": content}
+            return content
 
     except httpx.RequestError as exc:
         logger.error("AI API request failed: %s", exc)

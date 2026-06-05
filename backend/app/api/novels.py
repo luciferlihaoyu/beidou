@@ -1,8 +1,8 @@
 """Novel CRUD routes."""
 
-from typing import List
+from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -17,13 +17,21 @@ router = APIRouter(prefix="/api/novels", tags=["novels"])
 
 @router.get("", response_model=List[NovelOut])
 async def list_novels(
+    q: Optional[str] = Query(None, description="Search query for title/synopsis/genre"),
     user: User = Depends(get_current_approved_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """List all novels belonging to the current user."""
-    result = await db.execute(
-        select(Novel).where(Novel.user_id == user.id).order_by(Novel.updated_at.desc())
-    )
+    """List all novels belonging to the current user, with optional search."""
+    stmt = select(Novel).where(Novel.user_id == user.id)
+    if q:
+        search = f"%{q}%"
+        stmt = stmt.where(
+            Novel.title.ilike(search)
+            | Novel.synopsis.ilike(search)
+            | Novel.genre.ilike(search)
+        )
+    stmt = stmt.order_by(Novel.updated_at.desc())
+    result = await db.execute(stmt)
     return result.scalars().all()
 
 

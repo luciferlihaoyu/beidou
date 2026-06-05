@@ -5,12 +5,28 @@ import {
   BookOpen, MessageSquare, Save, Wand2, ListTree, ShieldCheck,
   Download, ChevronDown,
 } from 'lucide-react'
+import {
+  DndContext,
+  closestCenter,
+  PointerSensor,
+  useSensor,
+  useSensors,
+  type DragEndEvent,
+} from '@dnd-kit/core'
+import {
+  arrayMove,
+  SortableContext,
+  useSortable,
+  verticalListSortingStrategy,
+} from '@dnd-kit/sortable'
+import { CSS } from '@dnd-kit/utilities'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { useEditorStore } from '@/store/editor'
 import { TipTapEditor } from '@/components/editor/TipTapEditor'
 import { AiChatPanel } from '@/components/ai/AiChatPanel'
-import { exportApi } from '@/lib/api'
+import { exportApi, aiApi } from '@/lib/api'
+import type { ChapterOut } from '@/lib/api'
 
 const EXPORT_FORMATS = [
   { id: 'txt', label: '纯文本 TXT' },
@@ -19,6 +35,67 @@ const EXPORT_FORMATS = [
   { id: 'pdf', label: 'PDF 文档' },
   { id: 'html', label: 'HTML 网页' },
 ]
+
+// Sortable chapter item component
+function SortableChapterItem({
+  chapter,
+  isActive,
+  onSelect,
+  onDelete,
+}: {
+  chapter: ChapterOut
+  isActive: boolean
+  onSelect: () => void
+  onDelete: () => void
+}) {
+  const {
+    attributes,
+    listeners,
+    setNodeRef,
+    transform,
+    transition,
+    isDragging,
+  } = useSortable({ id: chapter.id })
+
+  const style = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    opacity: isDragging ? 0.5 : 1,
+  }
+
+  return (
+    <div
+      ref={setNodeRef}
+      style={style}
+      className={`flex items-center gap-1 group rounded-md px-2 py-1.5 cursor-pointer transition-colors ${
+        isActive ? 'bg-primary text-primary-foreground' : 'hover:bg-accent'
+      }`}
+      onClick={onSelect}
+    >
+      <button
+        {...attributes}
+        {...listeners}
+        className="shrink-0 cursor-grab active:cursor-grabbing"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <GripVertical className="h-3 w-3 opacity-30" />
+      </button>
+      <span className="text-sm truncate flex-1">{chapter.title}</span>
+      <span className="text-xs opacity-50 shrink-0">{chapter.word_count}字</span>
+      <Button
+        variant="ghost"
+        size="icon"
+        className="h-6 w-6 opacity-0 group-hover:opacity-100 shrink-0"
+        onClick={(e) => {
+          e.stopPropagation()
+          if (confirm('删除本章？')) onDelete()
+        }}
+      >
+        <Trash2 className="h-3 w-3" />
+      </Button>
+    </div>
+  )
+}
 
 export function EditorPage() {
   const { novelId } = useParams<{ novelId: string }>()
@@ -36,7 +113,13 @@ export function EditorPage() {
     deleteChapter,
     updateChapter,
     scheduleAutoSave,
+    reorderChapters,
   } = useEditorStore()
+
+  // DnD sensors
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 5 } })
+  )
 
   const [showAI, setShowAI] = useState(false)
   const [newChapterTitle, setNewChapterTitle] = useState('')
@@ -46,6 +129,24 @@ export function EditorPage() {
   // Export state
   const [showExportDropdown, setShowExportDropdown] = useState(false)
   const [exporting, setExporting] = useState(false)
+
+  // DnD drag end handler
+  const handleDragEnd = (event: DragEndEvent) => {
+    const { active, over } = event
+    if (!over || active.id === over.id) return
+
+    const oldIndex = chapters.findIndex((c) => c.id === active.id)
+    const newIndex = chapters.findIndex((c) => c.id === over.id)
+    if (oldIndex === -1 || newIndex === -1) return
+
+    const reordered = arrayMove(chapters, oldIndex, newIndex)
+    // Build order map: chapter_id -> new_order_index
+    const orderMap: Record<number, number> = {}
+    reordered.forEach((ch, i) => {
+      orderMap[ch.id] = i
+    })
+    reorderChapters(orderMap)
+  }
 
   // Load novel data on mount
   useEffect(() => {
@@ -87,28 +188,15 @@ export function EditorPage() {
   }
 
   // ── AI helper: call endpoint and show result ──
-  const callAiAction = async (endpoint: string, body: Record<string, unknown>) => {
+  const callAiAction = async (endpoint: 'continue' | 'outline' | 'review', body: Record<string, unknown>) => {
     setAiLoading(true)
     setShowAI(true)
     try {
-      const token = localStorage.getItem('token')
-      const res = await fetch(`/api/ai/${endpoint}`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify(body),
-      })
-      if (res.ok) {
-        const data = await res.json()
-        setAiContent(data.response ?? 'AI 未返回内容')
-      } else {
-        const err = await res.json().catch(() => ({ detail: '请求失败' }))
-        setAiContent(`⚠️ 错误: ${err.detail || '请求失败'}`)
-      }
-    } catch {
-      setAiContent('⚠️ 网络错误，请稍后重试')
+      const data = await aiApi[endpoint](body.novel_id as number, body.chapter_id as number)
+      setAiContent(data.response ?? 'AI 未返回内容')
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : '请求失败'
+      setAiContent(`⚠️ 错误: ${msg}`)
     } finally {
       setAiLoading(false)
     }
@@ -116,10 +204,7 @@ export function EditorPage() {
 
   const handleContinue = () => {
     if (!activeChapter) return
-    callAiAction('continue', {
-      novel_id: id,
-      chapter_id: activeChapter.id,
-    })
+    callAiAction('continue', { novel_id: id, chapter_id: activeChapter.id })
   }
 
   const handleOutline = () => {
@@ -128,10 +213,7 @@ export function EditorPage() {
 
   const handleReview = () => {
     if (!activeChapter) return
-    callAiAction('review', {
-      novel_id: id,
-      chapter_id: activeChapter.id,
-    })
+    callAiAction('review', { novel_id: id, chapter_id: activeChapter.id })
   }
 
   if (!novelId) return null
@@ -158,32 +240,19 @@ export function EditorPage() {
 
         {/* Chapter list */}
         <div className="flex-1 overflow-y-auto p-2 space-y-1">
-          {chapters.map((ch) => (
-            <div
-              key={ch.id}
-              className={`flex items-center gap-1 group rounded-md px-2 py-1.5 cursor-pointer transition-colors ${
-                activeChapter?.id === ch.id
-                  ? 'bg-primary text-primary-foreground'
-                  : 'hover:bg-accent'
-              }`}
-              onClick={() => setActiveChapter(ch)}
-            >
-              <GripVertical className="h-3 w-3 shrink-0 opacity-30" />
-              <span className="text-sm truncate flex-1">{ch.title}</span>
-              <span className="text-xs opacity-50 shrink-0">{ch.word_count}字</span>
-              <Button
-                variant="ghost"
-                size="icon"
-                className="h-6 w-6 opacity-0 group-hover:opacity-100 shrink-0"
-                onClick={(e) => {
-                  e.stopPropagation()
-                  if (confirm('删除本章？')) deleteChapter(ch.id)
-                }}
-              >
-                <Trash2 className="h-3 w-3" />
-              </Button>
-            </div>
-          ))}
+          <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
+            <SortableContext items={chapters.map((c) => c.id)} strategy={verticalListSortingStrategy}>
+              {chapters.map((ch) => (
+                <SortableChapterItem
+                  key={ch.id}
+                  chapter={ch}
+                  isActive={activeChapter?.id === ch.id}
+                  onSelect={() => setActiveChapter(ch)}
+                  onDelete={() => deleteChapter(ch.id)}
+                />
+              ))}
+            </SortableContext>
+          </DndContext>
         </div>
 
         {/* New chapter input */}

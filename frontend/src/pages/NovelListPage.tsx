@@ -1,6 +1,6 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { BookOpen, Plus, Trash2, Edit3, Download, Loader2 } from 'lucide-react'
+import { BookOpen, Plus, Trash2, Edit3, Download, Loader2, Search } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -24,12 +24,13 @@ const EXPORT_FORMATS = [
 
 export function NovelListPage() {
   const navigate = useNavigate()
-  const { novels, loading, loadNovels, createNovel, deleteNovel } = useEditorStore()
+  const { novels, loading, loadNovels, searchNovels, createNovel, deleteNovel } = useEditorStore()
   const [showCreate, setShowCreate] = useState(false)
   const [title, setTitle] = useState('')
   const [synopsis, setSynopsis] = useState('')
   const [genre, setGenre] = useState('')
   const [submitting, setSubmitting] = useState(false)
+  const [searchQuery, setSearchQuery] = useState('')
 
   // Export dialog state
   const [exportNovelId, setExportNovelId] = useState<number | null>(null)
@@ -38,6 +39,19 @@ export function NovelListPage() {
   useEffect(() => {
     loadNovels()
   }, [loadNovels])
+
+  // Debounced search
+  const handleSearch = useCallback(
+    (value: string) => {
+      setSearchQuery(value)
+      if (value.trim()) {
+        searchNovels(value.trim())
+      } else {
+        loadNovels()
+      }
+    },
+    [searchNovels, loadNovels],
+  )
 
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -86,10 +100,21 @@ export function NovelListPage() {
     <div className="p-6 max-w-5xl mx-auto">
       <div className="flex items-center justify-between mb-6">
         <h1 className="text-2xl font-bold">我的项目</h1>
-        <Button onClick={() => setShowCreate(true)}>
-          <Plus className="h-4 w-4 mr-2" />
-          新建小说
-        </Button>
+        <div className="flex items-center gap-3">
+          <div className="relative">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+            <Input
+              className="pl-9 h-9 w-56"
+              placeholder="搜索小说..."
+              value={searchQuery}
+              onChange={(e) => handleSearch(e.target.value)}
+            />
+          </div>
+          <Button onClick={() => setShowCreate(true)}>
+            <Plus className="h-4 w-4 mr-2" />
+            新建小说
+          </Button>
+        </div>
       </div>
 
       {novels.length === 0 ? (

@@ -40,7 +40,7 @@ ENV APP_NAME=北斗 \
     DEFAULT_ADMIN_USERNAME=admin \
     DEFAULT_ADMIN_PASSWORD=admin123 \
     DEFAULT_ADMIN_EMAIL=admin@beidou.local \
-    CORS_ORIGINS='["*"]'
+    CORS_ORIGINS='[]'
 
 EXPOSE 8080
 
