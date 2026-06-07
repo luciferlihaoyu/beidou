@@ -34,9 +34,14 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         await conn.run_sync(Base.metadata.create_all)
 
     # Ensure the default admin account exists
-    from app.db.session import async_session_factory
-    async with async_session_factory() as session:
-        await ensure_default_admin(session)
+    try:
+        from app.db.session import async_session_factory
+        async with async_session_factory() as session:
+            await ensure_default_admin(session)
+            await session.commit()
+        logger.info("Default admin check complete.")
+    except Exception as exc:
+        logger.error("Failed to ensure default admin: %s", exc, exc_info=True)
 
     logger.info("Startup complete.")
     yield

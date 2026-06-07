@@ -11,7 +11,7 @@ from app.core.security import (
     verify_password,
 )
 from app.db.session import get_db
-from app.models.user import User, UserStatus
+from app.models.user import User, UserRole, UserStatus
 from app.schemas.auth import TokenResponse, UserLogin, UserOut, UserRegister
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
@@ -73,3 +73,38 @@ async def login(body: UserLogin, db: AsyncSession = Depends(get_db)):
 async def get_me(current_user: User = Depends(get_current_user)):
     """Return the currently authenticated user."""
     return current_user
+
+
+@router.post("/init-admin")
+async def init_admin(db: AsyncSession = Depends(get_db)):
+    """Emergency: create default admin if no admin user exists. Safe to call multiple times."""
+    from app.core.config import get_settings
+    settings = get_settings()
+
+    # Check if any admin exists
+    result = await db.execute(select(User).where(User.role == UserRole.admin))
+    if result.scalar_one_or_none():
+        return {"status": "ok", "message": "Admin already exists"}
+
+    # Check if default username is taken by non-admin
+    existing = await db.execute(select(User).where(User.username == settings.DEFAULT_ADMIN_USERNAME))
+    user = existing.scalar_one_or_none()
+    if user:
+        # Promote existing user to admin
+        user.role = UserRole.admin
+        user.status = UserStatus.approved
+        await db.flush()
+        return {"status": "ok", "message": f'User "{settings.DEFAULT_ADMIN_USERNAME}" promoted to admin'}
+
+    # Create fresh admin
+    admin = User(
+        username=settings.DEFAULT_ADMIN_USERNAME,
+        email=settings.DEFAULT_ADMIN_EMAIL,
+        password_hash=get_password_hash(settings.DEFAULT_ADMIN_PASSWORD),
+        role=UserRole.admin,
+        status=UserStatus.approved,
+    )
+    db.add(admin)
+    await db.flush()
+    await db.commit()
+    return {"status": "ok", "message": f'Admin user "{settings.DEFAULT_ADMIN_USERNAME}" created'}
