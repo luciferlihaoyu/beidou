@@ -26,3 +26,6 @@ frontend/dist/
 .DS_Store
 Thumbs.db
 .venv/
+
+# TypeScript build info
+*.tsbuildinfo
