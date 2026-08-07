@@ -3,7 +3,7 @@ import { useParams, Link } from 'react-router-dom'
 import {
   Plus, Trash2, GripVertical, Loader2, ArrowLeft,
   BookOpen, MessageSquare, Save, Wand2, ListTree, ShieldCheck,
-  Download, ChevronDown,
+  Download, ChevronDown, History, CheckCircle2,
 } from 'lucide-react'
 import {
   DndContext,
@@ -24,6 +24,7 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { useEditorStore } from '@/store/editor'
 import { TipTapEditor } from '@/components/editor/TipTapEditor'
+import { ChapterVersionHistory } from '@/components/editor/ChapterVersionHistory'
 import { AiChatPanel } from '@/components/ai/AiChatPanel'
 import { exportApi, aiApi } from '@/lib/api'
 import type { ChapterOut } from '@/lib/api'
@@ -107,13 +108,12 @@ export function EditorPage() {
     loading,
     saving,
     selectNovel,
-    loadChapters,
     setActiveChapter,
     createChapter,
     deleteChapter,
-    updateChapter,
     scheduleAutoSave,
     reorderChapters,
+    applyRestoredChapter,
   } = useEditorStore()
 
   // DnD sensors
@@ -125,6 +125,11 @@ export function EditorPage() {
   const [newChapterTitle, setNewChapterTitle] = useState('')
   const [aiContent, setAiContent] = useState<string | undefined>(undefined)
   const [aiLoading, setAiLoading] = useState(false)
+
+  // Version history state
+  const [showVersionHistory, setShowVersionHistory] = useState(false)
+  const [restoreNotice, setRestoreNotice] = useState<string | null>(null)
+  const [editorRevision, setEditorRevision] = useState(0)
 
   // Export state
   const [showExportDropdown, setShowExportDropdown] = useState(false)
@@ -216,6 +221,24 @@ export function EditorPage() {
     callAiAction('review', { novel_id: id, chapter_id: activeChapter.id })
   }
 
+  // ── Version restore: apply restored chapter, refresh editor, close panel ──
+  const handleRestored = useCallback(
+    (chapter: ChapterOut) => {
+      applyRestoredChapter(chapter)
+      setEditorRevision((r) => r + 1)
+      setShowVersionHistory(false)
+      setRestoreNotice(`已恢复至「${chapter.title}」`)
+    },
+    [applyRestoredChapter],
+  )
+
+  // Auto-dismiss the restore success notice
+  useEffect(() => {
+    if (!restoreNotice) return
+    const timer = setTimeout(() => setRestoreNotice(null), 4000)
+    return () => clearTimeout(timer)
+  }, [restoreNotice])
+
   if (!novelId) return null
 
   if (loading || !novel) {
@@ -289,8 +312,25 @@ export function EditorPage() {
                 保存中…
               </span>
             )}
+            {restoreNotice && (
+              <span className="text-xs text-accent-emerald flex items-center gap-1">
+                <CheckCircle2 className="h-3 w-3" />
+                {restoreNotice}
+              </span>
+            )}
           </div>
           <div className="flex items-center gap-1">
+            {/* Version history */}
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setShowVersionHistory(true)}
+              disabled={!activeChapter}
+              title="版本历史"
+            >
+              <History className="h-4 w-4 mr-1" />
+              版本历史
+            </Button>
             {/* AI toolbar buttons */}
             <Button
               variant="outline"
@@ -367,7 +407,7 @@ export function EditorPage() {
             {activeChapter ? (
               <div className="max-w-3xl mx-auto p-6">
                 <TipTapEditor
-                  key={activeChapter.id}
+                  key={`${activeChapter.id}-${editorRevision}`}
                   content={activeChapter.content ?? ''}
                   onChange={handleContentChange}
                 />
@@ -399,6 +439,17 @@ export function EditorPage() {
           )}
         </div>
       </div>
+
+      {/* Version history dialog */}
+      {activeChapter && (
+        <ChapterVersionHistory
+          open={showVersionHistory}
+          onOpenChange={setShowVersionHistory}
+          novelId={id}
+          chapterId={activeChapter.id}
+          onRestored={handleRestored}
+        />
+      )}
     </div>
   )
 }

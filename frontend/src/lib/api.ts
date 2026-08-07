@@ -135,6 +135,41 @@ export const chaptersApi = {
     }),
 }
 
+// ── Chapter Version History ───────────────────────────
+export interface ChapterVersionSummary {
+  id: number
+  version: number
+  title: string
+  word_count: number
+  created_at: string
+  created_by: string | null
+}
+
+export interface ChapterVersionDetail extends ChapterVersionSummary {
+  content: string | null
+}
+
+export function fetchChapterVersions(novelId: number, chapterId: number): Promise<ChapterVersionSummary[]> {
+  return apiFetch<ChapterVersionSummary[]>(`/novels/${novelId}/chapters/${chapterId}/versions`)
+}
+
+export function fetchChapterVersionDetail(novelId: number, chapterId: number, versionId: number): Promise<ChapterVersionDetail> {
+  return apiFetch<ChapterVersionDetail>(`/novels/${novelId}/chapters/${chapterId}/versions/${versionId}`)
+}
+
+export function restoreChapterVersion(novelId: number, chapterId: number, versionId: number): Promise<ChapterOut> {
+  return apiFetch<ChapterOut>(`/novels/${novelId}/chapters/${chapterId}/versions/${versionId}/restore`, {
+    method: 'POST',
+  })
+}
+
+/** 章节版本历史 API（对象形式，与文件内其他 API 保持一致） */
+export const chapterVersionsApi = {
+  list: fetchChapterVersions,
+  get: fetchChapterVersionDetail,
+  restore: restoreChapterVersion,
+}
+
 // ── Settings ──────────────────────────────────────────
 /** 设定类型 */
 export type SettingType = 'worldview' | 'character' | 'outline' | 'plot' | 'foreshadow'
@@ -229,6 +264,30 @@ export const aiApi = {
       method: 'POST',
       body: JSON.stringify({ novel_id: novelId, chapter_id: chapterId, agent_id: agentId }),
     }),
+}
+
+// ── AI Chat History ───────────────────────────────────
+/** 服务端持久化的 AI 聊天历史消息 */
+export interface AiHistoryMessage {
+  id: number
+  role: 'user' | 'assistant'
+  content: string
+  agent_id: number | null
+  created_at: string
+}
+
+export const aiHistoryApi = {
+  /** 获取历史消息（服务端按时间正序返回） */
+  list: () => apiFetch<AiHistoryMessage[]>('/ai/history'),
+
+  /** 追加一条消息 */
+  append: (data: { role: 'user' | 'assistant'; content: string; agent_id?: number | null }) =>
+    apiFetch<AiHistoryMessage>('/ai/history/messages', {
+      method: 'POST', body: JSON.stringify(data),
+    }),
+
+  /** 清空历史 */
+  clear: () => apiFetch<{ deleted: number }>('/ai/history', { method: 'DELETE' }),
 }
 
 // ── Admin ─────────────────────────────────────────────

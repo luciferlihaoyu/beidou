@@ -34,6 +34,9 @@ interface EditorState {
 
   /** Schedule auto-save for current chapter */
   scheduleAutoSave: (content: string, wordCount: number) => void
+
+  /** Apply a server-returned chapter (e.g. version restore) to local state without an extra write */
+  applyRestoredChapter: (chapter: ChapterOut) => void
 }
 
 export const useEditorStore = create<EditorState>((set, get) => ({
@@ -102,6 +105,11 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   },
 
   setActiveChapter: (chapter) => set({ activeChapter: chapter }),
+
+  applyRestoredChapter: (chapter) => set((s) => ({
+    chapters: s.chapters.map((c) => (c.id === chapter.id ? chapter : c)),
+    activeChapter: s.activeChapter?.id === chapter.id ? chapter : s.activeChapter,
+  })),
 
   createChapter: async (data) => {
     const { novel } = get()
