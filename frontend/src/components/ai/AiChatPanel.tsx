@@ -1,8 +1,9 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
-import { Send, Bot, Loader2, Trash2 } from 'lucide-react'
+import { Send, Bot, Trash2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { cn } from '@/lib/utils'
+import { aiHistoryApi } from '@/lib/api'
 
 interface ChatMessage {
   role: 'user' | 'assistant'
@@ -30,6 +31,8 @@ export function AiChatPanel({ externalContent, onExternalContentConsumed }: Prop
   const wsRef = useRef<WebSocket | null>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const streamingRef = useRef<string>('')
+  const hasInteractedRef = useRef(false)
+  const [isStreaming, setIsStreaming] = useState(false)
 
   // ── Load agents ──
   useEffect(() => {
@@ -43,10 +46,26 @@ export function AiChatPanel({ externalContent, onExternalContentConsumed }: Prop
       .catch(() => {})
   }, [])
 
+  // ── Load persisted chat history ──
+  useEffect(() => {
+    let cancelled = false
+    aiHistoryApi
+      .list()
+      .then((data) => {
+        if (cancelled || hasInteractedRef.current) return
+        setMessages(data.map((m) => ({ role: m.role, content: m.content })))
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
   // ── Handle external content ──
   useEffect(() => {
     if (externalContent) {
       setMessages((prev) => [...prev, { role: 'assistant', content: externalContent }])
+      aiHistoryApi.append({ role: 'assistant', content: externalContent }).catch(() => {})
       onExternalContentConsumed?.()
     }
   }, [externalContent, onExternalContentConsumed])
@@ -68,6 +87,7 @@ export function AiChatPanel({ externalContent, onExternalContentConsumed }: Prop
         if (data.type === 'chat_response') {
           if (data.content) {
             streamingRef.current += data.content
+            setIsStreaming(!data.done)
             // Update last assistant message in place (streaming effect)
             setMessages((prev) => {
               const copy = [...prev]
@@ -82,6 +102,7 @@ export function AiChatPanel({ externalContent, onExternalContentConsumed }: Prop
           }
           if (data.done) {
             streamingRef.current = ''
+            setIsStreaming(false)
           }
         } else if (data.type === 'pong') {
           // heartbeat
@@ -91,6 +112,7 @@ export function AiChatPanel({ externalContent, onExternalContentConsumed }: Prop
             { role: 'assistant', content: `⚠️ ${data.content}` },
           ])
           streamingRef.current = ''
+          setIsStreaming(false)
         }
       } catch {
         // ignore parse errors
@@ -123,6 +145,7 @@ export function AiChatPanel({ externalContent, onExternalContentConsumed }: Prop
   const sendMessage = () => {
     if (!input.trim() || !wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return
 
+    hasInteractedRef.current = true
     const msg = input.trim()
     const historyMessages = messages.slice(-20).map((m) => ({
       role: m.role,
@@ -132,6 +155,7 @@ export function AiChatPanel({ externalContent, onExternalContentConsumed }: Prop
     setMessages((prev) => [...prev, { role: 'user', content: msg }])
     setInput('')
     streamingRef.current = ''
+    setIsStreaming(false)
 
     wsRef.current.send(
       JSON.stringify({
@@ -144,8 +168,10 @@ export function AiChatPanel({ externalContent, onExternalContentConsumed }: Prop
   }
 
   const clearMessages = () => {
+    aiHistoryApi.clear().catch(() => {})
     setMessages([])
     streamingRef.current = ''
+    setIsStreaming(false)
   }
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -154,8 +180,6 @@ export function AiChatPanel({ externalContent, onExternalContentConsumed }: Prop
       sendMessage()
     }
   }
-
-  const isStreaming = streamingRef.current !== ''
 
   return (
     <div className="flex flex-col h-full bg-gray-950 text-gray-100">
