@@ -7,10 +7,10 @@ import { useEffect, useState } from 'react'
 import {
   HardDrive, Download, Upload, History, Loader2,
   RefreshCw, AlertCircle, CheckCircle2, Wifi, Save,
-  Settings, Trash2,
+  Settings,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
-import { backupApi, WebDAVConfig, BackupHistoryItem, BackupResult, WebDAVStatusResult } from '@/lib/api'
+import { backupApi, WebDAVConfig, BackupHistoryItem, WebDAVStatusResult } from '@/lib/api'
 
 export function AdminBackupPage() {
   const [loading, setLoading] = useState(true)
@@ -34,10 +34,6 @@ export function AdminBackupPage() {
   // Errors
   const [error, setError] = useState<string | null>(null)
 
-  useEffect(() => {
-    loadData()
-  }, [])
-
   const loadData = async () => {
     setLoading(true)
     setError(null)
@@ -54,6 +50,10 @@ export function AdminBackupPage() {
       setLoading(false)
     }
   }
+
+  useEffect(() => {
+    loadData()
+  }, [])
 
   /** 保存 WebDAV 配置 */
   const handleSaveConfig = async () => {

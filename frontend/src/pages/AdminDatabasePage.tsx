@@ -31,10 +31,6 @@ export function AdminDatabasePage() {
   const [backingUp, setBackingUp] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  useEffect(() => {
-    loadData()
-  }, [])
-
   const loadData = async () => {
     setLoading(true)
     setError(null)
@@ -51,6 +47,10 @@ export function AdminDatabasePage() {
       setLoading(false)
     }
   }
+
+  useEffect(() => {
+    loadData()
+  }, [])
 
   /** 执行备份 */
   const handleBackup = async () => {
@@ -209,7 +209,7 @@ export function AdminDatabasePage() {
             </div>
           ) : (
             <div className="space-y-2">
-              {backups.map((backup, i) => (
+              {backups.map((backup) => (
                 <div
                   key={backup.filename}
                   className="flex items-center justify-between py-2 px-3 rounded-lg bg-accent/5 border border-gold/5"

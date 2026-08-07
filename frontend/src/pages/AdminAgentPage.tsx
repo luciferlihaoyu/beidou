@@ -32,10 +32,6 @@ export function AdminAgentPage() {
     status: 'active',
   })
 
-  useEffect(() => {
-    loadData()
-  }, [])
-
   const loadData = async () => {
     setLoading(true)
     try {
@@ -51,6 +47,10 @@ export function AdminAgentPage() {
       setLoading(false)
     }
   }
+
+  useEffect(() => {
+    loadData()
+  }, [])
 
   /** 打开新建对话框 */
   const openCreate = () => {

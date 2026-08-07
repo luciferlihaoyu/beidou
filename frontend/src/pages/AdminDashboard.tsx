@@ -30,10 +30,6 @@ export function AdminDashboard() {
     db_size_mb: number
   } | null>(null)
 
-  useEffect(() => {
-    loadAllStats()
-  }, [])
-
   const loadAllStats = async () => {
     setLoading(true)
     try {
@@ -86,6 +82,10 @@ export function AdminDashboard() {
       setLoading(false)
     }
   }
+
+  useEffect(() => {
+    loadAllStats()
+  }, [])
 
   if (loading) {
     return (
