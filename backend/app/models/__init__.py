@@ -1,5 +1,7 @@
 from app.models.agent import Agent
 from app.models.chapter import Chapter
+from app.models.chapter_version import ChapterVersion
+from app.models.chat_message import ChatMessage
 from app.models.knowledge import KnowledgeBase, KnowledgeEntry, KnowledgeRelation
 from app.models.model_config import ModelConfig
 from app.models.novel import Novel
@@ -9,6 +11,8 @@ from app.models.user import User
 __all__ = [
     "Agent",
     "Chapter",
+    "ChapterVersion",
+    "ChatMessage",
     "KnowledgeBase",
     "KnowledgeEntry",
     "KnowledgeRelation",

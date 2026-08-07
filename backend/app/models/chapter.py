@@ -1,7 +1,7 @@
 """Chapter ORM model."""
 
 from datetime import datetime
-from typing import Optional
+from typing import List, Optional
 
 from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -27,3 +27,6 @@ class Chapter(Base):
 
     # Relationships
     novel = relationship("Novel", back_populates="chapters")
+    versions: Mapped[List["ChapterVersion"]] = relationship(
+        "ChapterVersion", back_populates="chapter", cascade="all, delete-orphan"
+    )
