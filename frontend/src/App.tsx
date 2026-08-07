@@ -51,7 +51,7 @@ function AdminRoute({ children }: { children: React.ReactNode }) {
 }
 
 export default function App() {
-  const { restoreSession, user, loading } = useAuthStore()
+  const { restoreSession, user } = useAuthStore()
   const [initialized, setInitialized] = useState(false)
 
   useEffect(() => {

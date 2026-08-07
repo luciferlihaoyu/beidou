@@ -5,7 +5,7 @@
 
 import { useEffect, useState } from 'react'
 import {
-  Plus, Trash2, Play, Loader2, Star, Brain, CheckCircle, XCircle,
+  Plus, Trash2, Play, Loader2, Star, Brain, CheckCircle,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -31,10 +31,6 @@ export function AdminModelPage() {
   })
   const [testing, setTesting] = useState<number | null>(null)
 
-  useEffect(() => {
-    loadModels()
-  }, [])
-
   const loadModels = async () => {
     setLoading(true)
     try {
@@ -46,6 +42,10 @@ export function AdminModelPage() {
       setLoading(false)
     }
   }
+
+  useEffect(() => {
+    loadModels()
+  }, [])
 
   /** 打开新建 */
   const openCreate = () => {
@@ -107,7 +107,7 @@ export function AdminModelPage() {
 
   const handleSetDefault = async (id: number) => {
     try {
-      const updated = await modelsConfigApi.setDefault(id)
+      await modelsConfigApi.setDefault(id)
       setModels(prev => prev.map(m => ({
         ...m,
         is_default: m.id === id,

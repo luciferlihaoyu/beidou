@@ -5,7 +5,7 @@
 
 import { useEffect, useState } from 'react'
 import {
-  CheckCircle, XCircle, Shield, Loader2, Users,
+  CheckCircle, XCircle, Loader2, Users,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { adminApi, type UserOut } from '@/lib/api'
@@ -18,10 +18,6 @@ export function AdminUserPage() {
   const [loading, setLoading] = useState(true)
   const [changingRole, setChangingRole] = useState<number | null>(null)
 
-  useEffect(() => {
-    loadUsers()
-  }, [])
-
   const loadUsers = async () => {
     setLoading(true)
     try {
@@ -33,6 +29,10 @@ export function AdminUserPage() {
       setLoading(false)
     }
   }
+
+  useEffect(() => {
+    loadUsers()
+  }, [])
 
   /** 批准/拒绝用户 */
   const handleStatus = async (userId: number, status: 'approved' | 'rejected') => {
