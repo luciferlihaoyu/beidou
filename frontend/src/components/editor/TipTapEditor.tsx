@@ -11,6 +11,29 @@ interface TipTapEditorProps {
   onChange: (html: string) => void
 }
 
+interface ToolbarButtonProps {
+  onClick: () => void
+  active?: boolean
+  children: React.ReactNode
+  title?: string
+}
+
+/** 工具栏按钮 — 定义在组件外，避免每次渲染重建组件 */
+function ToolbarButton({ onClick, active, children, title }: ToolbarButtonProps) {
+  return (
+    <Button
+      variant="ghost"
+      size="icon"
+      className={cn('h-8 w-8', active && 'bg-accent text-accent-foreground')}
+      onClick={onClick}
+      title={title}
+      type="button"
+    >
+      {children}
+    </Button>
+  )
+}
+
 export function TipTapEditor({ content, onChange }: TipTapEditorProps) {
   const editor = useEditor({
     extensions: [
@@ -34,24 +57,6 @@ export function TipTapEditor({ content, onChange }: TipTapEditorProps) {
   })
 
   if (!editor) return null
-
-  const ToolbarButton = ({ onClick, active, children, title }: {
-    onClick: () => void
-    active?: boolean
-    children: React.ReactNode
-    title?: string
-  }) => (
-    <Button
-      variant="ghost"
-      size="icon"
-      className={cn('h-8 w-8', active && 'bg-accent text-accent-foreground')}
-      onClick={onClick}
-      title={title}
-      type="button"
-    >
-      {children}
-    </Button>
-  )
 
   const words = editor.storage.characterCount?.words?.() ?? 0
   const chars = editor.storage.characterCount?.characters?.() ?? 0
