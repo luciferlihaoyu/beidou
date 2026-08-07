@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.ratelimit import rate_limit
 from app.core.security import (
     create_access_token,
     get_current_user,
@@ -18,7 +19,11 @@ router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 
 @router.post("/register", response_model=UserOut, status_code=status.HTTP_201_CREATED)
-async def register(body: UserRegister, db: AsyncSession = Depends(get_db)):
+async def register(
+    body: UserRegister,
+    _: None = Depends(rate_limit(5, 60, "register")),
+    db: AsyncSession = Depends(get_db),
+):
     """Register a new user (status defaults to 'pending')."""
     # Check for existing username
     existing = await db.execute(select(User).where(User.username == body.username))
@@ -48,7 +53,11 @@ async def register(body: UserRegister, db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/login", response_model=TokenResponse)
-async def login(body: UserLogin, db: AsyncSession = Depends(get_db)):
+async def login(
+    body: UserLogin,
+    _: None = Depends(rate_limit(10, 60, "login")),
+    db: AsyncSession = Depends(get_db),
+):
     """Authenticate and return JWT token pair."""
     result = await db.execute(select(User).where(User.username == body.username))
     user = result.scalar_one_or_none()
@@ -65,7 +74,7 @@ async def login(body: UserLogin, db: AsyncSession = Depends(get_db)):
             detail="Account has been rejected",
         )
 
-    token = create_access_token(data={"sub": user.id})
+    token = create_access_token(data={"sub": str(user.id)})
     return TokenResponse(access_token=token)
 
 
@@ -76,10 +85,19 @@ async def get_me(current_user: User = Depends(get_current_user)):
 
 
 @router.post("/init-admin")
-async def init_admin(db: AsyncSession = Depends(get_db)):
+async def init_admin(
+    _: None = Depends(rate_limit(3, 60, "init-admin")),
+    db: AsyncSession = Depends(get_db),
+):
     """Emergency: create default admin if no admin user exists. Safe to call multiple times."""
     from app.core.config import get_settings
     settings = get_settings()
+
+    if not settings.ALLOW_INIT_ADMIN:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="init-admin is disabled. Set ALLOW_INIT_ADMIN=true to enable it.",
+        )
 
     # Check if any admin exists
     result = await db.execute(select(User).where(User.role == UserRole.admin))
