@@ -37,8 +37,6 @@ export function AppLayout({ children }: AppLayoutProps) {
 
   /** 判断当前是否在管理员子页面 */
   const isAdminArea = location.pathname.startsWith('/admin')
-  /** 判断精确匹配 */
-  const isAdminRoot = location.pathname === '/admin'
 
   const navItems = [
     { to: '/', label: '项目', icon: BookOpen },
