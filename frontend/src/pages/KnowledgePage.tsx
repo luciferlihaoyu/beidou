@@ -5,7 +5,7 @@
 
 import { useEffect, useState } from 'react'
 import {
-  Plus, Trash2, BookOpen, Loader2, Search,
+  Plus, Trash2, BookOpen, Loader2,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -26,10 +26,6 @@ export function KnowledgePage() {
   const [selectedEntry, setSelectedEntry] = useState<KnowledgeEntryOut | null>(null)
   const [loadingEntries, setLoadingEntries] = useState(false)
 
-  useEffect(() => {
-    loadBases()
-  }, [])
-
   const loadBases = async () => {
     setLoadingBases(true)
     try {
@@ -41,6 +37,10 @@ export function KnowledgePage() {
       setLoadingBases(false)
     }
   }
+
+  useEffect(() => {
+    loadBases()
+  }, [])
 
   /** 选择知识库时加载条目 */
   const selectBase = async (baseId: number) => {

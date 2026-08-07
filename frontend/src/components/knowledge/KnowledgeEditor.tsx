@@ -53,21 +53,6 @@ export function KnowledgeEditor({ entry, baseId, entries, onSave, onDelete }: Pr
   const [newRelationTarget, setNewRelationTarget] = useState('')
   const [newRelationType, setNewRelationType] = useState('related_to')
 
-  // 同步 entry 到表单
-  useEffect(() => {
-    if (entry) {
-      setTitle(entry.title)
-      setContent(entry.content ?? '')
-      setType(entry.type)
-      loadRelations(entry.id)
-    } else {
-      setTitle('')
-      setContent('')
-      setType('custom')
-      setRelations([])
-    }
-  }, [entry])
-
   /** 加载条目的关联列表 */
   const loadRelations = async (entryId: number) => {
     // 从 graph 数据中提取相关边
@@ -95,6 +80,21 @@ export function KnowledgeEditor({ entry, baseId, entries, onSave, onDelete }: Pr
       setLoadingRelations(false)
     }
   }
+
+  // 同步 entry 到表单
+  useEffect(() => {
+    if (entry) {
+      setTitle(entry.title)
+      setContent(entry.content ?? '')
+      setType(entry.type)
+      loadRelations(entry.id)
+    } else {
+      setTitle('')
+      setContent('')
+      setType('custom')
+      setRelations([])
+    }
+  }, [entry])
 
   /** 保存（新建或更新） */
   const handleSave = async () => {
@@ -154,16 +154,12 @@ export function KnowledgeEditor({ entry, baseId, entries, onSave, onDelete }: Pr
   }
 
   /** 删除关联 */
-  const removeRelation = async (targetId: number) => {
+  const removeRelation = async () => {
     if (!entry) return
     try {
       // graph API 不返回关系 ID，所以这里通过知识库 API 来删
       // 实际需要通过关系 ID 删除，此处做 best-effort
-      const graphData = await knowledgeApi.getGraph(baseId!)
-      const edge = graphData?.edges?.find(
-        e => (e.source === String(entry.id) && e.target === String(targetId)) ||
-             (e.source === String(targetId) && e.target === String(entry.id)),
-      )
+      await knowledgeApi.getGraph(baseId!)
       // 没有关系 ID 的情况下，这是展示用
       // 后端实际可能需要提供通过两端 ID 删除的 API
       alert('关联关系已标记删除（需后端支持）')
@@ -300,7 +296,7 @@ export function KnowledgeEditor({ entry, baseId, entries, onSave, onDelete }: Pr
                         </span>
                       </div>
                       <button
-                        onClick={() => removeRelation(targetId)}
+                        onClick={removeRelation}
                         className="text-star-dim hover:text-red-400 shrink-0"
                       >
                         <X className="h-3 w-3" />

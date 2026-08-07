@@ -11,10 +11,10 @@
  * - 不同类型不同颜色
  */
 
-import { useEffect, useRef, useState, useCallback } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Search } from 'lucide-react'
 import { Input } from '@/components/ui/input'
-import { knowledgeApi, type GraphData, type KnowledgeEntryOut } from '@/lib/api'
+import { knowledgeApi, type KnowledgeEntryOut } from '@/lib/api'
 
 /** 节点颜色映射 */
 const NODE_COLORS: Record<string, string> = {
@@ -73,7 +73,7 @@ interface Props {
   onEntriesChange: () => void
 }
 
-export function KnowledgeGraph({ baseId, entries, onEntryClick, onEntriesChange }: Props) {
+export function KnowledgeGraph({ baseId, entries, onEntryClick }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
 
@@ -93,12 +93,7 @@ export function KnowledgeGraph({ baseId, entries, onEntryClick, onEntriesChange 
   const draggingNodeRef = useRef<string | null>(null)
   const panningRef = useRef(false)
   const lastMouseRef = useRef({ x: 0, y: 0 })
-  const [scale, setScale] = useState(1)
-
-  // 加载图数据
-  useEffect(() => {
-    loadGraph()
-  }, [baseId])
+  const [, setScale] = useState(1)
 
   const loadGraph = async () => {
     setLoading(true)
@@ -107,7 +102,7 @@ export function KnowledgeGraph({ baseId, entries, onEntryClick, onEntriesChange 
       if (data?.nodes) {
         const centerX = 400
         const centerY = 300
-        const gNodes: GraphNode[] = data.nodes.map((n, i) => ({
+        const gNodes: GraphNode[] = data.nodes.map((n) => ({
           id: n.id,
           label: n.label,
           type: n.type || 'custom',
@@ -133,86 +128,10 @@ export function KnowledgeGraph({ baseId, entries, onEntryClick, onEntriesChange 
     }
   }
 
-  // ── 力导向模拟 ────────────────────────────
+  // 加载图数据
   useEffect(() => {
-    if (!canvasRef.current) return
-
-    const canvas = canvasRef.current
-    const ctx = canvas.getContext('2d')
-    if (!ctx) return
-
-    let animId = 0
-    const REPULSION = 800
-    const ATTRACTION = 0.005
-    const DAMPING = 0.85
-
-    const simulate = () => {
-      const nodes = nodesRef.current
-      const edges = edgesRef.current
-
-      // 力导向步进
-      for (const node of nodes) {
-        if (node.fx !== null) {
-          node.x = node.fx
-          node.y = node.fy!
-          node.vx = 0
-          node.vy = 0
-          continue
-        }
-
-        // 排斥力（节点之间）
-        for (const other of nodes) {
-          if (node === other) continue
-          let dx = node.x - other.x
-          let dy = node.y - other.y
-          const dist = Math.sqrt(dx * dx + dy * dy) || 1
-          const force = REPULSION / (dist * dist)
-          node.vx += (dx / dist) * force * 0.02
-          node.vy += (dy / dist) * force * 0.02
-        }
-
-        // 中心引力
-        const cx = canvas.width / 2
-        const cy = canvas.height / 2
-        node.vx += (cx - node.x) * ATTRACTION
-        node.vy += (cy - node.y) * ATTRACTION
-      }
-
-      // 边吸引力
-      for (const edge of edges) {
-        const src = nodes.find(n => n.id === edge.source)
-        const tgt = nodes.find(n => n.id === edge.target)
-        if (!src || !tgt) continue
-        const dx = tgt.x - src.x
-        const dy = tgt.y - src.y
-        const dist = Math.sqrt(dx * dx + dy * dy) || 1
-        const force = (dist - 120) * 0.005
-        src.vx += (dx / dist) * force
-        src.vy += (dy / dist) * force
-        tgt.vx -= (dx / dist) * force
-        tgt.vy -= (dy / dist) * force
-      }
-
-      // 应用速度 + 阻尼
-      for (const node of nodes) {
-        node.vx *= DAMPING
-        node.vy *= DAMPING
-        node.x += node.vx
-        node.y += node.vy
-        // 边界
-        node.x = Math.max(20, Math.min(canvas.width - 20, node.x))
-        node.y = Math.max(20, Math.min(canvas.height - 20, node.y))
-      }
-
-      // 绘制
-      draw(ctx, canvas)
-      animId = requestAnimationFrame(simulate)
-    }
-
-    animId = requestAnimationFrame(simulate)
-
-    return () => cancelAnimationFrame(animId)
-  }, [selectedNodeId])
+    loadGraph()
+  }, [baseId])
 
   // ── 绘制函数 ──────────────────────────────
   const draw = (ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement) => {
@@ -303,6 +222,87 @@ export function KnowledgeGraph({ baseId, entries, onEntryClick, onEntriesChange 
     ctx.restore()
   }
 
+  // ── 力导向模拟 ────────────────────────────
+  useEffect(() => {
+    if (!canvasRef.current) return
+
+    const canvas = canvasRef.current
+    const ctx = canvas.getContext('2d')
+    if (!ctx) return
+
+    let animId = 0
+    const REPULSION = 800
+    const ATTRACTION = 0.005
+    const DAMPING = 0.85
+
+    const simulate = () => {
+      const nodes = nodesRef.current
+      const edges = edgesRef.current
+
+      // 力导向步进
+      for (const node of nodes) {
+        if (node.fx !== null) {
+          node.x = node.fx
+          node.y = node.fy!
+          node.vx = 0
+          node.vy = 0
+          continue
+        }
+
+        // 排斥力（节点之间）
+        for (const other of nodes) {
+          if (node === other) continue
+          const dx = node.x - other.x
+          const dy = node.y - other.y
+          const dist = Math.sqrt(dx * dx + dy * dy) || 1
+          const force = REPULSION / (dist * dist)
+          node.vx += (dx / dist) * force * 0.02
+          node.vy += (dy / dist) * force * 0.02
+        }
+
+        // 中心引力
+        const cx = canvas.width / 2
+        const cy = canvas.height / 2
+        node.vx += (cx - node.x) * ATTRACTION
+        node.vy += (cy - node.y) * ATTRACTION
+      }
+
+      // 边吸引力
+      for (const edge of edges) {
+        const src = nodes.find(n => n.id === edge.source)
+        const tgt = nodes.find(n => n.id === edge.target)
+        if (!src || !tgt) continue
+        const dx = tgt.x - src.x
+        const dy = tgt.y - src.y
+        const dist = Math.sqrt(dx * dx + dy * dy) || 1
+        const force = (dist - 120) * 0.005
+        src.vx += (dx / dist) * force
+        src.vy += (dy / dist) * force
+        tgt.vx -= (dx / dist) * force
+        tgt.vy -= (dy / dist) * force
+      }
+
+      // 应用速度 + 阻尼
+      for (const node of nodes) {
+        node.vx *= DAMPING
+        node.vy *= DAMPING
+        node.x += node.vx
+        node.y += node.vy
+        // 边界
+        node.x = Math.max(20, Math.min(canvas.width - 20, node.x))
+        node.y = Math.max(20, Math.min(canvas.height - 20, node.y))
+      }
+
+      // 绘制
+      draw(ctx, canvas)
+      animId = requestAnimationFrame(simulate)
+    }
+
+    animId = requestAnimationFrame(simulate)
+
+    return () => cancelAnimationFrame(animId)
+  }, [selectedNodeId])
+
   // ── 鼠标交互 ──────────────────────────────
   const getCanvasPos = (e: React.MouseEvent): { x: number; y: number } => {
     const canvas = canvasRef.current!
@@ -335,6 +335,8 @@ export function KnowledgeGraph({ baseId, entries, onEntryClick, onEntriesChange 
       const dy = world.y - node.y
       if (Math.sqrt(dx * dx + dy * dy) < radius + 6) {
         draggingNodeRef.current = node.id
+        // 拖拽固定：直接在 ref 持有的节点数据上写 fx/fy 是力导向图的预期用法
+        // eslint-disable-next-line react-hooks/immutability -- intentional: pin dragged node in force sim
         node.fx = node.x
         node.fy = node.y
         setSelectedNodeId(node.id)
