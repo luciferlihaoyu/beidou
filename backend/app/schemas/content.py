@@ -3,7 +3,7 @@
 from datetime import datetime
 from typing import List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from app.models.setting import SettingType, OutlineType
 
@@ -84,6 +84,58 @@ class ChapterReorder(BaseModel):
     """Batch reorder: mapping of chapter id → new order_index."""
 
     order: dict[int, int]
+
+
+# ── Chapter Version ────────────────────────────────────────
+
+class ChapterVersionOut(BaseModel):
+    """Public chapter version (snapshot) representation."""
+
+    id: int
+    version: int
+    title: str
+    word_count: int
+    created_at: datetime
+    created_by: Optional[str] = None
+
+    model_config = {"from_attributes": True}
+
+
+class ChapterVersionDetailOut(ChapterVersionOut):
+    """Chapter version including its full captured content."""
+
+    content: Optional[str] = None
+
+    model_config = {"from_attributes": True}
+
+
+# ── AI Chat Message ──────────────────────────────────────
+
+class ChatMessageCreate(BaseModel):
+    """Request body to persist a single AI chat message."""
+
+    role: str
+    content: str
+    agent_id: Optional[int] = None
+
+    @field_validator("role")
+    @classmethod
+    def role_must_be_chat_role(cls, v: str) -> str:
+        if v not in ("user", "assistant"):
+            raise ValueError("role must be 'user' or 'assistant'")
+        return v
+
+
+class ChatMessageOut(BaseModel):
+    """Public persisted AI chat message representation."""
+
+    id: int
+    role: str
+    content: str
+    agent_id: Optional[int] = None
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
 
 
 # ── Setting ──────────────────────────────────────────────
