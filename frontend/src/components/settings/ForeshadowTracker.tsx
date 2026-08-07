@@ -11,7 +11,7 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { useEditorStore } from '@/store/editor'
-import { type SettingOut, type SettingType } from '@/lib/api'
+import { type SettingOut } from '@/lib/api'
 
 /** 伏笔追踪组件 — 表格展示，按状态筛选，行展开编辑 */
 

@@ -21,11 +21,6 @@ type DragState = {
   position: 'before' | 'after' | 'inside' | null
 } | null
 
-type NewNodeForm = {
-  parentId: number | null
-  outlineType: OutlineType
-} | null
-
 /* ── 图标映射 ─────────────────────────────── */
 const outlineIcon: Record<string, React.ReactNode> = {
   volume: <BookOpen className="h-4 w-4 text-amber-400" />,
@@ -220,12 +215,11 @@ function OutlineNode({
 
 /* ── 大纲编辑器主组件 ──────────────────────── */
 export function OutlineEditor() {
-  const { novel, createSetting, updateSetting, deleteSetting } = useEditorStore()
+  const { novel, updateSetting, deleteSetting } = useEditorStore()
   const [outlineTree, setOutlineTree] = useState<SettingOutlineNode[]>([])
   const [selectedId, setSelectedId] = useState<number | null>(null)
   const [expandedIds, setExpandedIds] = useState<Set<number>>(new Set())
   const [dragState, setDragState] = useState<DragState>(null)
-  const [newNodeForm, setNewNodeForm] = useState<NewNodeForm>(null)
   const [loading, setLoading] = useState(false)
 
   // 编辑面板状态

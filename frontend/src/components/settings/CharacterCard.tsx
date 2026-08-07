@@ -1,10 +1,10 @@
 import { useState } from 'react'
-import { Plus, X, Edit2, Trash2, ChevronDown, ChevronUp } from 'lucide-react'
+import { Plus, Edit2, Trash2, ChevronDown, ChevronUp } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
 import { useEditorStore } from '@/store/editor'
-import { type SettingOut, type SettingType } from '@/lib/api'
+import { type SettingOut } from '@/lib/api'
 
 /** 角色卡片组件 — 卡片式展示，点击展开详情编辑 */
 
@@ -253,7 +253,7 @@ function CharacterCardItem({
 
 /* ── 角色列表主组件 ──────────────────────── */
 export function CharacterCards() {
-  const { novel, settings, createSetting, updateSetting, deleteSetting, loadSettings } = useEditorStore()
+  const { novel, settings, createSetting, updateSetting, deleteSetting } = useEditorStore()
   const [showNew, setShowNew] = useState(false)
   const [newName, setNewName] = useState('')
   const [newTags, setNewTags] = useState('')

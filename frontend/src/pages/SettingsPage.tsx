@@ -1,5 +1,4 @@
 import { useState } from 'react'
-import { useNavigate } from 'react-router-dom'
 import {
   BookOpen, Users, Globe, Eye, Plus, Trash2, Edit2
 } from 'lucide-react'
