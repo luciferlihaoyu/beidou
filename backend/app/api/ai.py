@@ -7,16 +7,18 @@ from typing import List, Optional
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import get_current_approved_user
 from app.db.session import get_db, async_session_factory
 from app.models.agent import Agent
 from app.models.chapter import Chapter
+from app.models.chat_message import ChatMessage
 from app.models.model_config import ModelConfig
 from app.models.novel import Novel
 from app.models.user import User
+from app.schemas.content import ChatMessageCreate, ChatMessageOut
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +38,7 @@ async def ai_chat_websocket(websocket: WebSocket):
     Server streams back: {"type": "chat_response", "content": "...", "done": false/true}
     """
     # Verify JWT token before accepting
-    from jose import JWTError, jwt
+    import jwt
     from app.core.config import get_settings
 
     app_settings = get_settings()
@@ -47,11 +49,12 @@ async def ai_chat_websocket(websocket: WebSocket):
 
     try:
         payload = jwt.decode(token, app_settings.JWT_SECRET_KEY, algorithms=[app_settings.JWT_ALGORITHM])
-        user_id: int = payload.get("sub")
-        if user_id is None:
+        sub = payload.get("sub")
+        if sub is None:
             await websocket.close(code=4001, reason="Invalid token")
             return
-    except JWTError:
+        user_id: int = int(sub)
+    except (jwt.PyJWTError, ValueError, TypeError):
         await websocket.close(code=4001, reason="Invalid token")
         return
 
@@ -90,6 +93,9 @@ async def ai_chat_websocket(websocket: WebSocket):
             content = message.get("content", "")
             agent_id = message.get("agent_id")
             history_messages = message.get("messages", [])
+
+            # Buffer for the streamed assistant reply; persisted on success.
+            full_response = ""
 
             # Load agent and model config from DB
             async with async_session_factory() as db:
@@ -166,6 +172,7 @@ async def ai_chat_websocket(websocket: WebSocket):
                                         delta = chunk.get("choices", [{}])[0].get("delta", {})
                                         text = delta.get("content", "")
                                         if text:
+                                            full_response += text
                                             await websocket.send_json({
                                                 "type": "chat_response",
                                                 "content": text,
@@ -180,6 +187,10 @@ async def ai_chat_websocket(websocket: WebSocket):
                                     "content": "",
                                     "done": True,
                                 })
+                                # Stream succeeded: persist the exchange.
+                                await _persist_chat(
+                                    user_id, agent_id, content, full_response
+                                )
 
                     except httpx.RequestError as exc:
                         logger.error("AI API request failed: %s", exc)
@@ -197,6 +208,82 @@ async def ai_chat_websocket(websocket: WebSocket):
 
     except WebSocketDisconnect:
         logger.info("AI chat WebSocket disconnected")
+
+
+async def _persist_chat(
+    user_id: int,
+    agent_id: Optional[int],
+    user_content: str,
+    assistant_content: str,
+) -> None:
+    """Persist a user + assistant message pair after a successful stream."""
+    async with async_session_factory() as db:
+        db.add_all([
+            ChatMessage(
+                user_id=user_id, role="user", content=user_content, agent_id=agent_id
+            ),
+            ChatMessage(
+                user_id=user_id,
+                role="assistant",
+                content=assistant_content,
+                agent_id=agent_id,
+            ),
+        ])
+        await db.commit()
+
+
+# ---------------------------------------------------------------------------
+# HTTP: persisted chat history
+# ---------------------------------------------------------------------------
+
+
+@router.get("/api/ai/history", response_model=List[ChatMessageOut])
+async def ai_history(
+    limit: int = 200,
+    user: User = Depends(get_current_approved_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Return this user's persisted chat messages, oldest first."""
+    limit = max(1, min(limit, 500))
+    # Fetch the newest N rows, then reverse so the response is oldest-first.
+    result = await db.execute(
+        select(ChatMessage)
+        .where(ChatMessage.user_id == user.id)
+        .order_by(ChatMessage.created_at.desc(), ChatMessage.id.desc())
+        .limit(limit)
+    )
+    messages = result.scalars().all()
+    return list(reversed(messages))
+
+
+@router.post("/api/ai/history/messages", response_model=ChatMessageOut, status_code=201)
+async def ai_history_create(
+    body: ChatMessageCreate,
+    user: User = Depends(get_current_approved_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Persist a single AI chat message (toolbar-generated output etc.)."""
+    message = ChatMessage(
+        user_id=user.id,
+        role=body.role,
+        content=body.content,
+        agent_id=body.agent_id,
+    )
+    db.add(message)
+    await db.commit()
+    await db.refresh(message)
+    return message
+
+
+@router.delete("/api/ai/history")
+async def ai_history_delete(
+    user: User = Depends(get_current_approved_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Delete all of this user's persisted chat messages."""
+    result = await db.execute(delete(ChatMessage).where(ChatMessage.user_id == user.id))
+    await db.commit()
+    return {"deleted": result.rowcount}
 
 
 # ---------------------------------------------------------------------------
