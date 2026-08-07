@@ -16,7 +16,7 @@ from sqlalchemy import text
 
 from app.api import admin, agents, ai, auth, backup, chapters, database, export, knowledge, models_config, novels, settings
 from app.core.config import get_settings
-from app.db.base import Base
+from app.db.migrations import run_migrations
 from app.db.session import engine
 from app.services.startup import ensure_default_admin
 
@@ -25,13 +25,40 @@ logger = logging.getLogger(__name__)
 # Track startup time for health endpoint
 _startup_time = time.time()
 
+# Known placeholder secret values refused when DEBUG is disabled.
+_PLACEHOLDER_SECRETS = frozenset(
+    {
+        "change-me-to-a-random-string",
+        "change-me-to-another-random-string",
+        "change-me",
+        "changeme",
+        "",
+    }
+)
+_SECRET_FIELDS = ("SECRET_KEY", "JWT_SECRET_KEY")
+
+
+def _validate_production_secrets() -> None:
+    """Fail fast in production if secret keys are placeholders or too short."""
+    app_settings = get_settings()
+    if app_settings.DEBUG:
+        return
+    for name in _SECRET_FIELDS:
+        value = getattr(app_settings, name)
+        if value in _PLACEHOLDER_SECRETS or len(value) < 32:
+            raise RuntimeError(
+                f"{name} is missing, a known placeholder, or shorter than 32 characters. "
+                "Set a real random secret via environment variable or .env when "
+                "DEBUG=false before starting in production."
+            )
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
-    """Application lifespan: create tables on startup, cleanup on shutdown."""
-    logger.info("Starting up — creating database tables…")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+    """Application lifespan: apply database migrations on startup, cleanup on shutdown."""
+    _validate_production_secrets()
+    logger.info("Starting up — applying database migrations…")
+    await run_migrations()
 
     # Ensure the default admin account exists
     try:
@@ -63,7 +90,7 @@ def create_app() -> FastAPI:
     app.add_middleware(
         CORSMiddleware,
         allow_origins=[str(o) for o in app_settings.CORS_ORIGINS],
-        allow_credentials=True,
+        allow_credentials=("*" not in app_settings.CORS_ORIGINS),
         allow_methods=["*"],
         allow_headers=["*"],
     )
