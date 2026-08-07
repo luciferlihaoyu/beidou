@@ -3,9 +3,9 @@
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
+import jwt
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
-from jose import JWTError, jwt
 from passlib.context import CryptContext
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -51,11 +51,18 @@ async def get_current_user(
         headers={"WWW-Authenticate": "Bearer"},
     )
     try:
-        payload = jwt.decode(token, settings.JWT_SECRET_KEY, algorithms=[settings.JWT_ALGORITHM])
-        user_id: int = payload.get("sub")
-        if user_id is None:
+        payload = jwt.decode(
+            token,
+            settings.JWT_SECRET_KEY,
+            algorithms=[settings.JWT_ALGORITHM],
+        )
+        sub = payload.get("sub")
+        if sub is None:
             raise credentials_exception
-    except JWTError:
+        # Legacy tokens carried "sub" as an int; PyJWT returns whatever was
+        # encoded, so coerce to int to keep both formats working.
+        user_id: int = int(sub)
+    except (jwt.PyJWTError, ValueError, TypeError):
         raise credentials_exception
 
     result = await db.execute(select(User).where(User.id == user_id))
