@@ -14,10 +14,13 @@ class Settings(BaseSettings):
 
     # App
     APP_NAME: str = "北斗 (Beidou)"
-    APP_VERSION: str = "0.1.0"
-    DEBUG: bool = False
+    APP_VERSION: str = "1.0.0"
+    DEBUG: bool = True
     SECRET_KEY: str = "change-me-in-production"
     DATABASE_URL: str = "sqlite+aiosqlite:///./novelwriter.db"
+
+    # Emergency admin bootstrap via POST /api/auth/init-admin (disabled by default)
+    ALLOW_INIT_ADMIN: bool = False
 
     # JWT
     JWT_SECRET_KEY: str = "change-me-in-production"
