@@ -3,15 +3,24 @@
 from typing import List
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.core.security import get_current_approved_user
 from app.db.session import get_db
 from app.models.chapter import Chapter
+from app.models.chapter_version import ChapterVersion
 from app.models.novel import Novel
 from app.models.user import User
-from app.schemas.content import ChapterCreate, ChapterOut, ChapterReorder, ChapterUpdate
+from app.schemas.content import (
+    ChapterCreate,
+    ChapterOut,
+    ChapterReorder,
+    ChapterUpdate,
+    ChapterVersionDetailOut,
+    ChapterVersionOut,
+)
 
 router = APIRouter(prefix="/api/novels/{novel_id}/chapters", tags=["chapters"])
 
@@ -25,6 +34,52 @@ async def _get_owned_novel(novel_id: int, user: User, db: AsyncSession) -> Novel
     if novel.user_id != user.id and user.role != "admin":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized")
     return novel
+
+
+async def _get_chapter(novel_id: int, chapter_id: int, db: AsyncSession) -> Chapter:
+    """Fetch a chapter belonging to a novel, or 404."""
+    result = await db.execute(
+        select(Chapter).where(Chapter.id == chapter_id, Chapter.novel_id == novel_id)
+    )
+    chapter = result.scalar_one_or_none()
+    if not chapter:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Chapter not found")
+    return chapter
+
+
+async def _snapshot_chapter(db: AsyncSession, chapter: Chapter, user: User) -> ChapterVersion:
+    """Capture a chapter's current state as a new ChapterVersion.
+
+    Versions are numbered per-chapter starting at 1 (max existing + 1).
+    The newest 50 versions are kept; older ones are deleted.
+    """
+    result = await db.execute(
+        select(func.max(ChapterVersion.version)).where(ChapterVersion.chapter_id == chapter.id)
+    )
+    max_version = result.scalar_one_or_none() or 0
+
+    version = ChapterVersion(
+        chapter_id=chapter.id,
+        version=max_version + 1,
+        title=chapter.title,
+        content=chapter.content,
+        word_count=chapter.word_count,
+        created_by_id=user.id,
+    )
+    db.add(version)
+    await db.flush()
+
+    # Cap: keep the newest 50 versions, delete anything older.
+    result = await db.execute(
+        select(ChapterVersion)
+        .where(ChapterVersion.chapter_id == chapter.id)
+        .order_by(ChapterVersion.version.desc())
+        .offset(50)
+    )
+    for stale in result.scalars().all():
+        await db.delete(stale)
+    await db.flush()
+    return version
 
 
 @router.get("", response_model=List[ChapterOut])
@@ -102,6 +157,11 @@ async def update_chapter(
     if not chapter:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Chapter not found")
 
+    # Snapshot the PRE-update state when the content actually changes.
+    # Title-only / order-only edits do not create versions.
+    if body.content is not None and body.content != chapter.content:
+        await _snapshot_chapter(db, chapter, user)
+
     for key, value in body.model_dump(exclude_unset=True).items():
         setattr(chapter, key, value)
 
@@ -159,3 +219,78 @@ async def reorder_chapters(
         select(Chapter).where(Chapter.novel_id == novel_id).order_by(Chapter.order_index)
     )
     return result.scalars().all()
+
+
+@router.get("/{chapter_id}/versions", response_model=List[ChapterVersionOut])
+async def list_chapter_versions(
+    novel_id: int,
+    chapter_id: int,
+    user: User = Depends(get_current_approved_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """List all versions of a chapter, newest first."""
+    await _get_owned_novel(novel_id, user, db)
+    chapter = await _get_chapter(novel_id, chapter_id, db)
+    result = await db.execute(
+        select(ChapterVersion)
+        .where(ChapterVersion.chapter_id == chapter.id)
+        .options(selectinload(ChapterVersion.creator))
+        .order_by(ChapterVersion.version.desc())
+    )
+    return result.scalars().all()
+
+
+@router.get("/{chapter_id}/versions/{version_id}", response_model=ChapterVersionDetailOut)
+async def get_chapter_version(
+    novel_id: int,
+    chapter_id: int,
+    version_id: int,
+    user: User = Depends(get_current_approved_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Get a single chapter version with its captured content."""
+    await _get_owned_novel(novel_id, user, db)
+    chapter = await _get_chapter(novel_id, chapter_id, db)
+    result = await db.execute(
+        select(ChapterVersion)
+        .where(ChapterVersion.id == version_id, ChapterVersion.chapter_id == chapter.id)
+        .options(selectinload(ChapterVersion.creator))
+    )
+    version = result.scalar_one_or_none()
+    if not version:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Version not found")
+    return version
+
+
+@router.post("/{chapter_id}/versions/{version_id}/restore", response_model=ChapterOut)
+async def restore_chapter_version(
+    novel_id: int,
+    chapter_id: int,
+    version_id: int,
+    user: User = Depends(get_current_approved_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Restore a chapter from one of its versions.
+
+    The chapter's current state is snapshotted first, then the chapter
+    title/content/word_count are overwritten from the chosen version.
+    """
+    await _get_owned_novel(novel_id, user, db)
+    chapter = await _get_chapter(novel_id, chapter_id, db)
+    result = await db.execute(
+        select(ChapterVersion).where(
+            ChapterVersion.id == version_id, ChapterVersion.chapter_id == chapter.id
+        )
+    )
+    version = result.scalar_one_or_none()
+    if not version:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Version not found")
+
+    await _snapshot_chapter(db, chapter, user)
+    chapter.title = version.title
+    chapter.content = version.content
+    chapter.word_count = version.word_count
+
+    await db.flush()
+    await db.refresh(chapter)
+    return chapter
