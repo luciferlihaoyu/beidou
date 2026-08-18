@@ -1,31 +1,8 @@
-# NovelWriter
-
-# Python
-__pycache__/
-*.py[cod]
-*.egg-info/
-dist/
-*.db
-backend/data/
-
-# Node
 node_modules/
-frontend/dist/
-
-# Environment
+dist/
+data/
+*.db
+__pycache__/
+*.pyc
 .env
-!.env.example
-
-# IDE
-.idea/
-.vscode/
-*.swp
-*.swo
-
-# OS
 .DS_Store
-Thumbs.db
-.venv/
-
-# TypeScript build info
-*.tsbuildinfo

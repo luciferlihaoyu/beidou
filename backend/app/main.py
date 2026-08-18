@@ -1,154 +1,53 @@
-"""FastAPI application factory and lifecycle."""
-
-import logging
-import time
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
-from typing import AsyncGenerator, Optional
-
 from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import text
 
-from app.api import admin, agents, ai, auth, backup, chapters, database, export, knowledge, models_config, novels, settings
-from app.core.config import get_settings
-from app.db.migrations import run_migrations
-from app.db.session import engine
-from app.services.startup import ensure_default_admin
-
-logger = logging.getLogger(__name__)
-
-# Track startup time for health endpoint
-_startup_time = time.time()
-
-# Known placeholder secret values refused when DEBUG is disabled.
-_PLACEHOLDER_SECRETS = frozenset(
-    {
-        "change-me-to-a-random-string",
-        "change-me-to-another-random-string",
-        "change-me",
-        "changeme",
-        "",
-    }
-)
-_SECRET_FIELDS = ("SECRET_KEY", "JWT_SECRET_KEY")
-
-
-def _validate_production_secrets() -> None:
-    """Fail fast in production if secret keys are placeholders or too short."""
-    app_settings = get_settings()
-    if app_settings.DEBUG:
-        return
-    for name in _SECRET_FIELDS:
-        value = getattr(app_settings, name)
-        if value in _PLACEHOLDER_SECRETS or len(value) < 32:
-            raise RuntimeError(
-                f"{name} is missing, a known placeholder, or shorter than 32 characters. "
-                "Set a real random secret via environment variable or .env when "
-                "DEBUG=false before starting in production."
-            )
+from .config import settings
+from .db import init_db
+from .routers import ai, auth, chapters, export, novels, settings as settings_router
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
-    """Application lifespan: apply database migrations on startup, cleanup on shutdown."""
-    _validate_production_secrets()
-    logger.info("Starting up — applying database migrations…")
-    await run_migrations()
-
-    # Ensure the default admin account exists
-    try:
-        from app.db.session import async_session_factory
-        async with async_session_factory() as session:
-            await ensure_default_admin(session)
-            await session.commit()
-        logger.info("Default admin check complete.")
-    except Exception as exc:
-        logger.error("Failed to ensure default admin: %s", exc, exc_info=True)
-
-    logger.info("Startup complete.")
+async def lifespan(app: FastAPI):
+    await init_db()
     yield
-    await engine.dispose()
-    logger.info("Shutdown complete.")
 
 
-def create_app() -> FastAPI:
-    """Build and return the FastAPI application instance."""
-    app_settings = get_settings()
+app = FastAPI(title="北斗 · AI 网文创作平台", lifespan=lifespan)
 
-    app = FastAPI(
-        title=app_settings.APP_NAME,
-        version=app_settings.APP_VERSION,
-        lifespan=lifespan,
-    )
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-    # CORS
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=[str(o) for o in app_settings.CORS_ORIGINS],
-        allow_credentials=("*" not in app_settings.CORS_ORIGINS),
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
-
-    # Register routers
-    app.include_router(auth.router)
-    app.include_router(novels.router)
-    app.include_router(chapters.router)
-    app.include_router(settings.router)
-    app.include_router(admin.router)
-    app.include_router(ai.router)
-    app.include_router(agents.router)
-    app.include_router(models_config.router)
-    app.include_router(knowledge.router)
-    app.include_router(database.router)
-    app.include_router(export.router)
-    app.include_router(backup.router)
-
-    @app.get("/api/health")
-    async def health():
-        """Health check with database status, version, and uptime."""
-        db_status = "ok"
-        db_error: Optional[str] = None
-        try:
-            async with engine.connect() as conn:
-                await conn.execute(text("SELECT 1"))
-                await conn.commit()
-        except Exception as exc:
-            db_status = "error"
-            db_error = str(exc)
-
-        uptime_seconds = int(time.time() - _startup_time)
-
-        return {
-            "status": "ok",
-            "version": app_settings.APP_VERSION,
-            "database": db_status,
-            "database_error": db_error,
-            "uptime_seconds": uptime_seconds,
-            "server_time": datetime.now(timezone.utc).isoformat(),
-        }
-
-    # ── 静态文件 & SPA 回退 ──
-    static_dir = Path(__file__).parent.parent / "static"
-    if static_dir.exists() and (static_dir / "index.html").exists():
-        # 挂载静态资源
-        app.mount("/assets", StaticFiles(directory=str(static_dir / "assets")), name="static-assets")
-
-        @app.get("/{full_path:path}")
-        async def serve_spa(full_path: str):
-            """SPA 回退：非 API 路径返回 index.html"""
-            file_path = static_dir / full_path
-            if file_path.is_file():
-                return FileResponse(str(file_path))
-            return FileResponse(str(static_dir / "index.html"))
-
-    return app
+app.include_router(auth.router)
+app.include_router(novels.router)
+app.include_router(chapters.router)
+app.include_router(settings_router.router)
+app.include_router(ai.router)
+app.include_router(export.router)
 
 
-# Application instance (used by uvicorn)
-app = create_app()
+@app.get("/api/health")
+async def health():
+    return {"ok": True, "name": "beidou"}
+
+
+# 静态托管前端构建产物（SPA 回退）
+static_dir = Path(settings.static_dir) if settings.static_dir else None
+if static_dir and (static_dir / "index.html").exists():
+    app.mount("/assets", StaticFiles(directory=static_dir / "assets"), name="assets")
+
+    @app.get("/{full_path:path}")
+    async def spa(full_path: str):
+        target = static_dir / full_path
+        if full_path and target.is_file():
+            return FileResponse(target)
+        return FileResponse(static_dir / "index.html")
