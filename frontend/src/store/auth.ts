@@ -1,70 +1,39 @@
-import { create } from 'zustand'
-import { authApi, setToken, getToken, type UserOut } from '@/lib/api'
+import { create } from "zustand";
+import { api, getToken, setToken, type User } from "@/lib/api";
 
 interface AuthState {
-  user: UserOut | null
-  loading: boolean
-  error: string | null
-  /** Restore user from existing token on page load */
-  restoreSession: () => Promise<void>
-  /** Login and store token */
-  login: (username: string, password: string) => Promise<void>
-  /** Register and auto-login */
-  register: (username: string, email: string, password: string) => Promise<void>
-  /** Logout — clear token and user */
-  logout: () => void
+  user: User | null;
+  ready: boolean;
+  login: (username: string, password: string) => Promise<void>;
+  logout: () => void;
+  bootstrap: () => Promise<void>;
 }
 
-export const useAuthStore = create<AuthState>((set) => ({
+export const useAuth = create<AuthState>((set) => ({
   user: null,
-  loading: false,
-  error: null,
-
-  restoreSession: async () => {
-    const token = getToken()
-    if (!token) return
-    set({ loading: true })
+  ready: false,
+  async login(username, password) {
+    const data = await api.post<{ token: string; user: User }>("/api/auth/login", {
+      username,
+      password,
+    });
+    setToken(data.token);
+    set({ user: data.user });
+  },
+  logout() {
+    setToken(null);
+    set({ user: null });
+  },
+  async bootstrap() {
+    if (!getToken()) {
+      set({ ready: true });
+      return;
+    }
     try {
-      const user = await authApi.me()
-      set({ user, loading: false })
+      const user = await api.get<User>("/api/auth/me");
+      set({ user, ready: true });
     } catch {
-      setToken(null)
-      set({ user: null, loading: false })
+      set({ user: null, ready: true });
     }
   },
-
-  login: async (username, password) => {
-    set({ loading: true, error: null })
-    try {
-      const { access_token } = await authApi.login({ username, password })
-      setToken(access_token)
-      const user = await authApi.me()
-      set({ user, loading: false })
-    } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : 'Login failed'
-      set({ error: msg, loading: false })
-      throw e
-    }
-  },
-
-  register: async (username, email, password) => {
-    set({ loading: true, error: null })
-    try {
-      await authApi.register({ username, email, password })
-      // Auto-login after registration
-      const { access_token } = await authApi.login({ username, password })
-      setToken(access_token)
-      const user = await authApi.me()
-      set({ user, loading: false })
-    } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : 'Registration failed'
-      set({ error: msg, loading: false })
-      throw e
-    }
-  },
-
-  logout: () => {
-    setToken(null)
-    set({ user: null, error: null })
-  },
-}))
+}));
