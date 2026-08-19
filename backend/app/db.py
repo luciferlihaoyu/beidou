@@ -24,6 +24,8 @@ async def init_db():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
+    await _migrate()
+
     # 首次启动创建默认管理员
     from sqlalchemy import select
 
@@ -37,4 +39,37 @@ async def init_db():
                     role="admin",
                 )
             )
+            await session.commit()
+
+
+async def _migrate():
+    """轻量迁移（SQLite 无 Alembic）：
+
+    1. chapters 表补 volume_id 列（分卷）
+    2. 剥离旧章节标题中的"第X章"前缀（序号改为系统按排序生成）
+    两个操作都是幂等的，每次启动执行。
+    """
+    from sqlalchemy import text
+
+    from .utils import strip_chapter_prefix
+
+    async with engine.begin() as conn:
+        cols = (await conn.execute(text("PRAGMA table_info(chapters)"))).fetchall()
+        if cols and not any(c[1] == "volume_id" for c in cols):
+            await conn.execute(text("ALTER TABLE chapters ADD COLUMN volume_id INTEGER REFERENCES volumes(id) ON DELETE SET NULL"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_chapters_volume_id ON chapters (volume_id)"))
+
+    from sqlalchemy import select
+
+    from .models import Chapter
+
+    async with SessionLocal() as session:
+        chapters = (await session.execute(select(Chapter))).scalars().all()
+        changed = False
+        for c in chapters:
+            stripped = strip_chapter_prefix(c.title)
+            if stripped != c.title.strip():
+                c.title = stripped
+                changed = True
+        if changed:
             await session.commit()

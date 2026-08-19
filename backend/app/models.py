@@ -39,12 +39,28 @@ class Novel(Base):
     )
 
 
+class Volume(Base):
+    """分卷。卷内章节按 sort_order 排序；章节全局序号由显示顺序计算，不落库。"""
+
+    __tablename__ = "volumes"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    novel_id: Mapped[int] = mapped_column(ForeignKey("novels.id", ondelete="CASCADE"), index=True)
+    title: Mapped[str] = mapped_column(String(200), default="")
+    sort_order: Mapped[int] = mapped_column(default=0)
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)
+
+
 class Chapter(Base):
     __tablename__ = "chapters"
 
     id: Mapped[int] = mapped_column(primary_key=True)
     novel_id: Mapped[int] = mapped_column(ForeignKey("novels.id", ondelete="CASCADE"), index=True)
-    title: Mapped[str] = mapped_column(String(200), default="未命名章节")
+    volume_id: Mapped[int | None] = mapped_column(
+        ForeignKey("volumes.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    # title 只存自定义名（如"夜探王府"），"第X章"序号前缀由系统按排序生成
+    title: Mapped[str] = mapped_column(String(200), default="")
     content: Mapped[str] = mapped_column(Text, default="")  # HTML
     sort_order: Mapped[int] = mapped_column(default=0)
     word_count: Mapped[int] = mapped_column(default=0)
