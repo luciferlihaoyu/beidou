@@ -17,18 +17,20 @@ export default function AppShell({
   back,
   title,
   actions,
+  focus,
 }: {
   children: React.ReactNode;
   back?: string;
   title?: React.ReactNode;
   actions?: React.ReactNode;
+  focus?: boolean; // 专注模式：隐藏顶栏
 }) {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
 
   return (
     <div className="flex h-screen flex-col bg-background">
-      <header className="flex h-12 shrink-0 items-center gap-2 border-b border-border bg-card px-3">
+      <header className={`flex h-12 shrink-0 items-center gap-2 border-b border-border bg-card px-3 ${focus ? "hidden" : ""}`}>
         {back ? (
           <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => navigate(back)}>
             <ChevronLeft className="h-4 w-4" />

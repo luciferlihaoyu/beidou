@@ -121,11 +121,22 @@ export interface Novel {
 
 export interface Chapter {
   id: number;
+  volume_id: number | null;
+  number: number;
   title: string;
+  display_title: string;
   sort_order: number;
   word_count: number;
   updated_at: string;
   content?: string;
+}
+
+export interface Volume {
+  id: number;
+  title: string;
+  sort_order: number;
+  chapter_count: number;
+  word_count: number;
 }
 
 export interface Character {
