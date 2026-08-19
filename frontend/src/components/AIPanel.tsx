@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
-import { ArrowDownToLine, Loader2, SendHorizonal, Sparkles, Square } from "lucide-react";
+import { ArrowDownToLine, ChevronDown, Loader2, SendHorizonal, Sparkles, Square, Wand2 } from "lucide-react";
 import { toast } from "sonner";
-import { streamPost } from "@/lib/api";
+import { api, streamPost, type SkillCard } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Textarea } from "@/components/ui/textarea";
@@ -30,8 +30,14 @@ export default function AIPanel({
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
+  const [skills, setSkills] = useState<SkillCard[]>([]);
+  const [skillsOpen, setSkillsOpen] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    api.get<SkillCard[]>("/api/skills").then(setSkills).catch(() => {});
+  }, []);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -108,6 +114,59 @@ export default function AIPanel({
           </button>
         ))}
       </div>
+
+      {skills.length > 0 && (
+        <div className="shrink-0 border-b border-border">
+          <button
+            className="flex w-full items-center justify-between px-3 py-2 text-xs text-muted-foreground transition-colors hover:text-foreground"
+            onClick={() => setSkillsOpen((v) => !v)}
+          >
+            <span className="flex items-center gap-1.5">
+              <Wand2 className="h-3.5 w-3.5 text-primary" />
+              技能卡
+              <span className="tnum">{skills.length}</span>
+            </span>
+            <ChevronDown className={`h-3.5 w-3.5 transition-transform ${skillsOpen ? "rotate-180" : ""}`} />
+          </button>
+          {skillsOpen && (
+            <div className="space-y-2.5 px-3 pb-3">
+              {(["create", "check"] as const).map((cat) => (
+                <div key={cat}>
+                  <div className="mb-1.5 text-[11px] text-muted-foreground/80">
+                    {cat === "create" ? "创作生产" : "诊断改稿"}
+                  </div>
+                  <div className="grid grid-cols-2 gap-1.5">
+                    {skills
+                      .filter((s) => s.category === cat)
+                      .map((s) => (
+                        <button
+                          key={s.slug}
+                          disabled={busy}
+                          title={s.brief || s.description}
+                          onClick={() => {
+                            const extra = input.trim();
+                            setInput("");
+                            void run(
+                              `/api/skills/${s.slug}/run`,
+                              { novel_id: novelId, chapter_id: chapterId, instruction: extra },
+                              `【技能卡 · ${s.name}】${extra ? `\n${extra}` : ""}`
+                            );
+                          }}
+                          className="truncate rounded-md border border-border px-2 py-1.5 text-left text-xs text-foreground transition-colors hover:border-primary hover:text-primary disabled:opacity-50"
+                        >
+                          {s.name}
+                        </button>
+                      ))}
+                  </div>
+                </div>
+              ))}
+              <p className="text-[11px] leading-4 text-muted-foreground/70">
+                先在下方输入框写需求，再点技能卡，AI 会按技能手册执行。
+              </p>
+            </div>
+          )}
+        </div>
+      )}
 
       <ScrollArea className="min-h-0 flex-1">
         <div className="space-y-4 p-4">
