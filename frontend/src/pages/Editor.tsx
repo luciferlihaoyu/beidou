@@ -6,6 +6,7 @@ import {
   Check,
   Download,
   FileText,
+  LibraryBig,
   Loader2,
   MoreHorizontal,
   PenLine,
@@ -250,6 +251,15 @@ export default function Editor() {
           <span className="mx-1 hidden text-xs text-muted-foreground tnum sm:block">
             全书 {totalWords.toLocaleString()} 字
           </span>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-8"
+            onClick={() => navigate(`/novel/${novelId}/library`)}
+          >
+            <LibraryBig className="mr-1 h-4 w-4" />
+            资料库
+          </Button>
           <Button
             variant="ghost"
             size="sm"
