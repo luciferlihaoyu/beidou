@@ -4,10 +4,15 @@ import {
   ArrowDown,
   ArrowUp,
   Check,
+  ChevronRight,
   Download,
   FileText,
+  FolderInput,
+  FolderPlus,
   LibraryBig,
   Loader2,
+  Maximize2,
+  Minimize2,
   MoreHorizontal,
   PenLine,
   Plus,
@@ -19,7 +24,7 @@ import { toast } from "sonner";
 import AppShell from "@/components/AppShell";
 import AIPanel from "@/components/AIPanel";
 import TiptapEditor, { type EditorHandle } from "@/components/TiptapEditor";
-import { api, type Chapter, type Novel } from "@/lib/api";
+import { api, type Chapter, type Novel, type Volume } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -32,12 +37,34 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 
 type SaveState = "saved" | "saving" | "dirty";
+
+/** 字数统计：去标签、去空白（与后端口径一致） */
+function countWords(html: string): number {
+  const text = html
+    .replace(/<\/(p|h[1-4]|li|blockquote|div)>/gi, "\n")
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<[^>]+>/g, "")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'");
+  return text.replace(/\s/g, "").length;
+}
+
+function todayKey() {
+  return `beidou_daily_${new Date().toISOString().slice(0, 10)}`;
+}
 
 export default function Editor() {
   const { id } = useParams<{ id: string }>();
@@ -46,14 +73,28 @@ export default function Editor() {
 
   const [novel, setNovel] = useState<Novel | null>(null);
   const [chapters, setChapters] = useState<Chapter[]>([]);
+  const [volumes, setVolumes] = useState<Volume[]>([]);
   const [activeId, setActiveId] = useState<number | null>(null);
   const [activeContent, setActiveContent] = useState<string | null>(null);
   const [saveState, setSaveState] = useState<SaveState>("saved");
   const [aiOpen, setAiOpen] = useState(true);
-  const [newChapterOpen, setNewChapterOpen] = useState(false);
-  const [newChapterTitle, setNewChapterTitle] = useState("");
+  const [focus, setFocus] = useState(false);
+  const [collapsedVols, setCollapsedVols] = useState<Set<number>>(new Set());
+
+  // 对话框
+  const [chDialog, setChDialog] = useState<{ volumeId: number | null } | null>(null);
+  const [chTitle, setChTitle] = useState("");
   const [renaming, setRenaming] = useState<Chapter | null>(null);
   const [renameValue, setRenameValue] = useState("");
+  const [volDialog, setVolDialog] = useState<{ id: number | null } | null>(null);
+  const [volTitle, setVolTitle] = useState("");
+
+  // 写作状态栏统计
+  const [liveWords, setLiveWords] = useState(0);
+  const [todayWords, setTodayWords] = useState(() => Number(localStorage.getItem(todayKey()) || 0));
+  const [sessionChars, setSessionChars] = useState(0);
+  const sessionStart = useRef(Date.now());
+  const prevWords = useRef(0);
 
   const editorRef = useRef<EditorHandle | null>(null);
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -67,12 +108,19 @@ export default function Editor() {
     return list;
   }, [novelId]);
 
+  const loadVolumes = useCallback(async () => {
+    const list = await api.get<Volume[]>(`/api/novels/${novelId}/volumes`);
+    setVolumes(list);
+    return list;
+  }, [novelId]);
+
   useEffect(() => {
     (async () => {
       try {
         const [n, list] = await Promise.all([
           api.get<Novel>(`/api/novels/${novelId}`),
           loadChapters(),
+          loadVolumes(),
         ]);
         setNovel(n);
         if (list.length > 0) setActiveId(list[0].id);
@@ -81,7 +129,7 @@ export default function Editor() {
         navigate("/");
       }
     })();
-  }, [novelId, loadChapters, navigate]);
+  }, [novelId, loadChapters, loadVolumes, navigate]);
 
   // 加载当前章节正文
   useEffect(() => {
@@ -95,6 +143,8 @@ export default function Editor() {
       .then((c) => {
         if (activeIdRef.current === activeId) {
           setActiveContent(c.content ?? "");
+          setLiveWords(c.word_count);
+          prevWords.current = c.word_count;
           setSaveState("saved");
         }
       })
@@ -125,6 +175,21 @@ export default function Editor() {
     (html: string) => {
       pendingHtml.current = html;
       setSaveState("dirty");
+      // 写作统计
+      const words = countWords(html);
+      const delta = words - prevWords.current;
+      if (delta > 0) {
+        prevWords.current = words;
+        setSessionChars((s) => s + delta);
+        setTodayWords((t) => {
+          const next = t + delta;
+          localStorage.setItem(todayKey(), String(next));
+          return next;
+        });
+      } else {
+        prevWords.current = words;
+      }
+      setLiveWords(words);
       if (saveTimer.current) clearTimeout(saveTimer.current);
       saveTimer.current = setTimeout(() => void flushSave(), 1200);
     },
@@ -139,18 +204,46 @@ export default function Editor() {
     };
   }, [flushSave, activeId]);
 
+  // 专注模式 Esc 退出
+  useEffect(() => {
+    if (!focus) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setFocus(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [focus]);
+
   const totalWords = useMemo(
     () => chapters.reduce((sum, c) => sum + c.word_count, 0),
     [chapters]
   );
 
+  // 卷 → 章节 分组（chapters 已由后端排好序并带 number）
+  const groups = useMemo(() => {
+    const byVol = new Map<number | null, Chapter[]>();
+    for (const c of chapters) {
+      const list = byVol.get(c.volume_id) ?? [];
+      list.push(c);
+      byVol.set(c.volume_id, list);
+    }
+    return byVol;
+  }, [chapters]);
+
+  const activeChapter = chapters.find((c) => c.id === activeId) ?? null;
+
+  // ---------- 章节操作 ----------
+
   async function createChapter() {
-    const title = newChapterTitle.trim() || `第 ${chapters.length + 1} 章`;
+    if (!chDialog) return;
     try {
-      const chapter = await api.post<Chapter>(`/api/novels/${novelId}/chapters`, { title });
-      setNewChapterOpen(false);
-      setNewChapterTitle("");
-      await loadChapters();
+      const chapter = await api.post<Chapter>(`/api/novels/${novelId}/chapters`, {
+        title: chTitle.trim(),
+        volume_id: chDialog.volumeId,
+      });
+      setChDialog(null);
+      setChTitle("");
+      await Promise.all([loadChapters(), loadVolumes()]);
       setActiveId(chapter.id);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "创建失败");
@@ -158,10 +251,11 @@ export default function Editor() {
   }
 
   async function deleteChapter(chapter: Chapter) {
-    if (!window.confirm(`删除「${chapter.title}」？正文将一并删除。`)) return;
+    if (!window.confirm(`删除「${chapter.display_title}」？正文将一并删除。`)) return;
     try {
       await api.delete(`/api/novels/${novelId}/chapters/${chapter.id}`);
       const list = await loadChapters();
+      void loadVolumes();
       if (activeId === chapter.id) setActiveId(list[0]?.id ?? null);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "删除失败");
@@ -169,24 +263,34 @@ export default function Editor() {
   }
 
   async function moveChapter(chapter: Chapter, dir: -1 | 1) {
-    const index = chapters.findIndex((c) => c.id === chapter.id);
+    const group = groups.get(chapter.volume_id) ?? [];
+    const index = group.findIndex((c) => c.id === chapter.id);
     const target = index + dir;
-    if (target < 0 || target >= chapters.length) return;
-    const ordered = [...chapters];
+    if (target < 0 || target >= group.length) return;
+    const ordered = [...group];
     [ordered[index], ordered[target]] = [ordered[target], ordered[index]];
-    setChapters(ordered);
     try {
       await api.post(`/api/novels/${novelId}/chapters/reorder`, {
+        volume_id: chapter.volume_id,
         ordered_ids: ordered.map((c) => c.id),
       });
+      await loadChapters();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "排序失败");
-      void loadChapters();
+    }
+  }
+
+  async function moveToVolume(chapter: Chapter, volumeId: number | null) {
+    try {
+      await api.put(`/api/novels/${novelId}/chapters/${chapter.id}`, { volume_id: volumeId });
+      await Promise.all([loadChapters(), loadVolumes()]);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "移动失败");
     }
   }
 
   async function renameChapter() {
-    if (!renaming || !renameValue.trim()) return;
+    if (!renaming) return;
     try {
       await api.put(`/api/novels/${novelId}/chapters/${renaming.id}`, { title: renameValue.trim() });
       setRenaming(null);
@@ -196,6 +300,61 @@ export default function Editor() {
     }
   }
 
+  // ---------- 分卷操作 ----------
+
+  async function saveVolume() {
+    if (!volDialog || !volTitle.trim()) return;
+    try {
+      if (volDialog.id === null) {
+        await api.post(`/api/novels/${novelId}/volumes`, { title: volTitle.trim() });
+      } else {
+        await api.put(`/api/novels/${novelId}/volumes/${volDialog.id}`, { title: volTitle.trim() });
+      }
+      setVolDialog(null);
+      setVolTitle("");
+      void loadVolumes();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "保存失败");
+    }
+  }
+
+  async function moveVolume(volume: Volume, dir: -1 | 1) {
+    const index = volumes.findIndex((v) => v.id === volume.id);
+    const target = index + dir;
+    if (target < 0 || target >= volumes.length) return;
+    const ordered = [...volumes];
+    [ordered[index], ordered[target]] = [ordered[target], ordered[index]];
+    try {
+      await api.post(`/api/novels/${novelId}/volumes/reorder`, {
+        ordered_ids: ordered.map((v) => v.id),
+      });
+      await Promise.all([loadVolumes(), loadChapters()]);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "排序失败");
+    }
+  }
+
+  async function deleteVolume(volume: Volume) {
+    if (!window.confirm(`删除分卷「${volume.title}」？其中的章节会移到「未分卷」。`)) return;
+    try {
+      await api.delete(`/api/novels/${novelId}/volumes/${volume.id}`);
+      await Promise.all([loadVolumes(), loadChapters()]);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "删除失败");
+    }
+  }
+
+  function toggleVol(id: number) {
+    setCollapsedVols((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  // ---------- 导出 ----------
+
   function exportNovel(format: string) {
     const token = localStorage.getItem("beidou_token") ?? "";
     fetch(`/api/novels/${novelId}/export?format=${format}`, {
@@ -203,12 +362,6 @@ export default function Editor() {
     })
       .then(async (resp) => {
         if (!resp.ok) throw new Error((await resp.json()).detail ?? "导出失败");
-        if (format === "html") {
-          const text = await resp.text();
-          const blob = new Blob([text], { type: "text/html" });
-          triggerDownload(blob, `${novel?.title ?? "novel"}.html`);
-          return;
-        }
         const blob = await resp.blob();
         triggerDownload(blob, `${novel?.title ?? "novel"}.${format}`);
       })
@@ -223,6 +376,8 @@ export default function Editor() {
     a.click();
     URL.revokeObjectURL(url);
   }
+
+  // ---------- 渲染 ----------
 
   const saveIndicator =
     saveState === "saving" ? (
@@ -239,9 +394,175 @@ export default function Editor() {
       </span>
     );
 
+  const speed = (() => {
+    const minutes = (Date.now() - sessionStart.current) / 60000;
+    return minutes >= 1 && sessionChars > 0 ? Math.round(sessionChars / minutes) : null;
+  })();
+
+  function renderChapterRow(chapter: Chapter, group: Chapter[]) {
+    const index = group.findIndex((c) => c.id === chapter.id);
+    return (
+      <li key={chapter.id} className="group relative">
+        <button
+          onClick={() => {
+            if (chapter.id !== activeId) {
+              void flushSave();
+              setActiveId(chapter.id);
+            }
+          }}
+          className={`flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm transition-colors ${
+            chapter.id === activeId
+              ? "bg-accent text-accent-foreground"
+              : "text-foreground hover:bg-muted"
+          }`}
+        >
+          <FileText
+            className={`h-3.5 w-3.5 shrink-0 ${
+              chapter.id === activeId ? "text-primary" : "text-muted-foreground/50"
+            }`}
+          />
+          <span className="min-w-0 flex-1 truncate">{chapter.display_title}</span>
+          <span className="text-[10px] text-muted-foreground tnum group-hover:hidden">
+            {chapter.word_count > 0 ? chapter.word_count : ""}
+          </span>
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <span
+                className="hidden rounded p-0.5 text-muted-foreground hover:bg-border group-hover:block"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <MoreHorizontal className="h-3.5 w-3.5" />
+              </span>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="start" onClick={(e) => e.stopPropagation()}>
+              <DropdownMenuItem
+                onClick={() => {
+                  setRenaming(chapter);
+                  setRenameValue(chapter.title);
+                }}
+              >
+                <PenLine className="mr-2 h-4 w-4" />
+                重命名
+              </DropdownMenuItem>
+              <DropdownMenuItem disabled={index === 0} onClick={() => moveChapter(chapter, -1)}>
+                <ArrowUp className="mr-2 h-4 w-4" />
+                上移
+              </DropdownMenuItem>
+              <DropdownMenuItem disabled={index === group.length - 1} onClick={() => moveChapter(chapter, 1)}>
+                <ArrowDown className="mr-2 h-4 w-4" />
+                下移
+              </DropdownMenuItem>
+              <DropdownMenuSub>
+                <DropdownMenuSubTrigger>
+                  <FolderInput className="mr-2 h-4 w-4" />
+                  移动到
+                </DropdownMenuSubTrigger>
+                <DropdownMenuSubContent>
+                  {volumes.map((v) => (
+                    <DropdownMenuItem
+                      key={v.id}
+                      disabled={chapter.volume_id === v.id}
+                      onClick={() => moveToVolume(chapter, v.id)}
+                    >
+                      {v.title}
+                    </DropdownMenuItem>
+                  ))}
+                  {chapter.volume_id !== null && (
+                    <DropdownMenuItem onClick={() => moveToVolume(chapter, null)}>
+                      未分卷
+                    </DropdownMenuItem>
+                  )}
+                </DropdownMenuSubContent>
+              </DropdownMenuSub>
+              <DropdownMenuItem
+                className="text-destructive"
+                onClick={() => deleteChapter(chapter)}
+              >
+                <Trash2 className="mr-2 h-4 w-4" />
+                删除
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </button>
+      </li>
+    );
+  }
+
+  function renderVolume(volume: Volume, volIndex: number) {
+    const volChapters = groups.get(volume.id) ?? [];
+    const isOpen = !collapsedVols.has(volume.id);
+    return (
+      <div key={volume.id}>
+        <div className="group flex items-center gap-1 rounded-md px-1.5 py-1.5 transition-colors hover:bg-muted">
+          <button className="shrink-0 text-muted-foreground" onClick={() => toggleVol(volume.id)}>
+            <ChevronRight
+              className={`h-3.5 w-3.5 transition-transform ${isOpen ? "rotate-90" : ""}`}
+            />
+          </button>
+          <div className="min-w-0 flex-1">
+            <div className="truncate text-xs font-medium">{volume.title}</div>
+            <div className="text-[10px] text-muted-foreground tnum">
+              {volume.chapter_count} 章 · {volume.word_count.toLocaleString()} 字
+            </div>
+          </div>
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <button className="rounded p-0.5 text-muted-foreground opacity-0 transition-opacity hover:bg-border group-hover:opacity-100">
+                <MoreHorizontal className="h-3.5 w-3.5" />
+              </button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="start">
+              <DropdownMenuItem
+                onClick={() => {
+                  setChDialog({ volumeId: volume.id });
+                  setChTitle("");
+                }}
+              >
+                <Plus className="mr-2 h-4 w-4" />
+                在此卷新建章节
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                onClick={() => {
+                  setVolDialog({ id: volume.id });
+                  setVolTitle(volume.title);
+                }}
+              >
+                <PenLine className="mr-2 h-4 w-4" />
+                重命名
+              </DropdownMenuItem>
+              <DropdownMenuItem disabled={volIndex === 0} onClick={() => moveVolume(volume, -1)}>
+                <ArrowUp className="mr-2 h-4 w-4" />
+                上移
+              </DropdownMenuItem>
+              <DropdownMenuItem disabled={volIndex === volumes.length - 1} onClick={() => moveVolume(volume, 1)}>
+                <ArrowDown className="mr-2 h-4 w-4" />
+                下移
+              </DropdownMenuItem>
+              <DropdownMenuItem className="text-destructive" onClick={() => deleteVolume(volume)}>
+                <Trash2 className="mr-2 h-4 w-4" />
+                删除
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </div>
+        {isOpen && (
+          <ul className="ml-3 border-l border-border pl-1.5">
+            {volChapters.map((c) => renderChapterRow(c, volChapters))}
+            {volChapters.length === 0 && (
+              <li className="px-2.5 py-1.5 text-[11px] text-muted-foreground/70">暂无章节</li>
+            )}
+          </ul>
+        )}
+      </div>
+    );
+  }
+
+  const unfiled = groups.get(null) ?? [];
+
   return (
     <AppShell
       back="/"
+      focus={focus}
       title={
         <span className="font-content font-medium">{novel?.title ?? "…"}</span>
       }
@@ -279,7 +600,6 @@ export default function Editor() {
             <DropdownMenuContent align="end">
               <DropdownMenuItem onClick={() => exportNovel("txt")}>TXT 纯文本</DropdownMenuItem>
               <DropdownMenuItem onClick={() => exportNovel("epub")}>EPUB 电子书</DropdownMenuItem>
-              <DropdownMenuItem onClick={() => exportNovel("html")}>HTML 网页</DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
           <Button
@@ -291,122 +611,125 @@ export default function Editor() {
             <Sparkles className="mr-1 h-4 w-4" />
             AI
           </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-8"
+            title="专注模式（Esc 退出）"
+            onClick={() => {
+              void flushSave();
+              setFocus(true);
+            }}
+          >
+            <Maximize2 className="mr-1 h-4 w-4" />
+            专注
+          </Button>
         </>
       }
     >
-      <div className="flex h-full">
+      <div className="relative flex h-full">
         {/* 章节栏 */}
-        <aside className="flex w-56 shrink-0 flex-col border-r border-border bg-card">
+        <aside className={`w-60 shrink-0 flex-col border-r border-border bg-card ${focus ? "hidden" : "flex"}`}>
           <div className="flex h-11 items-center justify-between border-b border-border px-3">
-            <span className="text-xs font-medium text-muted-foreground">章节</span>
-            <Button
-              variant="ghost"
-              size="icon"
-              className="h-7 w-7"
-              onClick={() => setNewChapterOpen(true)}
-            >
-              <Plus className="h-4 w-4" />
-            </Button>
+            <span className="text-xs font-medium text-muted-foreground">目录</span>
+            <div className="flex items-center">
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-7 w-7"
+                title="新建分卷"
+                onClick={() => {
+                  setVolDialog({ id: null });
+                  setVolTitle("");
+                }}
+              >
+                <FolderPlus className="h-4 w-4" />
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-7 w-7"
+                title="新建章节"
+                onClick={() => {
+                  setChDialog({ volumeId: activeChapter?.volume_id ?? volumes[0]?.id ?? null });
+                  setChTitle("");
+                }}
+              >
+                <Plus className="h-4 w-4" />
+              </Button>
+            </div>
           </div>
           <ScrollArea className="min-h-0 flex-1">
-            {chapters.length === 0 ? (
-              <div className="px-4 py-10 text-center text-xs text-muted-foreground">
+            {chapters.length === 0 && volumes.length === 0 ? (
+              <div className="px-4 py-10 text-center text-xs leading-6 text-muted-foreground">
                 还没有章节
+                <br />
+                点右上角 + 新建章节
               </div>
             ) : (
-              <ul className="p-2">
-                {chapters.map((chapter, i) => (
-                  <li key={chapter.id} className="group relative">
-                    <button
-                      onClick={() => {
-                        if (chapter.id !== activeId) {
-                          void flushSave();
-                          setActiveId(chapter.id);
-                        }
-                      }}
-                      className={`flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm transition-colors ${
-                        chapter.id === activeId
-                          ? "bg-accent text-accent-foreground"
-                          : "text-foreground hover:bg-muted"
-                      }`}
-                    >
-                      <FileText
-                        className={`h-3.5 w-3.5 shrink-0 ${
-                          chapter.id === activeId ? "text-primary" : "text-muted-foreground/50"
-                        }`}
-                      />
-                      <span className="min-w-0 flex-1 truncate">{chapter.title}</span>
-                      <span className="text-[10px] text-muted-foreground tnum group-hover:hidden">
-                        {chapter.word_count > 0 ? chapter.word_count : ""}
-                      </span>
-                      <DropdownMenu>
-                        <DropdownMenuTrigger asChild>
-                          <span
-                            className="hidden rounded p-0.5 text-muted-foreground hover:bg-border group-hover:block"
-                            onClick={(e) => e.stopPropagation()}
-                          >
-                            <MoreHorizontal className="h-3.5 w-3.5" />
-                          </span>
-                        </DropdownMenuTrigger>
-                        <DropdownMenuContent align="start" onClick={(e) => e.stopPropagation()}>
-                          <DropdownMenuItem
-                            onClick={() => {
-                              setRenaming(chapter);
-                              setRenameValue(chapter.title);
-                            }}
-                          >
-                            <PenLine className="mr-2 h-4 w-4" />
-                            重命名
-                          </DropdownMenuItem>
-                          <DropdownMenuItem disabled={i === 0} onClick={() => moveChapter(chapter, -1)}>
-                            <ArrowUp className="mr-2 h-4 w-4" />
-                            上移
-                          </DropdownMenuItem>
-                          <DropdownMenuItem
-                            disabled={i === chapters.length - 1}
-                            onClick={() => moveChapter(chapter, 1)}
-                          >
-                            <ArrowDown className="mr-2 h-4 w-4" />
-                            下移
-                          </DropdownMenuItem>
-                          <DropdownMenuItem
-                            className="text-destructive"
-                            onClick={() => deleteChapter(chapter)}
-                          >
-                            <Trash2 className="mr-2 h-4 w-4" />
-                            删除
-                          </DropdownMenuItem>
-                        </DropdownMenuContent>
-                      </DropdownMenu>
-                    </button>
-                  </li>
-                ))}
-              </ul>
+              <div className="p-2">
+                {volumes.map((v, i) => renderVolume(v, i))}
+                {unfiled.length > 0 && volumes.length > 0 && (
+                  <div className="px-1.5 pb-1 pt-2 text-[10px] font-medium text-muted-foreground">
+                    未分卷
+                  </div>
+                )}
+                <ul>{unfiled.map((c) => renderChapterRow(c, unfiled))}</ul>
+              </div>
             )}
           </ScrollArea>
         </aside>
 
         {/* 写作区 */}
-        <div className="min-w-0 flex-1 bg-background">
+        <div className="flex min-w-0 flex-1 flex-col bg-background">
           {activeId !== null && activeContent !== null ? (
-            <div className="mx-auto h-full max-w-3xl overflow-hidden bg-card shadow-[0_1px_20px_rgba(0,0,0,0.03)]">
-              <TiptapEditor
-                key={activeId}
-                content={activeContent}
-                onUpdate={onEditorUpdate}
-                onReady={(h) => (editorRef.current = h)}
-              />
+            <>
+              <div className="min-h-0 flex-1 overflow-hidden">
+                <div className="mx-auto h-full max-w-3xl overflow-hidden bg-card shadow-[0_1px_20px_rgba(0,0,0,0.03)]">
+                  <TiptapEditor
+                    key={activeId}
+                    content={activeContent}
+                    onUpdate={onEditorUpdate}
+                    onReady={(h) => (editorRef.current = h)}
+                  />
+                </div>
+              </div>
+              {/* 写作状态栏 */}
+              <div className="flex h-8 shrink-0 items-center justify-between border-t border-border bg-card px-4 text-[11px] text-muted-foreground">
+                <span className="min-w-0 truncate">
+                  {activeChapter?.display_title ?? ""}
+                </span>
+                <span className="flex shrink-0 items-center gap-3 tnum">
+                  <span>本章 {liveWords.toLocaleString()} 字</span>
+                  <span>今日 +{todayWords.toLocaleString()} 字</span>
+                  {speed !== null && <span>{speed.toLocaleString()} 字/时</span>}
+                </span>
+              </div>
+            </>
+          ) : chapters.length === 0 ? (
+            <div className="flex h-full flex-col items-center justify-center">
+              <FileText className="mb-4 h-10 w-10 text-primary/25" strokeWidth={1.2} />
+              <p className="mb-5 text-sm text-muted-foreground">这本书还没有章节</p>
+              <Button
+                onClick={() => {
+                  setChDialog({ volumeId: volumes[0]?.id ?? null });
+                  setChTitle("");
+                }}
+              >
+                <Plus className="mr-1 h-4 w-4" />
+                创建第一章
+              </Button>
             </div>
           ) : (
             <div className="flex h-full flex-col items-center justify-center text-sm text-muted-foreground">
               <FileText className="mb-3 h-8 w-8 text-muted-foreground/30" strokeWidth={1.2} />
-              {chapters.length === 0 ? "创建第一章，开始写作" : "选择左侧章节"}
+              选择左侧章节
             </div>
           )}
         </div>
 
         {/* AI 面板 */}
-        {aiOpen && (
+        {aiOpen && !focus && (
           <aside className="w-80 shrink-0 border-l border-border">
             <AIPanel
               novelId={novelId}
@@ -415,18 +738,37 @@ export default function Editor() {
             />
           </aside>
         )}
+
+        {/* 专注模式浮动退出 */}
+        {focus && (
+          <button
+            className="absolute bottom-12 right-5 flex items-center gap-1.5 rounded-full border border-border bg-card px-3 py-1.5 text-xs text-muted-foreground shadow-md transition-colors hover:text-foreground"
+            onClick={() => setFocus(false)}
+          >
+            <Minimize2 className="h-3.5 w-3.5" />
+            退出专注（Esc）
+          </button>
+        )}
       </div>
 
       {/* 新建章节 */}
-      <Dialog open={newChapterOpen} onOpenChange={setNewChapterOpen}>
+      <Dialog open={!!chDialog} onOpenChange={() => setChDialog(null)}>
         <DialogContent className="sm:max-w-sm">
           <DialogHeader>
-            <DialogTitle>新建章节</DialogTitle>
+            <DialogTitle>
+              新建章节
+              {chDialog &&
+                `（序号自动为第 ${chapters.length + 1} 章${
+                  chDialog.volumeId
+                    ? `，归入「${volumes.find((v) => v.id === chDialog.volumeId)?.title ?? ""}」`
+                    : ""
+                }）`}
+            </DialogTitle>
           </DialogHeader>
           <Input
-            value={newChapterTitle}
-            onChange={(e) => setNewChapterTitle(e.target.value)}
-            placeholder={`第 ${chapters.length + 1} 章`}
+            value={chTitle}
+            onChange={(e) => setChTitle(e.target.value)}
+            placeholder="章节名（可选，如：夜探王府）"
             autoFocus
             onKeyDown={(e) => e.key === "Enter" && void createChapter()}
           />
@@ -436,7 +778,7 @@ export default function Editor() {
         </DialogContent>
       </Dialog>
 
-      {/* 重命名 */}
+      {/* 重命名章节（只改自定义名，序号自动维护） */}
       <Dialog open={!!renaming} onOpenChange={() => setRenaming(null)}>
         <DialogContent className="sm:max-w-sm">
           <DialogHeader>
@@ -445,11 +787,31 @@ export default function Editor() {
           <Input
             value={renameValue}
             onChange={(e) => setRenameValue(e.target.value)}
+            placeholder="留空则只显示序号"
             autoFocus
             onKeyDown={(e) => e.key === "Enter" && void renameChapter()}
           />
           <DialogFooter>
             <Button onClick={() => void renameChapter()}>保存</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* 新建/重命名分卷 */}
+      <Dialog open={!!volDialog} onOpenChange={() => setVolDialog(null)}>
+        <DialogContent className="sm:max-w-sm">
+          <DialogHeader>
+            <DialogTitle>{volDialog?.id === null ? "新建分卷" : "重命名分卷"}</DialogTitle>
+          </DialogHeader>
+          <Input
+            value={volTitle}
+            onChange={(e) => setVolTitle(e.target.value)}
+            placeholder="如：第一卷 潜龙在渊"
+            autoFocus
+            onKeyDown={(e) => e.key === "Enter" && void saveVolume()}
+          />
+          <DialogFooter>
+            <Button onClick={() => void saveVolume()}>保存</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
