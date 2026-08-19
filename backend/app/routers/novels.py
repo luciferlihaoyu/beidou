@@ -19,6 +19,7 @@ class NovelIn(BaseModel):
     genre: str = Field(default="", max_length=50)
     status: str = Field(default="连载中", max_length=20)
     cover_color: str = Field(default="#004EFF", max_length=20)
+    daily_goal: int = Field(default=0, ge=0, le=1_000_000)
 
 
 class NovelOut(BaseModel):
@@ -29,6 +30,7 @@ class NovelOut(BaseModel):
     genre: str
     status: str
     cover_color: str
+    daily_goal: int = 0
     chapter_count: int = 0
     total_words: int = 0
     updated_at: object = None
@@ -89,6 +91,20 @@ async def update_novel(
     await db.commit()
     await db.refresh(novel)
     return (await _with_stats(db, [novel]))[0]
+
+
+class GoalIn(BaseModel):
+    daily_goal: int = Field(ge=0, le=1_000_000)
+
+
+@router.put("/{novel_id}/goal")
+async def set_daily_goal(
+    data: GoalIn, novel: Novel = Depends(get_owned_novel), db: AsyncSession = Depends(get_db)
+):
+    """单独设置每日码字目标（0 = 关闭）。"""
+    novel.daily_goal = data.daily_goal
+    await db.commit()
+    return {"ok": True, "daily_goal": novel.daily_goal}
 
 
 @router.delete("/{novel_id}")

@@ -47,7 +47,8 @@ async def _migrate():
 
     1. chapters 表补 volume_id 列（分卷）
     2. 剥离旧章节标题中的"第X章"前缀（序号改为系统按排序生成）
-    两个操作都是幂等的，每次启动执行。
+    3. novels 表补 daily_goal 列（每日码字目标）
+    以上操作都是幂等的，每次启动执行。
     """
     from sqlalchemy import text
 
@@ -58,6 +59,9 @@ async def _migrate():
         if cols and not any(c[1] == "volume_id" for c in cols):
             await conn.execute(text("ALTER TABLE chapters ADD COLUMN volume_id INTEGER REFERENCES volumes(id) ON DELETE SET NULL"))
             await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_chapters_volume_id ON chapters (volume_id)"))
+        novel_cols = (await conn.execute(text("PRAGMA table_info(novels)"))).fetchall()
+        if novel_cols and not any(c[1] == "daily_goal" for c in novel_cols):
+            await conn.execute(text("ALTER TABLE novels ADD COLUMN daily_goal INTEGER NOT NULL DEFAULT 0"))
 
     from sqlalchemy import select
 

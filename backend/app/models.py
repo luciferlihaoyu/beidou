@@ -31,6 +31,7 @@ class Novel(Base):
     genre: Mapped[str] = mapped_column(String(50), default="")
     status: Mapped[str] = mapped_column(String(20), default="连载中")  # 连载中 / 已完结 / 暂停
     cover_color: Mapped[str] = mapped_column(String(20), default="#004EFF")
+    daily_goal: Mapped[int] = mapped_column(default=0)  # 每日码字目标（0 = 不设定）
     created_at: Mapped[datetime] = mapped_column(default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(default=utcnow, onupdate=utcnow)
 
@@ -142,6 +143,18 @@ class ChatMessage(Base):
     created_at: Mapped[datetime] = mapped_column(default=utcnow)
 
 
+class WritingStat(Base):
+    """每日码字统计：保存章节正文时按字数正增量累计（北京时间）。"""
+
+    __tablename__ = "writing_stats"
+    __table_args__ = (UniqueConstraint("novel_id", "date", name="uq_writing_stat_novel_date"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    novel_id: Mapped[int] = mapped_column(ForeignKey("novels.id", ondelete="CASCADE"), index=True)
+    date: Mapped[str] = mapped_column(String(10))  # YYYY-MM-DD
+    words: Mapped[int] = mapped_column(default=0)
+
+
 class LibraryFolder(Base):
     """资料库目录。novel_id 为 NULL 表示公共库，否则为某本小说的专属库。"""
 
@@ -169,7 +182,7 @@ class LibraryItem(Base):
         ForeignKey("novels.id", ondelete="CASCADE"), nullable=True, index=True
     )
     folder_id: Mapped[int | None] = mapped_column(
-        ForeignKey("library_folders.id", ondelete="SET NULL"), nullable=True, index=True
+        ForeignKey("library_items.id", ondelete="SET NULL"), nullable=True, index=True
     )
     title: Mapped[str] = mapped_column(String(200))
     content: Mapped[str] = mapped_column(Text, default="")

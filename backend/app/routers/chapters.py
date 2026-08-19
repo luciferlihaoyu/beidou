@@ -129,8 +129,14 @@ async def update_chapter(
     if data.title is not None:
         chapter.title = data.title.strip()
     if data.content is not None:
+        new_count = count_words(data.content)
+        delta = new_count - chapter.word_count
         chapter.content = data.content
-        chapter.word_count = count_words(data.content)
+        chapter.word_count = new_count
+        if delta > 0:
+            from .stats import record_writing
+
+            await record_writing(db, novel.id, delta)
     if "volume_id" in data.model_fields_set and data.volume_id != chapter.volume_id:
         await _check_volume(novel, data.volume_id, db)
         # 移到目标卷末尾
