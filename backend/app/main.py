@@ -8,7 +8,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .config import settings
 from .db import init_db
-from .routers import ai, auth, chapters, export, novels, settings as settings_router
+from .routers import ai, auth, chapters, export, integrations, library, novels, skills, settings as settings_router
 
 
 @asynccontextmanager
@@ -32,6 +32,9 @@ app.include_router(novels.router)
 app.include_router(chapters.router)
 app.include_router(settings_router.router)
 app.include_router(ai.router)
+app.include_router(skills.router)
+app.include_router(library.router)
+app.include_router(integrations.router)
 app.include_router(export.router)
 
 
