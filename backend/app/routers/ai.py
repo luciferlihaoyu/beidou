@@ -186,8 +186,16 @@ async def _novel_context(novel: Novel, db: AsyncSession, chapter_id: int | None 
     if chapter_id:
         chapter = await db.get(Chapter, chapter_id)
         if chapter is not None and chapter.novel_id == novel.id:
+            from ..models import Volume
+            from ..utils import chapter_display_title, order_chapters
+
+            chapters = (await db.execute(select(Chapter).where(Chapter.novel_id == novel.id))).scalars().all()
+            volumes = (await db.execute(select(Volume).where(Volume.novel_id == novel.id))).scalars().all()
+            ordered = order_chapters(chapters, volumes)
+            number = next((i + 1 for i, c in enumerate(ordered) if c.id == chapter.id), 1)
+            title = chapter_display_title(chapter.title, number)
             text = strip_html(chapter.content)
-            parts.append(f"当前章节《{chapter.title}》正文（节选结尾）：\n{text[-3000:]}")
+            parts.append(f"当前章节《{title}》正文（节选结尾）：\n{text[-3000:]}")
     return "\n".join(parts)
 
 
