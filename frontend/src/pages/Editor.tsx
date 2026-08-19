@@ -3,6 +3,7 @@ import { useNavigate, useParams } from "react-router";
 import {
   ArrowDown,
   ArrowUp,
+  CalendarDays,
   Check,
   ChevronRight,
   Download,
@@ -16,6 +17,7 @@ import {
   MoreHorizontal,
   PenLine,
   Plus,
+  Search,
   Settings,
   Sparkles,
   Trash2,
@@ -24,7 +26,7 @@ import { toast } from "sonner";
 import AppShell from "@/components/AppShell";
 import AIPanel from "@/components/AIPanel";
 import TiptapEditor, { type EditorHandle } from "@/components/TiptapEditor";
-import { api, type Chapter, type Novel, type Volume } from "@/lib/api";
+import { api, type Chapter, type DailyStat, type Novel, type SearchResult, type Volume } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -62,8 +64,43 @@ function countWords(html: string): number {
   return text.replace(/\s/g, "").length;
 }
 
-function todayKey() {
-  return `beidou_daily_${new Date().toISOString().slice(0, 10)}`;
+function fmtDate(d: Date): string {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+function heatColor(words: number, goal: number): string {
+  if (words <= 0) return "bg-muted";
+  const target = goal > 0 ? goal : 2000;
+  const ratio = words / target;
+  if (ratio < 0.5) return "bg-primary/25";
+  if (ratio < 1) return "bg-primary/55";
+  if (ratio < 1.5) return "bg-primary/80";
+  return "bg-primary";
+}
+
+/** GitHub 风格码字热力图：近 15 周，每格一天，颜色深浅按当日字数/目标比例 */
+function WritingHeatmap({ stats, goal }: { stats: DailyStat[]; goal: number }) {
+  const map = new Map(stats.map((s) => [s.date, s.words]));
+  const today = new Date();
+  const start = new Date(today);
+  start.setDate(start.getDate() - (15 * 7 - 1));
+  start.setDate(start.getDate() - ((start.getDay() + 6) % 7)); // 对齐到周一
+  const cells: { date: string; words: number }[] = [];
+  for (let d = new Date(start); d <= today; d.setDate(d.getDate() + 1)) {
+    const key = fmtDate(d);
+    cells.push({ date: key, words: map.get(key) ?? 0 });
+  }
+  return (
+    <div className="grid grid-flow-col grid-rows-7 justify-start gap-[3px]">
+      {cells.map((c) => (
+        <div
+          key={c.date}
+          title={`${c.date} · ${c.words.toLocaleString()} 字`}
+          className={`h-2.5 w-2.5 rounded-[3px] ${heatColor(c.words, goal)}`}
+        />
+      ))}
+    </div>
+  );
 }
 
 export default function Editor() {
@@ -89,12 +126,27 @@ export default function Editor() {
   const [volDialog, setVolDialog] = useState<{ id: number | null } | null>(null);
   const [volTitle, setVolTitle] = useState("");
 
-  // 写作状态栏统计
+  // 写作状态栏统计（今日字数以服务端统计为基准，本地输入实时累加）
   const [liveWords, setLiveWords] = useState(0);
-  const [todayWords, setTodayWords] = useState(() => Number(localStorage.getItem(todayKey()) || 0));
+  const [todayWords, setTodayWords] = useState(0);
   const [sessionChars, setSessionChars] = useState(0);
   const sessionStart = useRef(Date.now());
   const prevWords = useRef(0);
+
+  // 码字日历
+  const [statsOpen, setStatsOpen] = useState(false);
+  const [statsList, setStatsList] = useState<DailyStat[]>([]);
+  const [goalInput, setGoalInput] = useState("");
+
+  // 全书查找替换
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchQ, setSearchQ] = useState("");
+  const [searching, setSearching] = useState(false);
+  const [searchResults, setSearchResults] = useState<SearchResult[] | null>(null);
+  const [searchTotal, setSearchTotal] = useState(0);
+  const [replaceWith, setReplaceWith] = useState("");
+  const [replacing, setReplacing] = useState(false);
+  const [reloadTick, setReloadTick] = useState(0); // 替换后强制重载编辑器
 
   const editorRef = useRef<EditorHandle | null>(null);
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -124,6 +176,11 @@ export default function Editor() {
         ]);
         setNovel(n);
         if (list.length > 0) setActiveId(list[0].id);
+        // 今日已写字数以服务端统计为准
+        api
+          .get<DailyStat[]>(`/api/novels/${novelId}/stats/daily?days=1`)
+          .then((s) => setTodayWords(s[0]?.words ?? 0))
+          .catch(() => {});
       } catch (err) {
         toast.error(err instanceof Error ? err.message : "加载失败");
         navigate("/");
@@ -181,11 +238,7 @@ export default function Editor() {
       if (delta > 0) {
         prevWords.current = words;
         setSessionChars((s) => s + delta);
-        setTodayWords((t) => {
-          const next = t + delta;
-          localStorage.setItem(todayKey(), String(next));
-          return next;
-        });
+        setTodayWords((t) => t + delta);
       } else {
         prevWords.current = words;
       }
@@ -351,6 +404,90 @@ export default function Editor() {
       else next.add(id);
       return next;
     });
+  }
+
+  // ---------- 码字日历 / 每日目标 ----------
+
+  async function openStats() {
+    setStatsOpen(true);
+    setGoalInput(String(novel?.daily_goal ?? 0));
+    try {
+      setStatsList(await api.get<DailyStat[]>(`/api/novels/${novelId}/stats/daily?days=120`));
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "统计加载失败");
+    }
+  }
+
+  async function saveGoal() {
+    const goal = Math.max(0, Math.floor(Number(goalInput) || 0));
+    try {
+      await api.put(`/api/novels/${novelId}/goal`, { daily_goal: goal });
+      setNovel((n) => (n ? { ...n, daily_goal: goal } : n));
+      toast.success(goal > 0 ? `每日目标已设为 ${goal.toLocaleString()} 字` : "已关闭每日目标");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "保存失败");
+    }
+  }
+
+  const writingDays = statsList.filter((s) => s.words > 0).length;
+  const streak = (() => {
+    const map = new Map(statsList.map((s) => [s.date, s.words]));
+    const d = new Date();
+    if (!(map.get(fmtDate(d)) ?? 0)) d.setDate(d.getDate() - 1); // 今天还没写不算断签
+    let n = 0;
+    while ((map.get(fmtDate(d)) ?? 0) > 0) {
+      n++;
+      d.setDate(d.getDate() - 1);
+    }
+    return n;
+  })();
+
+  // ---------- 全书查找替换 ----------
+
+  async function runSearch() {
+    const q = searchQ.trim();
+    if (!q) return;
+    setSearching(true);
+    try {
+      const data = await api.get<{ total: number; results: SearchResult[] }>(
+        `/api/novels/${novelId}/search?q=${encodeURIComponent(q)}`
+      );
+      setSearchResults(data.results);
+      setSearchTotal(data.total);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "查找失败");
+    } finally {
+      setSearching(false);
+    }
+  }
+
+  async function runReplace() {
+    const q = searchQ.trim();
+    if (!q || !searchResults?.length) return;
+    if (!window.confirm(`确认把全书 ${searchTotal} 处「${q}」替换为「${replaceWith}」？`)) return;
+    setReplacing(true);
+    try {
+      await flushSave(); // 先落盘，避免未保存内容覆盖替换结果
+      const r = await api.post<{ replaced: number; chapters_affected: number }>(
+        `/api/novels/${novelId}/search/replace`,
+        { query: q, replacement: replaceWith }
+      );
+      toast.success(`已替换 ${r.replaced} 处（涉及 ${r.chapters_affected} 章）`);
+      await Promise.all([loadChapters(), loadVolumes()]);
+      if (activeId !== null) {
+        const c = await api.get<Chapter>(`/api/novels/${novelId}/chapters/${activeId}`);
+        setActiveContent(c.content ?? "");
+        setLiveWords(c.word_count);
+        prevWords.current = c.word_count;
+        pendingHtml.current = null;
+        setReloadTick((t) => t + 1); // 强制重挂载编辑器以显示新内容
+      }
+      await runSearch();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "替换失败");
+    } finally {
+      setReplacing(false);
+    }
   }
 
   // ---------- 导出 ----------
@@ -575,6 +712,15 @@ export default function Editor() {
           <Button
             variant="ghost"
             size="sm"
+            className="h-8 px-2"
+            title="码字日历 / 每日目标"
+            onClick={() => void openStats()}
+          >
+            <CalendarDays className="h-4 w-4" />
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
             className="h-8"
             onClick={() => navigate(`/novel/${novelId}/library`)}
           >
@@ -637,6 +783,15 @@ export default function Editor() {
                 variant="ghost"
                 size="icon"
                 className="h-7 w-7"
+                title="全书查找替换"
+                onClick={() => setSearchOpen(true)}
+              >
+                <Search className="h-4 w-4" />
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-7 w-7"
                 title="新建分卷"
                 onClick={() => {
                   setVolDialog({ id: null });
@@ -687,7 +842,7 @@ export default function Editor() {
               <div className="min-h-0 flex-1 overflow-hidden">
                 <div className="mx-auto h-full max-w-3xl overflow-hidden bg-card shadow-[0_1px_20px_rgba(0,0,0,0.03)]">
                   <TiptapEditor
-                    key={activeId}
+                    key={`${activeId}:${reloadTick}`}
                     content={activeContent}
                     onUpdate={onEditorUpdate}
                     onReady={(h) => (editorRef.current = h)}
@@ -701,7 +856,14 @@ export default function Editor() {
                 </span>
                 <span className="flex shrink-0 items-center gap-3 tnum">
                   <span>本章 {liveWords.toLocaleString()} 字</span>
-                  <span>今日 +{todayWords.toLocaleString()} 字</span>
+                  {novel?.daily_goal ? (
+                    <span className={todayWords >= novel.daily_goal ? "font-medium text-primary" : ""}>
+                      今日 {todayWords.toLocaleString()}/{novel.daily_goal.toLocaleString()} 字
+                      {todayWords >= novel.daily_goal ? " ✓" : ""}
+                    </span>
+                  ) : (
+                    <span>今日 +{todayWords.toLocaleString()} 字</span>
+                  )}
                   {speed !== null && <span>{speed.toLocaleString()} 字/时</span>}
                 </span>
               </div>
@@ -813,6 +975,133 @@ export default function Editor() {
           <DialogFooter>
             <Button onClick={() => void saveVolume()}>保存</Button>
           </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* 码字日历 / 每日目标 */}
+      <Dialog open={statsOpen} onOpenChange={setStatsOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>码字日历</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-1.5">
+            <div className="flex items-baseline justify-between text-xs">
+              <span className="text-muted-foreground">
+                今日已写 <span className="font-medium text-foreground tnum">{todayWords.toLocaleString()}</span> 字
+              </span>
+              {(novel?.daily_goal ?? 0) > 0 && (
+                <span className="text-muted-foreground tnum">
+                  目标 {novel!.daily_goal.toLocaleString()} 字
+                  {todayWords >= novel!.daily_goal && <span className="ml-1 text-primary">已达成 ✓</span>}
+                </span>
+              )}
+            </div>
+            {(novel?.daily_goal ?? 0) > 0 && (
+              <div className="h-1.5 overflow-hidden rounded bg-muted">
+                <div
+                  className="h-1.5 rounded bg-primary transition-all"
+                  style={{ width: `${Math.min(100, (todayWords / novel!.daily_goal) * 100)}%` }}
+                />
+              </div>
+            )}
+          </div>
+          <WritingHeatmap stats={statsList} goal={novel?.daily_goal ?? 0} />
+          <div className="flex items-center justify-between text-[11px] text-muted-foreground">
+            <span className="tnum">
+              累计 {writingDays} 天码字 · 连续 {streak} 天
+            </span>
+            <span>近 15 周</span>
+          </div>
+          <div className="flex items-center gap-2 border-t border-border pt-3">
+            <span className="shrink-0 text-xs">每日目标</span>
+            <Input
+              value={goalInput}
+              onChange={(e) => setGoalInput(e.target.value.replace(/[^\d]/g, ""))}
+              className="h-8 w-24 tnum"
+              inputMode="numeric"
+              placeholder="0"
+              onKeyDown={(e) => e.key === "Enter" && void saveGoal()}
+            />
+            <span className="text-xs text-muted-foreground">字（0 = 不设定）</span>
+            <Button size="sm" className="ml-auto h-8" onClick={() => void saveGoal()}>
+              保存
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* 全书查找替换 */}
+      <Dialog open={searchOpen} onOpenChange={setSearchOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>全书查找替换</DialogTitle>
+          </DialogHeader>
+          <div className="flex gap-2">
+            <Input
+              value={searchQ}
+              onChange={(e) => setSearchQ(e.target.value)}
+              placeholder="查找内容（如角色名、地名）"
+              autoFocus
+              onKeyDown={(e) => e.key === "Enter" && void runSearch()}
+            />
+            <Button
+              variant="secondary"
+              onClick={() => void runSearch()}
+              disabled={!searchQ.trim() || searching}
+            >
+              {searching ? <Loader2 className="h-4 w-4 animate-spin" /> : "查找"}
+            </Button>
+          </div>
+          {searchResults !== null &&
+            (searchResults.length === 0 ? (
+              <p className="py-4 text-center text-xs text-muted-foreground">
+                全书没有找到「{searchQ.trim()}」
+              </p>
+            ) : (
+              <>
+                <p className="text-xs text-muted-foreground tnum">
+                  共 {searchTotal} 处，分布在 {searchResults.length} 章
+                </p>
+                <ScrollArea className="max-h-48">
+                  <ul className="space-y-0.5">
+                    {searchResults.map((r) => (
+                      <li key={r.chapter_id}>
+                        <button
+                          className="flex w-full items-center justify-between rounded-md px-2.5 py-1.5 text-left text-sm transition-colors hover:bg-muted"
+                          onClick={() => {
+                            setSearchOpen(false);
+                            if (r.chapter_id !== activeId) {
+                              void flushSave();
+                              setActiveId(r.chapter_id);
+                            }
+                          }}
+                        >
+                          <span className="min-w-0 truncate">{r.display_title}</span>
+                          <span className="shrink-0 text-[11px] text-muted-foreground tnum">
+                            {r.count} 处
+                          </span>
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                </ScrollArea>
+                <div className="flex gap-2 border-t border-border pt-3">
+                  <Input
+                    value={replaceWith}
+                    onChange={(e) => setReplaceWith(e.target.value)}
+                    placeholder="替换为（留空 = 删除这些文字）"
+                  />
+                  <Button
+                    variant="destructive"
+                    className="shrink-0"
+                    onClick={() => void runReplace()}
+                    disabled={replacing}
+                  >
+                    {replacing ? <Loader2 className="h-4 w-4 animate-spin" /> : "全部替换"}
+                  </Button>
+                </div>
+              </>
+            ))}
         </DialogContent>
       </Dialog>
     </AppShell>

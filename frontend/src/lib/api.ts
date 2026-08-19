@@ -114,9 +114,21 @@ export interface Novel {
   genre: string;
   status: string;
   cover_color: string;
+  daily_goal: number;
   chapter_count: number;
   total_words: number;
   updated_at: string;
+}
+
+export interface DailyStat {
+  date: string; // YYYY-MM-DD
+  words: number;
+}
+
+export interface SearchResult {
+  chapter_id: number;
+  display_title: string;
+  count: number;
 }
 
 export interface Chapter {
