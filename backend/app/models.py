@@ -124,3 +124,57 @@ class ChatMessage(Base):
     role: Mapped[str] = mapped_column(String(16))  # user / assistant
     content: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(default=utcnow)
+
+
+class LibraryFolder(Base):
+    """资料库目录。novel_id 为 NULL 表示公共库，否则为某本小说的专属库。"""
+
+    __tablename__ = "library_folders"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    novel_id: Mapped[int | None] = mapped_column(
+        ForeignKey("novels.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    parent_id: Mapped[int | None] = mapped_column(
+        ForeignKey("library_folders.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    name: Mapped[str] = mapped_column(String(100))
+    sort_order: Mapped[int] = mapped_column(default=0)
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)
+
+
+class LibraryItem(Base):
+    """资料库条目（文本资料）。novel_id 为 NULL 表示公共库。"""
+
+    __tablename__ = "library_items"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    novel_id: Mapped[int | None] = mapped_column(
+        ForeignKey("novels.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    folder_id: Mapped[int | None] = mapped_column(
+        ForeignKey("library_folders.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    title: Mapped[str] = mapped_column(String(200))
+    content: Mapped[str] = mapped_column(Text, default="")
+    tags: Mapped[str] = mapped_column(String(300), default="")  # 逗号分隔
+    summary: Mapped[str] = mapped_column(String(500), default="")
+    source: Mapped[str] = mapped_column(String(20), default="manual")  # manual / agent / import / xuanji
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(default=utcnow, onupdate=utcnow)
+
+
+class IntegrationConfig(Base):
+    """第三方集成配置（每用户一行）：AList WebDAV 备份 / 璇玑知识库对接。"""
+
+    __tablename__ = "integration_configs"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), unique=True, index=True)
+    alist_url: Mapped[str] = mapped_column(String(300), default="")
+    alist_username: Mapped[str] = mapped_column(String(100), default="")
+    alist_password: Mapped[str] = mapped_column(String(300), default="")
+    alist_root: Mapped[str] = mapped_column(String(200), default="/beidou")
+    xuanji_url: Mapped[str] = mapped_column(String(300), default="")
+    xuanji_api_key: Mapped[str] = mapped_column(String(300), default="")
+    updated_at: Mapped[datetime] = mapped_column(default=utcnow, onupdate=utcnow)
