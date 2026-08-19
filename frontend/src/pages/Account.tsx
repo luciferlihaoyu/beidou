@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
-import { KeyRound, Loader2, MoreHorizontal, PenLine, Plug, Plus, Star, Trash2 } from "lucide-react";
+import { DatabaseBackup, KeyRound, Loader2, MoreHorizontal, PenLine, Plug, Plus, Star, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import AppShell from "@/components/AppShell";
-import { api, type AIConfig } from "@/lib/api";
+import { api, type AIConfig, type IntegrationState } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -53,11 +53,89 @@ export default function Account() {
   const [testing, setTesting] = useState(false);
   const [pw, setPw] = useState({ old_password: "", new_password: "", confirm: "" });
   const [pwSaving, setPwSaving] = useState(false);
+  const [integ, setInteg] = useState<IntegrationState | null>(null);
+  const [integForm, setIntegForm] = useState({
+    alist_url: "",
+    alist_username: "",
+    alist_password: "",
+    alist_root: "/beidou",
+    xuanji_url: "",
+    xuanji_api_key: "",
+  });
+  const [integSaving, setIntegSaving] = useState(false);
+  const [alistTesting, setAlistTesting] = useState(false);
+  const [backingUp, setBackingUp] = useState(false);
+  const [xuanjiTesting, setXuanjiTesting] = useState(false);
 
   const load = useCallback(() => {
     api.get<AIConfig[]>("/api/ai/configs").then(setConfigs).catch((e) => toast.error(e.message));
+    api
+      .get<IntegrationState>("/api/integrations")
+      .then((s) => {
+        setInteg(s);
+        setIntegForm({
+          alist_url: s.alist_url,
+          alist_username: s.alist_username,
+          alist_password: "",
+          alist_root: s.alist_root,
+          xuanji_url: s.xuanji_url,
+          xuanji_api_key: "",
+        });
+      })
+      .catch(() => {});
   }, []);
   useEffect(load, [load]);
+
+  async function saveIntegration() {
+    setIntegSaving(true);
+    try {
+      await api.put("/api/integrations", integForm);
+      toast.success("集成配置已保存");
+      load();
+    } catch (e) {
+      toast.error((e as Error).message);
+    } finally {
+      setIntegSaving(false);
+    }
+  }
+
+  async function testAlist() {
+    setAlistTesting(true);
+    try {
+      await api.put("/api/integrations", integForm);
+      const r = await api.post<{ message: string }>("/api/integrations/alist/test");
+      toast.success(r.message);
+    } catch (e) {
+      toast.error((e as Error).message);
+    } finally {
+      setAlistTesting(false);
+    }
+  }
+
+  async function backupNow() {
+    setBackingUp(true);
+    try {
+      const r = await api.post<{ path: string; size: number }>("/api/integrations/alist/backup");
+      toast.success(`备份完成：${r.path}（${(r.size / 1024).toFixed(0)} KB）`);
+    } catch (e) {
+      toast.error((e as Error).message);
+    } finally {
+      setBackingUp(false);
+    }
+  }
+
+  async function testXuanji() {
+    setXuanjiTesting(true);
+    try {
+      await api.put("/api/integrations", integForm);
+      const r = await api.post<{ message: string }>("/api/integrations/xuanji/test");
+      toast.success(r.message);
+    } catch (e) {
+      toast.error((e as Error).message);
+    } finally {
+      setXuanjiTesting(false);
+    }
+  }
 
   function openDialog(item: AIConfig | null) {
     setEditing(item);
@@ -191,6 +269,132 @@ export default function Account() {
                 ))}
               </div>
             )}
+          </section>
+
+          <Separator className="my-8" />
+
+          {/* 存储与集成 */}
+          <section>
+            <div className="mb-4">
+              <h2 className="flex items-center gap-2 text-base font-semibold">
+                <DatabaseBackup className="h-4 w-4 text-primary" />
+                存储与集成
+              </h2>
+              <p className="mt-0.5 text-xs text-muted-foreground">
+                AList 用于数据备份、文本上传与封面图存储；璇玑为个人知识库（同步功能即将开通）
+              </p>
+            </div>
+
+            <div className="grid gap-6 lg:grid-cols-2">
+              {/* AList */}
+              <div className="space-y-3 rounded-lg border border-border bg-card p-5">
+                <div className="flex items-center justify-between">
+                  <h3 className="text-sm font-medium">AList 存储</h3>
+                  {integ?.has_alist_password && integ.alist_url && (
+                    <Badge variant="secondary">已配置</Badge>
+                  )}
+                </div>
+                <div className="space-y-2">
+                  <Label>AList 地址</Label>
+                  <Input
+                    value={integForm.alist_url}
+                    onChange={(e) => setIntegForm({ ...integForm, alist_url: e.target.value })}
+                    placeholder="https://alist.example.com"
+                    className="tnum"
+                  />
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <div className="space-y-2">
+                    <Label>账号</Label>
+                    <Input
+                      value={integForm.alist_username}
+                      onChange={(e) => setIntegForm({ ...integForm, alist_username: e.target.value })}
+                      placeholder="beidou"
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label>密码{integ?.has_alist_password && "（留空不修改）"}</Label>
+                    <Input
+                      type="password"
+                      value={integForm.alist_password}
+                      onChange={(e) => setIntegForm({ ...integForm, alist_password: e.target.value })}
+                      placeholder="••••••"
+                      autoComplete="off"
+                    />
+                  </div>
+                </div>
+                <div className="space-y-2">
+                  <Label>根目录</Label>
+                  <Input
+                    value={integForm.alist_root}
+                    onChange={(e) => setIntegForm({ ...integForm, alist_root: e.target.value })}
+                    placeholder="/beidou"
+                    className="tnum"
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    会自动创建 backup / uploads / covers 三个子目录
+                  </p>
+                </div>
+                <div className="flex gap-2 pt-1">
+                  <Button variant="outline" size="sm" onClick={() => void testAlist()} disabled={alistTesting}>
+                    {alistTesting ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : <Plug className="mr-1 h-3.5 w-3.5" />}
+                    测试连接
+                  </Button>
+                  <Button variant="outline" size="sm" onClick={() => void backupNow()} disabled={backingUp}>
+                    {backingUp ? (
+                      <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
+                    ) : (
+                      <DatabaseBackup className="mr-1 h-3.5 w-3.5" />
+                    )}
+                    立即备份
+                  </Button>
+                </div>
+              </div>
+
+              {/* 璇玑 */}
+              <div className="space-y-3 rounded-lg border border-border bg-card p-5">
+                <div className="flex items-center justify-between">
+                  <h3 className="text-sm font-medium">璇玑知识库</h3>
+                  <Badge variant="outline" className="text-muted-foreground">
+                    同步即将开通
+                  </Badge>
+                </div>
+                <div className="space-y-2">
+                  <Label>璇玑地址</Label>
+                  <Input
+                    value={integForm.xuanji_url}
+                    onChange={(e) => setIntegForm({ ...integForm, xuanji_url: e.target.value })}
+                    placeholder="https://xuanji.example.com"
+                    className="tnum"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label>API Key{integ?.has_xuanji_key && "（留空不修改）"}</Label>
+                  <Input
+                    type="password"
+                    value={integForm.xuanji_api_key}
+                    onChange={(e) => setIntegForm({ ...integForm, xuanji_api_key: e.target.value })}
+                    placeholder="在璇玑中创建 API Key"
+                    autoComplete="off"
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    开通后可将璇玑的知识条目同步到公共资料库
+                  </p>
+                </div>
+                <div className="flex gap-2 pt-1">
+                  <Button variant="outline" size="sm" onClick={() => void testXuanji()} disabled={xuanjiTesting}>
+                    {xuanjiTesting ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : <Plug className="mr-1 h-3.5 w-3.5" />}
+                    测试连接
+                  </Button>
+                </div>
+              </div>
+            </div>
+
+            <div className="mt-4 flex justify-end">
+              <Button size="sm" onClick={() => void saveIntegration()} disabled={integSaving}>
+                {integSaving ? "保存中…" : "保存集成配置"}
+              </Button>
+            </div>
           </section>
 
           <Separator className="my-8" />
