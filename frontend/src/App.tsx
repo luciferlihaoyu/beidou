@@ -1,5 +1,5 @@
 import { useEffect } from "react";
-import { Navigate, Route, Routes } from "react-router";
+import { Navigate, Route, Routes, useParams } from "react-router";
 import { Toaster } from "@/components/ui/sonner";
 import { useAuth } from "@/store/auth";
 import Login from "@/pages/Login";
@@ -7,6 +7,12 @@ import Bookshelf from "@/pages/Bookshelf";
 import Editor from "@/pages/Editor";
 import NovelSettings from "@/pages/NovelSettings";
 import Account from "@/pages/Account";
+import Library from "@/pages/Library";
+
+function NovelLibrary() {
+  const { id } = useParams();
+  return <Library novelId={Number(id)} />;
+}
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
   const { user, ready } = useAuth();
@@ -53,6 +59,22 @@ export default function App() {
           element={
             <RequireAuth>
               <NovelSettings />
+            </RequireAuth>
+          }
+        />
+        <Route
+          path="/library"
+          element={
+            <RequireAuth>
+              <Library />
+            </RequireAuth>
+          }
+        />
+        <Route
+          path="/novel/:id/library"
+          element={
+            <RequireAuth>
+              <NovelLibrary />
             </RequireAuth>
           }
         />

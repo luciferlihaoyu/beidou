@@ -167,3 +167,49 @@ export interface AIConfig {
   is_default: boolean;
   has_key: boolean;
 }
+
+export interface SkillCard {
+  slug: string;
+  name: string;
+  category: "create" | "check";
+  category_label: string;
+  brief: string;
+  description: string;
+}
+
+export interface LibraryFolder {
+  id: number;
+  novel_id: number | null;
+  parent_id: number | null;
+  name: string;
+  sort_order: number;
+}
+
+export interface LibraryItem {
+  id: number;
+  novel_id: number | null;
+  folder_id: number | null;
+  title: string;
+  content: string;
+  tags: string;
+  summary: string;
+  source: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface OrganizeSuggestion {
+  summary: string;
+  tags: string[];
+  suggested_folder: string;
+  reason: string;
+}
+
+export interface IntegrationState {
+  alist_url: string;
+  alist_username: string;
+  alist_root: string;
+  has_alist_password: boolean;
+  xuanji_url: string;
+  has_xuanji_key: boolean;
+}

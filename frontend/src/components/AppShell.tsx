@@ -1,5 +1,5 @@
 import { Link, useNavigate } from "react-router";
-import { ChevronLeft, Library, LogOut, Settings2 } from "lucide-react";
+import { ChevronLeft, Library, LibraryBig, LogOut, Settings2 } from "lucide-react";
 import BeidouMark from "@/components/BeidouMark";
 import { Button } from "@/components/ui/button";
 import {
@@ -57,6 +57,10 @@ export default function AppShell({
             <DropdownMenuItem onClick={() => navigate("/")}>
               <Library className="mr-2 h-4 w-4" />
               书架
+            </DropdownMenuItem>
+            <DropdownMenuItem onClick={() => navigate("/library")}>
+              <LibraryBig className="mr-2 h-4 w-4" />
+              资料库
             </DropdownMenuItem>
             <DropdownMenuItem onClick={() => navigate("/account")}>
               <Settings2 className="mr-2 h-4 w-4" />
