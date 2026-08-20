@@ -51,6 +51,8 @@ export default function Account() {
   const [editing, setEditing] = useState<AIConfig | null>(null);
   const [form, setForm] = useState<ConfigForm>(emptyConfig);
   const [testing, setTesting] = useState(false);
+  const [models, setModels] = useState<string[]>([]);
+  const [modelsLoading, setModelsLoading] = useState(false);
   const [pw, setPw] = useState({ old_password: "", new_password: "", confirm: "" });
   const [pwSaving, setPwSaving] = useState(false);
   const [integ, setInteg] = useState<IntegrationState | null>(null);
@@ -139,6 +141,7 @@ export default function Account() {
 
   function openDialog(item: AIConfig | null) {
     setEditing(item);
+    setModels([]);
     setForm(
       item
         ? { name: item.name, base_url: item.base_url, api_key: "", model: item.model, is_default: item.is_default }
@@ -163,10 +166,16 @@ export default function Account() {
 
   async function test() {
     const key = form.api_key.trim();
-    if (!key && !editing?.has_key) return toast.error("请先填写 API Key");
     setTesting(true);
     try {
-      if (!key) return toast.info("测试需要重新输入 API Key");
+      if (!key) {
+        // 编辑已有配置且未重填 Key：直接用服务端保存的 Key 测试
+        if (!editing) return toast.error("请先填写 API Key");
+        if (!editing.has_key) return toast.error("该配置尚未保存 Key，请先填写");
+        const r = await api.post<{ reply: string }>(`/api/ai/configs/${editing.id}/test`, {});
+        toast.success(`连接成功（使用已保存的 Key）：${r.reply.slice(0, 30)}`);
+        return;
+      }
       const result = await api.post<{ reply: string }>("/api/ai/test", {
         base_url: form.base_url,
         api_key: key,
@@ -177,6 +186,31 @@ export default function Account() {
       toast.error((e as Error).message);
     } finally {
       setTesting(false);
+    }
+  }
+
+  async function fetchModels() {
+    const key = form.api_key.trim();
+    if (!key) {
+      if (editing?.has_key) return toast.info("拉取模型列表需要重新输入一次 API Key（服务端不回传 Key）");
+      return toast.error("请先填写 API Key");
+    }
+    setModelsLoading(true);
+    try {
+      const r = await api.post<{ models: string[] }>("/api/ai/models", {
+        base_url: form.base_url,
+        api_key: key,
+      });
+      if (r.models.length === 0) {
+        toast.info("接口没有返回模型列表，请手动填写模型名");
+      } else {
+        setModels(r.models);
+        toast.success(`获取到 ${r.models.length} 个模型，点模型输入框选择`);
+      }
+    } catch (e) {
+      toast.error((e as Error).message);
+    } finally {
+      setModelsLoading(false);
     }
   }
 
@@ -486,7 +520,30 @@ export default function Account() {
             </div>
             <div className="space-y-2">
               <Label>模型</Label>
-              <Input value={form.model} onChange={(e) => setForm({ ...form, model: e.target.value })} className="tnum" />
+              <div className="flex gap-2">
+                <Input
+                  list="model-options"
+                  value={form.model}
+                  onChange={(e) => setForm({ ...form, model: e.target.value })}
+                  className="tnum"
+                  placeholder="点右侧按钮拉取可选项，或直接填写"
+                />
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="shrink-0"
+                  onClick={() => void fetchModels()}
+                  disabled={modelsLoading}
+                >
+                  {modelsLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : "获取模型列表"}
+                </Button>
+              </div>
+              <datalist id="model-options">
+                {models.map((m) => (
+                  <option key={m} value={m} />
+                ))}
+              </datalist>
             </div>
             <label className="flex items-center gap-2 text-sm">
               <input

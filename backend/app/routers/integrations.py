@@ -79,21 +79,60 @@ def _alist_client(config: IntegrationConfig) -> WebDAVClient:
 
 @router.post("/alist/test")
 async def test_alist(user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
-    """测试 AList WebDAV 连通性，并确保目录结构存在（backup/uploads/covers）。"""
+    """分步诊断 AList：① 登录与读取 → ② 创建目录 → ③ 写入并删除测试文件。"""
     config = await _get_config(user, db)
     client = _alist_client(config)
     root = config.alist_root.strip("/")
+
+    # ① 登录 + WebDAV 读取
     try:
         await client.test()
-        for sub in ("", "backup", "uploads", "covers"):
-            await client.ensure_dirs(f"{root}/{sub}".strip("/"))
     except WebDAVError as exc:
         if exc.status == 401:
-            raise HTTPException(400, "AList 账号或密码错误（401）")
+            raise HTTPException(400, "账号或密码错误（401）。请核对 AList 的用户名和密码")
+        if exc.status == 403:
+            raise HTTPException(
+                400,
+                "登录成功但没有 WebDAV 权限（403）。请到 AList 后台 → 用户，确认该账号勾选了「WebDAV 读取」",
+            )
+        if exc.status == 404:
+            raise HTTPException(400, "WebDAV 路径不存在（404）。地址只需填站点根地址（如 https://alist.example.com），程序会自动补 /dav")
         raise HTTPException(400, str(exc))
     except httpx.HTTPError as exc:
         raise HTTPException(400, f"无法连接 AList: {exc.__class__.__name__}")
-    return {"ok": True, "message": f"连接成功，目录 {config.alist_root}/（backup、uploads、covers）已就绪"}
+
+    # ② 创建目录结构（根目录 + backup/uploads/covers）
+    try:
+        for sub in ("", "backup", "uploads", "covers"):
+            await client.ensure_dirs(f"{root}/{sub}".strip("/"))
+    except WebDAVError as exc:
+        if exc.status in (401, 403):
+            raise HTTPException(
+                400,
+                f"读取正常，但创建目录 /{root} 被拒绝（{exc.status}）。请检查：① AList 后台该用户需勾选「WebDAV 管理」权限；"
+                "② 如果用了「路径权限/元信息」限制，确认对该路径放行；③ 该路径所在存储（如 115 网盘）是否允许通过 WebDAV 建目录",
+            )
+        raise HTTPException(400, f"创建目录失败：{exc}")
+    except httpx.HTTPError as exc:
+        raise HTTPException(400, f"连接中断: {exc.__class__.__name__}")
+
+    # ③ 真实写入测试：上传一个小文件再删掉
+    probe = f"{root}/.beidou-write-test"
+    try:
+        await client.put(probe, b"ok", "text/plain")
+        await client.delete(probe)
+    except WebDAVError as exc:
+        if exc.status in (401, 403):
+            raise HTTPException(
+                400,
+                f"目录已就绪，但写入文件被拒绝（{exc.status}）。该存储（如 115 网盘）可能不允许通过 WebDAV 上传，"
+                "建议在 AList 后台换一个支持写入的存储，或把根目录改到本地存储路径",
+            )
+        raise HTTPException(400, f"写入测试失败：{exc}")
+    except httpx.HTTPError as exc:
+        raise HTTPException(400, f"连接中断: {exc.__class__.__name__}")
+
+    return {"ok": True, "message": f"连接成功，/{root}/（backup、uploads、covers）已就绪，读写均正常"}
 
 
 def _sqlite_path() -> str:
@@ -140,15 +179,18 @@ async def backup_to_alist(user: User = Depends(get_current_user), db: AsyncSessi
 
 @router.post("/xuanji/test")
 async def test_xuanji(user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
-    """璇玑连通性测试（数据同步待下一步对接）。"""
+    """璇玑连通性测试：带上 API Key 请求，能分辨地址不通与 Key 无效（数据同步待下一步对接）。"""
     config = await _get_config(user, db)
     if not config.xuanji_url:
         raise HTTPException(400, "请先填写璇玑地址")
+    headers = {"Authorization": f"Bearer {config.xuanji_api_key}"} if config.xuanji_api_key else {}
     try:
         async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
-            resp = await client.get(config.xuanji_url.rstrip("/") + "/")
+            resp = await client.get(config.xuanji_url.rstrip("/") + "/", headers=headers)
     except httpx.HTTPError as exc:
         raise HTTPException(400, f"无法连接璇玑: {exc.__class__.__name__}")
-    if resp.status_code >= 500:
+    if resp.status_code in (401, 403):
+        raise HTTPException(400, "璇玑拒绝了 API Key（401/403），请检查 Key 是否正确")
+    if resp.status_code >= 400:
         raise HTTPException(400, f"璇玑返回 {resp.status_code}")
     return {"ok": True, "message": f"璇玑可达（HTTP {resp.status_code}），资料同步功能将在下一步开通"}

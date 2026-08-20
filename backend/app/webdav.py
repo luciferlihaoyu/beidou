@@ -74,10 +74,18 @@ class WebDAVClient:
             raise WebDAVError("GET", path, resp.status_code)
         return resp.content
 
+    async def delete(self, path: str) -> None:
+        async with httpx.AsyncClient(timeout=TIMEOUT, auth=self.auth, follow_redirects=True) as client:
+            resp = await client.request("DELETE", self._url(path))
+        if resp.status_code not in (200, 202, 204, 404):  # 404 = 本来就不存在
+            raise WebDAVError("DELETE", path, resp.status_code)
+
     async def test(self) -> None:
-        """连通性测试：PROPFIND 根目录。207=正常，401=凭据错误。"""
+        """连通性测试：PROPFIND 根目录。207=正常，401/403=凭据错误，404=路径不存在。"""
         status, _ = await self.propfind("", depth="0")
-        if status == 401:
-            raise WebDAVError("PROPFIND", "/", 401)
+        if status in (401, 403):
+            raise WebDAVError("PROPFIND", "/", status)
+        if status == 404:
+            raise WebDAVError("PROPFIND", "/", 404)
         if status not in (200, 207):
             raise WebDAVError("PROPFIND", "/", status)

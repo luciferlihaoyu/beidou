@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import get_db
@@ -15,6 +16,14 @@ from ..models import AIConfig, Chapter, ChatMessage, Novel, User
 from ..utils import strip_html
 
 router = APIRouter(prefix="/api/ai", tags=["ai"])
+
+
+def _normalize_base(base_url: str) -> str:
+    """规范化接口地址：去掉末尾斜杠和 /v1 后缀，避免拼出 /v1/v1/... 的错误路径。"""
+    base = base_url.strip().rstrip("/")
+    if base.endswith("/v1"):
+        base = base[:-3]
+    return base
 
 
 # ---------- 配置管理 ----------
@@ -58,7 +67,11 @@ async def create_config(data: AIConfigIn, user: User = Depends(get_current_user)
         await db.execute(update(AIConfig).where(AIConfig.user_id == user.id).values(is_default=False))
     config = AIConfig(user_id=user.id, **data.model_dump())
     db.add(config)
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(400, f"已存在同名配置「{data.name}」，请换个名称或直接编辑原配置")
     await db.refresh(config)
     return _to_out(config)
 
@@ -77,7 +90,11 @@ async def update_config(
         if key == "api_key" and not value:
             continue
         setattr(config, key, value)
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(400, f"已存在同名配置「{data.name}」，请换个名称")
     await db.refresh(config)
     return _to_out(config)
 
@@ -96,7 +113,7 @@ async def delete_config(config_id: int, user: User = Depends(get_current_user), 
 
 async def _stream_openai(config: AIConfig, messages: list[dict]):
     """以 SSE 形式转发 OpenAI 兼容接口的流式响应。"""
-    url = config.base_url.rstrip("/") + "/v1/chat/completions"
+    url = _normalize_base(config.base_url) + "/v1/chat/completions"
     payload = {"model": config.model, "messages": messages, "stream": True}
     headers = {"Authorization": f"Bearer {config.api_key}"}
 
@@ -137,12 +154,12 @@ class TestIn(BaseModel):
 
 @router.post("/test")
 async def test_connection(data: TestIn, user: User = Depends(get_current_user)):
-    """测试接口连通性（非流式，限制输出长度）。"""
-    url = data.base_url.rstrip("/") + "/v1/chat/completions"
+    """测试接口连通性（非流式，限制输出长度）。地址带 /v1 后缀也没关系，会自动规范化。"""
+    url = _normalize_base(data.base_url) + "/v1/chat/completions"
     payload = {
         "model": data.model,
         "messages": [{"role": "user", "content": "回复「连接成功」四个字即可。"}],
-        "max_tokens": 20,
+        "max_tokens": 32,
         "stream": False,
     }
     try:
@@ -150,10 +167,52 @@ async def test_connection(data: TestIn, user: User = Depends(get_current_user)):
             resp = await client.post(url, json=payload, headers={"Authorization": f"Bearer {data.api_key}"})
     except httpx.HTTPError as exc:
         raise HTTPException(400, f"无法连接: {exc.__class__.__name__}")
+    if resp.status_code == 401 or resp.status_code == 403:
+        raise HTTPException(400, "API Key 无效或没有权限（401/403）")
+    if resp.status_code == 404:
+        raise HTTPException(400, f"接口路径不存在（404）：{url}，请检查 Base URL 是否正确")
     if resp.status_code != 200:
         raise HTTPException(400, f"接口返回 {resp.status_code}: {resp.text[:200]}")
     content = resp.json()["choices"][0]["message"]["content"]
     return {"ok": True, "reply": content}
+
+
+class ModelsIn(BaseModel):
+    base_url: str
+    api_key: str
+
+
+@router.post("/models")
+async def list_models(data: ModelsIn, user: User = Depends(get_current_user)):
+    """从接口方拉取可用模型列表（OpenAI 兼容 GET /v1/models）。"""
+    url = _normalize_base(data.base_url) + "/v1/models"
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            resp = await client.get(url, headers={"Authorization": f"Bearer {data.api_key}"})
+    except httpx.HTTPError as exc:
+        raise HTTPException(400, f"无法连接: {exc.__class__.__name__}")
+    if resp.status_code in (401, 403):
+        raise HTTPException(400, "API Key 无效或没有权限（401/403）")
+    if resp.status_code != 200:
+        raise HTTPException(400, f"接口返回 {resp.status_code}: {resp.text[:200]}")
+    try:
+        models = sorted(m["id"] for m in resp.json().get("data", []) if isinstance(m, dict) and "id" in m)
+    except Exception:
+        raise HTTPException(400, "返回内容不是 OpenAI 兼容的模型列表格式")
+    return {"models": models}
+
+
+@router.post("/configs/{config_id}/test")
+async def test_saved_config(config_id: int, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    """用已保存的 Key 测试某个配置，无需重新输入。"""
+    config = await db.get(AIConfig, config_id)
+    if config is None or config.user_id != user.id:
+        raise HTTPException(404, "配置不存在")
+    if not config.api_key:
+        raise HTTPException(400, "该配置没有保存 API Key，请编辑并填写")
+    return await test_connection(
+        TestIn(base_url=config.base_url, api_key=config.api_key, model=config.model), user
+    )
 
 
 # ---------- 小说上下文组装 ----------
