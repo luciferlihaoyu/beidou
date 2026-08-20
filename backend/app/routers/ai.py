@@ -11,7 +11,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import get_db
-from ..deps import get_current_user, get_default_ai_config, get_owned_novel
+from ..deps import get_ai_config, get_current_user, get_owned_novel
 from ..models import AIConfig, Chapter, ChatMessage, Novel, User
 from ..utils import strip_html
 
@@ -268,12 +268,13 @@ class ChatIn(BaseModel):
     novel_id: int
     message: str = Field(min_length=1, max_length=4000)
     chapter_id: int | None = None
+    config_id: int | None = None
 
 
 @router.post("/chat")
 async def chat(data: ChatIn, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     novel = await get_owned_novel(data.novel_id, user, db)
-    config = await get_default_ai_config(user, db)
+    config = await get_ai_config(user, db, data.config_id)
 
     history = (
         await db.execute(
@@ -296,6 +297,7 @@ class QuickActionIn(BaseModel):
     novel_id: int
     chapter_id: int | None = None
     instruction: str = Field(default="", max_length=1000)
+    config_id: int | None = None
 
 
 ACTION_PROMPTS = {
@@ -312,7 +314,7 @@ async def quick_action(
     if action not in ACTION_PROMPTS:
         raise HTTPException(404, "不支持的操作")
     novel = await get_owned_novel(data.novel_id, user, db)
-    config = await get_default_ai_config(user, db)
+    config = await get_ai_config(user, db, data.config_id)
     context = await _novel_context(novel, db, data.chapter_id)
     prompt = ACTION_PROMPTS[action]
     if data.instruction:

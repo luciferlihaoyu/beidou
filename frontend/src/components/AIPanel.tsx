@@ -1,10 +1,13 @@
 import { useEffect, useRef, useState } from "react";
 import { ArrowDownToLine, ChevronDown, Loader2, SendHorizonal, Sparkles, Square, Wand2 } from "lucide-react";
 import { toast } from "sonner";
-import { api, streamPost, type SkillCard } from "@/lib/api";
+import { api, streamPost, type AIConfig, type SkillCard } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
+
+const CONFIG_KEY = "beidou:ai-config";
 
 interface Message {
   role: "user" | "assistant";
@@ -32,12 +35,32 @@ export default function AIPanel({
   const [busy, setBusy] = useState(false);
   const [skills, setSkills] = useState<SkillCard[]>([]);
   const [skillsOpen, setSkillsOpen] = useState(false);
+  const [configs, setConfigs] = useState<AIConfig[]>([]);
+  const [configId, setConfigId] = useState<number | null>(() => {
+    const raw = localStorage.getItem(CONFIG_KEY);
+    return raw ? Number(raw) : null;
+  });
   const abortRef = useRef<AbortController | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     api.get<SkillCard[]>("/api/skills").then(setSkills).catch(() => {});
+    api
+      .get<AIConfig[]>("/api/ai/configs")
+      .then((list) => {
+        setConfigs(list);
+        // 本地记的配置已被删除时回退到默认
+        setConfigId((cur) => (cur && list.some((c) => c.id === cur) ? cur : null));
+      })
+      .catch(() => {});
   }, []);
+
+  function pickConfig(value: string) {
+    const id = value === "default" ? null : Number(value);
+    setConfigId(id);
+    if (id) localStorage.setItem(CONFIG_KEY, String(id));
+    else localStorage.removeItem(CONFIG_KEY);
+  }
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -66,7 +89,8 @@ export default function AIPanel({
       { role: "assistant" as const, content: "", streaming: true },
     ]);
     try {
-      await streamPost(path, body, appendAssistantChunk, abortRef.current.signal);
+      const payload = { ...(body as Record<string, unknown>), config_id: configId ?? undefined };
+      await streamPost(path, payload, appendAssistantChunk, abortRef.current.signal);
     } catch (err) {
       if ((err as Error).name !== "AbortError") {
         toast.error(err instanceof Error ? err.message : "请求失败");
@@ -84,19 +108,47 @@ export default function AIPanel({
 
   return (
     <div className="flex h-full flex-col bg-card">
-      <div className="flex h-11 shrink-0 items-center justify-between border-b border-border px-4">
-        <div className="flex items-center gap-1.5 text-sm font-medium">
+      <div className="flex h-11 shrink-0 items-center justify-between gap-2 border-b border-border px-4">
+        <div className="flex shrink-0 items-center gap-1.5 text-sm font-medium">
           <Sparkles className="h-4 w-4 text-primary" />
           AI 助手
         </div>
-        {messages.length > 0 && (
-          <button
-            className="text-xs text-muted-foreground transition-colors hover:text-foreground"
-            onClick={() => setMessages([])}
-          >
-            清空
-          </button>
-        )}
+        <div className="flex min-w-0 items-center gap-2">
+          {configs.length > 0 && (
+            <Select value={configId ? String(configId) : "default"} onValueChange={pickConfig}>
+              <SelectTrigger
+                className="h-7 w-auto max-w-36 gap-1 border-0 bg-muted/60 px-2 text-xs shadow-none focus:ring-0 [&>svg]:h-3 [&>svg]:w-3"
+                title="切换 AI 模型"
+              >
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent align="end">
+                <SelectItem value="default" className="text-xs">
+                  默认配置
+                  {configs.find((c) => c.is_default) && (
+                    <span className="ml-1 text-muted-foreground">
+                      · {configs.find((c) => c.is_default)!.model}
+                    </span>
+                  )}
+                </SelectItem>
+                {configs.map((c) => (
+                  <SelectItem key={c.id} value={String(c.id)} className="text-xs">
+                    {c.name}
+                    <span className="ml-1 text-muted-foreground">· {c.model}</span>
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          )}
+          {messages.length > 0 && (
+            <button
+              className="shrink-0 text-xs text-muted-foreground transition-colors hover:text-foreground"
+              onClick={() => setMessages([])}
+            >
+              清空
+            </button>
+          )}
+        </div>
       </div>
 
       <div className="grid shrink-0 grid-cols-3 gap-2 border-b border-border p-3">

@@ -48,6 +48,20 @@ async def get_default_ai_config(user: User, db: AsyncSession):
     return config
 
 
+async def get_ai_config(user: User, db: AsyncSession, config_id: int | None = None):
+    """按请求指定的 config_id 取 AI 配置；未指定时回退到默认配置。"""
+    if config_id is None:
+        return await get_default_ai_config(user, db)
+    from .models import AIConfig
+
+    config = await db.get(AIConfig, config_id)
+    if config is None or config.user_id != user.id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "AI 配置不存在")
+    if not config.api_key:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"配置「{config.name}」还没有填写 API Key")
+    return config
+
+
 def count_words(text: str) -> int:
     """字数统计：去掉空白后的字符数（网文通行口径）。"""
     import re

@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import get_db
-from ..deps import get_current_user, get_default_ai_config, get_owned_novel
+from ..deps import get_ai_config, get_current_user, get_owned_novel
 from ..models import User
 from .ai import _novel_context, _stream_openai, SYSTEM_PROMPT
 
@@ -90,6 +90,7 @@ class SkillRunIn(BaseModel):
     novel_id: int
     chapter_id: int | None = None
     instruction: str = Field(default="", max_length=2000)
+    config_id: int | None = None
 
 
 @router.post("/{slug}/run")
@@ -103,7 +104,7 @@ async def run_skill(
         raise HTTPException(404, "技能卡不存在")
 
     novel = await get_owned_novel(data.novel_id, user, db)
-    config = await get_default_ai_config(user, db)
+    config = await get_ai_config(user, db, data.config_id)
     context = await _novel_context(novel, db, data.chapter_id)
 
     task = data.instruction.strip() or f"请运用「{card['name']}」技能，基于以上作品信息开始工作，并主动给出产出。"
