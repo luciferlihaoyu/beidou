@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { ArrowDownToLine, ChevronDown, Loader2, SendHorizonal, Sparkles, Square, Wand2 } from "lucide-react";
+import { ArrowDownToLine, ChevronDown, Loader2, SendHorizonal, Sparkles, Square, Wand2, X } from "lucide-react";
 import { toast } from "sonner";
 import { api, streamPost, type AIConfig, type SkillCard } from "@/lib/api";
 import { Button } from "@/components/ui/button";
@@ -40,8 +40,10 @@ export default function AIPanel({
     const raw = localStorage.getItem(CONFIG_KEY);
     return raw ? Number(raw) : null;
   });
+  const [skill, setSkill] = useState<SkillCard | null>(null); // 挂接到下一条消息的技能卡
   const abortRef = useRef<AbortController | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
     api.get<SkillCard[]>("/api/skills").then(setSkills).catch(() => {});
@@ -54,6 +56,41 @@ export default function AIPanel({
       })
       .catch(() => {});
   }, []);
+
+  // 打开面板时恢复这本书的对话历史
+  useEffect(() => {
+    setMessages([]);
+    setSkill(null);
+    api
+      .get<{ role: "user" | "assistant"; content: string }[]>(`/api/ai/history?novel_id=${novelId}`)
+      .then((rows) => setMessages(rows.map((r) => ({ role: r.role, content: r.content }))))
+      .catch(() => {});
+  }, [novelId]);
+
+  function clearAll() {
+    setMessages([]);
+    api.delete(`/api/ai/history?novel_id=${novelId}`).catch(() => {});
+  }
+
+  function stageSkill(s: SkillCard) {
+    setSkill(s);
+    setSkillsOpen(false);
+    inputRef.current?.focus();
+  }
+
+  function send() {
+    const text = input.trim() || (skill ? `请运用「${skill.name}」技能开始工作。` : "");
+    if (!text || busy) return;
+    const slug = skill?.slug;
+    const echo = skill ? `【技能卡 · ${skill.name}】${input.trim() ? `\n${input.trim()}` : ""}` : text;
+    setInput("");
+    setSkill(null);
+    void run(
+      "/api/ai/chat",
+      { novel_id: novelId, chapter_id: chapterId, message: text, skill: slug ?? undefined },
+      echo
+    );
+  }
 
   function pickConfig(value: string) {
     const id = value === "default" ? null : Number(value);
@@ -143,7 +180,7 @@ export default function AIPanel({
           {messages.length > 0 && (
             <button
               className="shrink-0 text-xs text-muted-foreground transition-colors hover:text-foreground"
-              onClick={() => setMessages([])}
+              onClick={clearAll}
             >
               清空
             </button>
@@ -195,16 +232,12 @@ export default function AIPanel({
                           key={s.slug}
                           disabled={busy}
                           title={s.brief || s.description}
-                          onClick={() => {
-                            const extra = input.trim();
-                            setInput("");
-                            void run(
-                              `/api/skills/${s.slug}/run`,
-                              { novel_id: novelId, chapter_id: chapterId, instruction: extra },
-                              `【技能卡 · ${s.name}】${extra ? `\n${extra}` : ""}`
-                            );
-                          }}
-                          className="truncate rounded-md border border-border px-2 py-1.5 text-left text-xs text-foreground transition-colors hover:border-primary hover:text-primary disabled:opacity-50"
+                          onClick={() => stageSkill(s)}
+                          className={`truncate rounded-md border px-2 py-1.5 text-left text-xs transition-colors disabled:opacity-50 ${
+                            skill?.slug === s.slug
+                              ? "border-primary bg-primary/10 text-primary"
+                              : "border-border text-foreground hover:border-primary hover:text-primary"
+                          }`}
                         >
                           {s.name}
                         </button>
@@ -213,7 +246,7 @@ export default function AIPanel({
                 </div>
               ))}
               <p className="text-[11px] leading-4 text-muted-foreground/70">
-                先在下方输入框写需求，再点技能卡，AI 会按技能手册执行。
+                点技能卡挂接到对话，再输入你的需求发送；挂接后这轮对话会按技能手册执行，且保留上下文。
               </p>
             </div>
           )}
@@ -271,21 +304,34 @@ export default function AIPanel({
       </ScrollArea>
 
       <div className="shrink-0 border-t border-border p-3">
+        {skill && (
+          <div className="mb-2 flex items-center gap-1.5">
+            <span className="flex items-center gap-1 rounded-full border border-primary/40 bg-primary/10 px-2 py-0.5 text-xs text-primary">
+              <Wand2 className="h-3 w-3" />
+              {skill.name}
+              <button
+                className="ml-0.5 rounded-full p-0.5 transition-colors hover:bg-primary/20"
+                title="移除技能卡"
+                onClick={() => setSkill(null)}
+              >
+                <X className="h-3 w-3" />
+              </button>
+            </span>
+            <span className="text-[11px] text-muted-foreground">将按技能手册执行</span>
+          </div>
+        )}
         <div className="flex items-end gap-2">
           <Textarea
+            ref={inputRef}
             value={input}
             onChange={(e) => setInput(e.target.value)}
             rows={2}
-            placeholder="向 AI 提问，如：帮我想一个反转…"
+            placeholder={skill ? `向「${skill.name}」描述你的需求…（可直接发送）` : "向 AI 提问，如：帮我想一个反转…"}
             className="min-h-0 resize-none text-sm"
             onKeyDown={(e) => {
               if (e.key === "Enter" && !e.shiftKey) {
                 e.preventDefault();
-                if (input.trim() && !busy) {
-                  const text = input.trim();
-                  setInput("");
-                  void run("/api/ai/chat", { novel_id: novelId, chapter_id: chapterId, message: text }, text);
-                }
+                send();
               }
             }}
           />
@@ -297,12 +343,8 @@ export default function AIPanel({
             <Button
               size="icon"
               className="h-9 w-9 shrink-0"
-              disabled={!input.trim()}
-              onClick={() => {
-                const text = input.trim();
-                setInput("");
-                void run("/api/ai/chat", { novel_id: novelId, chapter_id: chapterId, message: text }, text);
-              }}
+              disabled={!input.trim() && !skill}
+              onClick={send}
             >
               <SendHorizonal className="h-4 w-4" />
             </Button>

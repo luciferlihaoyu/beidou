@@ -1,10 +1,12 @@
-"""资料库：公共库 + 小说专属库，目录树 + 文本条目 + 全文搜索 + AI 辅助整理。"""
+"""资料库：公共库 + 小说专属库，目录树 + 文本条目 + 全文搜索 + 文件上传 + AI 辅助整理。"""
 
+import io
 import json
 import re
+import zipfile
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile
 from pydantic import BaseModel, Field
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -14,6 +16,8 @@ from ..deps import get_current_user, get_default_ai_config, get_owned_novel
 from ..models import LibraryFolder, LibraryItem, Novel, User
 
 router = APIRouter(prefix="/api/library", tags=["library"])
+
+UPLOAD_MAX_SIZE = 20 * 1024 * 1024  # 单个文件 20MB
 
 
 # ---------- 作用域校验 ----------
@@ -224,6 +228,87 @@ async def delete_item(item_id: int, user: User = Depends(get_current_user), db: 
     await db.delete(item)
     await db.commit()
     return {"ok": True}
+
+
+# ---------- 文件上传 ----------
+
+def _decode_text(data: bytes) -> str:
+    for enc in ("utf-8", "gb18030"):
+        try:
+            return data.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return data.decode("utf-8", errors="ignore")
+
+
+def _extract_docx(data: bytes) -> str:
+    from xml.etree import ElementTree
+
+    with zipfile.ZipFile(io.BytesIO(data)) as zf:
+        xml = zf.read("word/document.xml")
+    root = ElementTree.fromstring(xml)
+    ns = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    paragraphs = []
+    for para in root.iter(ns + "p"):
+        text = "".join(node.text or "" for node in para.iter(ns + "t"))
+        if text.strip():
+            paragraphs.append(text)
+    return "\n\n".join(paragraphs)
+
+
+def _extract_pdf(data: bytes) -> str:
+    from pypdf import PdfReader
+
+    reader = PdfReader(io.BytesIO(data))
+    return "\n\n".join((page.extract_text() or "").strip() for page in reader.pages if page.extract_text())
+
+
+def extract_text(filename: str, data: bytes) -> str:
+    """按扩展名提取纯文本；不支持的类型抛 400。"""
+    ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    if ext in ("txt", "md", "markdown", "log", "csv"):
+        return _decode_text(data)
+    if ext == "docx":
+        return _extract_docx(data)
+    if ext == "pdf":
+        return _extract_pdf(data)
+    raise HTTPException(400, f"不支持的文件类型 .{ext}（支持 txt / md / docx / pdf）")
+
+
+@router.post("/upload")
+async def upload_files(
+    files: list[UploadFile],
+    novel_id: int | None = Query(default=None),
+    folder_id: int | None = Query(default=None),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """上传文件并解析为资料条目（txt/md/docx/pdf），一个文件一个条目。"""
+    await _check_scope(novel_id, user, db)
+    if folder_id is not None:
+        folder = await db.get(LibraryFolder, folder_id)
+        if folder is None or folder.novel_id != novel_id:
+            raise HTTPException(400, "目录不存在")
+    created = []
+    for file in files:
+        data = await file.read()
+        if len(data) > UPLOAD_MAX_SIZE:
+            raise HTTPException(400, f"文件 {file.filename} 超过 20MB 限制")
+        content = extract_text(file.filename or "untitled.txt", data).strip()
+        title = (file.filename or "未命名").rsplit(".", 1)[0][:200]
+        item = LibraryItem(
+            novel_id=novel_id,
+            folder_id=folder_id,
+            title=title,
+            content=content,
+            source="import",
+        )
+        db.add(item)
+        created.append(item)
+    await db.commit()
+    for item in created:
+        await db.refresh(item)
+    return {"ok": True, "count": len(created), "items": [_item_out(i) for i in created]}
 
 
 # ---------- AI 辅助整理 ----------

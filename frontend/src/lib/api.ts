@@ -46,6 +46,29 @@ export const api = {
   put: <T>(path: string, body: unknown) =>
     request<T>(path, { method: "PUT", body: JSON.stringify(body) }),
   delete: <T>(path: string) => request<T>(path, { method: "DELETE" }),
+  /** multipart 文件上传（不设置 Content-Type，交给浏览器生成 boundary） */
+  upload: <T>(path: string, files: File[]) => {
+    const form = new FormData();
+    for (const f of files) form.append("files", f);
+    const token = getToken();
+    return fetch(path, {
+      method: "POST",
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      body: form,
+    }).then(async (resp) => {
+      if (!resp.ok) {
+        let message = `上传失败 (${resp.status})`;
+        try {
+          const data = await resp.json();
+          if (typeof data.detail === "string") message = data.detail;
+        } catch {
+          /* ignore */
+        }
+        throw new ApiError(resp.status, message);
+      }
+      return resp.json() as Promise<T>;
+    });
+  },
 };
 
 /** SSE 流式请求（POST），逐段回调文本。 */

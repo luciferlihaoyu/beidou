@@ -315,7 +315,7 @@ export default function Account() {
                 存储与集成
               </h2>
               <p className="mt-0.5 text-xs text-muted-foreground">
-                AList 用于数据备份、文本上传与封面图存储；璇玑为个人知识库（同步功能即将开通）
+                AList 用于数据备份、文本上传与封面图存储；璇玑为个人知识库，配置后可在资料库中浏览并导入文档
               </p>
             </div>
 
@@ -389,8 +389,8 @@ export default function Account() {
               <div className="space-y-3 rounded-lg border border-border bg-card p-5">
                 <div className="flex items-center justify-between">
                   <h3 className="text-sm font-medium">璇玑知识库</h3>
-                  <Badge variant="outline" className="text-muted-foreground">
-                    同步即将开通
+                  <Badge variant="outline" className="border-primary/40 text-primary">
+                    可读取导入
                   </Badge>
                 </div>
                 <div className="space-y-2">
@@ -398,7 +398,7 @@ export default function Account() {
                   <Input
                     value={integForm.xuanji_url}
                     onChange={(e) => setIntegForm({ ...integForm, xuanji_url: e.target.value })}
-                    placeholder="https://xuanji.example.com"
+                    placeholder="https://xuanjj29.zeabur.app"
                     className="tnum"
                   />
                 </div>
@@ -412,7 +412,7 @@ export default function Account() {
                     autoComplete="off"
                   />
                   <p className="text-xs text-muted-foreground">
-                    开通后可将璇玑的知识条目同步到公共资料库
+                    在璇玑后台「智能助手 / Agent」中创建 API Key（含读取权限）。配置后即可在资料库页「从璇玑导入」浏览并导入文档
                   </p>
                 </div>
                 <div className="flex gap-2 pt-1">

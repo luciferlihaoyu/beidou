@@ -1,6 +1,8 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ChevronRight,
+  CloudDownload,
+  FileText,
   FolderClosed,
   FolderPlus,
   Inbox,
@@ -12,6 +14,7 @@ import {
   Search,
   Sparkles,
   Trash2,
+  Upload,
 } from "lucide-react";
 import { toast } from "sonner";
 import AppShell from "@/components/AppShell";
@@ -24,6 +27,12 @@ import {
 } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -41,6 +50,19 @@ import {
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 
+interface XuanjiFolder {
+  id: number;
+  name: string;
+  parentId: number | null;
+}
+
+interface XuanjiDoc {
+  id: number;
+  title: string;
+  folderId: number | null;
+  updatedAt: string;
+}
+
 /** 写作资料库：公共库（/library）与小说专属库（/novel/:id/library）共用本组件。 */
 export default function Library({ novelId }: { novelId?: number }) {
   const scopeQuery = novelId ? `novel_id=${novelId}` : "";
@@ -57,6 +79,16 @@ export default function Library({ novelId }: { novelId?: number }) {
   const [saving, setSaving] = useState(false);
   const [suggestion, setSuggestion] = useState<OrganizeSuggestion | null>(null);
   const [organizing, setOrganizing] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [uploading, setUploading] = useState(false);
+  // 璇玑导入
+  const [xjOpen, setXjOpen] = useState(false);
+  const [xjLoading, setXjLoading] = useState(false);
+  const [xjFolders, setXjFolders] = useState<XuanjiFolder[]>([]);
+  const [xjDocs, setXjDocs] = useState<XuanjiDoc[]>([]);
+  const [xjQ, setXjQ] = useState("");
+  const [xjPreview, setXjPreview] = useState<{ id: number; title: string; content: string } | null>(null);
+  const [xjImporting, setXjImporting] = useState(false);
 
   const loadFolders = useCallback(() => {
     api
@@ -194,6 +226,99 @@ export default function Library({ novelId }: { novelId?: number }) {
     }
   }
 
+  // ---------- 文件上传 ----------
+
+  async function onUploadFiles(files: FileList | null) {
+    if (!files || files.length === 0) return;
+    setUploading(true);
+    try {
+      const params = new URLSearchParams();
+      if (novelId) params.set("novel_id", String(novelId));
+      if (selectedFolder !== "all" && selectedFolder !== "unfiled")
+        params.set("folder_id", String(selectedFolder));
+      const qs = params.toString();
+      const r = await api.upload<{ count: number }>(`/api/library/upload${qs ? "?" + qs : ""}`, [...files]);
+      toast.success(`已导入 ${r.count} 个文件`);
+      loadItems();
+    } catch (e) {
+      toast.error((e as Error).message);
+    } finally {
+      setUploading(false);
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    }
+  }
+
+  // ---------- 璇玑导入 ----------
+
+  async function openXuanji() {
+    setXjOpen(true);
+    setXjPreview(null);
+    setXjQ("");
+    setXjLoading(true);
+    try {
+      const tree = await api.get<{ folders: XuanjiFolder[]; documents: XuanjiDoc[] }>(
+        "/api/integrations/xuanji/tree"
+      );
+      setXjFolders(tree.folders);
+      setXjDocs(tree.documents);
+    } catch (e) {
+      toast.error((e as Error).message);
+      setXjOpen(false);
+    } finally {
+      setXjLoading(false);
+    }
+  }
+
+  async function searchXuanji() {
+    if (!xjQ.trim()) {
+      // 清空搜索 → 回到全量列表
+      void openXuanji();
+      return;
+    }
+    setXjLoading(true);
+    try {
+      const docs = await api.get<XuanjiDoc[]>(
+        `/api/integrations/xuanji/search?q=${encodeURIComponent(xjQ.trim())}`
+      );
+      setXjDocs(docs);
+    } catch (e) {
+      toast.error((e as Error).message);
+    } finally {
+      setXjLoading(false);
+    }
+  }
+
+  async function previewXuanji(id: number) {
+    try {
+      const doc = await api.get<{ id: number; title: string; content: string }>(
+        `/api/integrations/xuanji/document/${id}`
+      );
+      setXjPreview(doc);
+    } catch (e) {
+      toast.error((e as Error).message);
+    }
+  }
+
+  async function importXuanji() {
+    if (!xjPreview) return;
+    setXjImporting(true);
+    try {
+      await api.post("/api/integrations/xuanji/import", {
+        document_id: xjPreview.id,
+        novel_id: novelId ?? null,
+        folder_id:
+          selectedFolder !== "all" && selectedFolder !== "unfiled" ? selectedFolder : null,
+      });
+      toast.success(`已导入「${xjPreview.title}」`);
+      setXjOpen(false);
+      loadItems();
+    } catch (e) {
+      toast.error((e as Error).message);
+    } finally {
+      setXjImporting(false);
+    }
+  }
+
   async function createFolder(parentId: number | null) {
     const name = window.prompt(parentId ? "子目录名称：" : "目录名称：");
     if (!name?.trim()) return;
@@ -310,10 +435,41 @@ export default function Library({ novelId }: { novelId?: number }) {
         </span>
       }
       actions={
-        <Button size="sm" className="h-8" onClick={newItem}>
-          <Plus className="mr-1 h-4 w-4" />
-          新建条目
-        </Button>
+        <div className="flex items-center gap-2">
+          <input
+            ref={fileInputRef}
+            type="file"
+            multiple
+            accept=".txt,.md,.markdown,.docx,.pdf,.csv,.log"
+            className="hidden"
+            onChange={(e) => void onUploadFiles(e.target.files)}
+          />
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-8"
+            disabled={uploading}
+            onClick={() => fileInputRef.current?.click()}
+            title="上传 txt / md / docx / pdf，自动解析为资料条目"
+          >
+            {uploading ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : <Upload className="mr-1 h-4 w-4" />}
+            上传文件
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-8"
+            onClick={() => void openXuanji()}
+            title="从璇玑知识库浏览并导入文档"
+          >
+            <CloudDownload className="mr-1 h-4 w-4" />
+            从璇玑导入
+          </Button>
+          <Button size="sm" className="h-8" onClick={newItem}>
+            <Plus className="mr-1 h-4 w-4" />
+            新建条目
+          </Button>
+        </div>
       }
     >
       <div className="flex h-full">
@@ -537,6 +693,100 @@ export default function Library({ novelId }: { novelId?: number }) {
           )}
         </section>
       </div>
+
+      {/* 璇玑导入对话框 */}
+      <Dialog open={xjOpen} onOpenChange={setXjOpen}>
+        <DialogContent className="flex h-[70vh] max-w-3xl flex-col">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2 text-sm">
+              <CloudDownload className="h-4 w-4 text-primary" />
+              从璇玑知识库导入
+            </DialogTitle>
+          </DialogHeader>
+          <div className="flex shrink-0 gap-2">
+            <div className="relative flex-1">
+              <Search className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                value={xjQ}
+                onChange={(e) => setXjQ(e.target.value)}
+                placeholder="搜索璇玑文档标题…"
+                className="h-8 pl-8 text-xs"
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") void searchXuanji();
+                }}
+              />
+            </div>
+            <Button size="sm" variant="outline" className="h-8" onClick={() => void searchXuanji()}>
+              搜索
+            </Button>
+          </div>
+          {xjLoading ? (
+            <div className="flex flex-1 items-center justify-center text-xs text-muted-foreground">
+              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              正在读取璇玑…
+            </div>
+          ) : (
+            <div className="flex min-h-0 flex-1 gap-3">
+              {/* 文档列表 */}
+              <ScrollArea className="w-64 shrink-0 rounded-md border border-border">
+                <div className="p-1.5">
+                  {xjDocs.length === 0 && (
+                    <p className="px-2 py-8 text-center text-xs text-muted-foreground">没有文档</p>
+                  )}
+                  {xjDocs.map((d) => {
+                    const folder = xjFolders.find((f) => f.id === d.folderId);
+                    return (
+                      <button
+                        key={d.id}
+                        onClick={() => void previewXuanji(d.id)}
+                        className={`w-full rounded-md px-2.5 py-2 text-left transition-colors hover:bg-muted ${
+                          xjPreview?.id === d.id ? "bg-muted" : ""
+                        }`}
+                      >
+                        <div className="flex items-center gap-1.5">
+                          <FileText className="h-3.5 w-3.5 shrink-0 text-primary/70" />
+                          <span className="truncate text-sm">{d.title}</span>
+                        </div>
+                        {folder && (
+                          <div className="mt-0.5 pl-5 text-[11px] text-muted-foreground">{folder.name}</div>
+                        )}
+                      </button>
+                    );
+                  })}
+                </div>
+              </ScrollArea>
+              {/* 预览 */}
+              <div className="flex min-w-0 flex-1 flex-col rounded-md border border-border">
+                {xjPreview ? (
+                  <>
+                    <div className="flex shrink-0 items-center justify-between border-b border-border px-3 py-2">
+                      <span className="truncate text-sm font-medium">{xjPreview.title}</span>
+                      <Button
+                        size="sm"
+                        className="h-7 shrink-0 text-xs"
+                        disabled={xjImporting}
+                        onClick={() => void importXuanji()}
+                      >
+                        {xjImporting ? <Loader2 className="mr-1 h-3 w-3 animate-spin" /> : null}
+                        导入到当前资料库
+                      </Button>
+                    </div>
+                    <ScrollArea className="min-h-0 flex-1">
+                      <pre className="whitespace-pre-wrap px-3 py-2 font-content text-xs leading-6 text-foreground">
+                        {xjPreview.content || "（空文档）"}
+                      </pre>
+                    </ScrollArea>
+                  </>
+                ) : (
+                  <div className="flex flex-1 items-center justify-center text-xs text-muted-foreground">
+                    点左侧文档预览内容
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
     </AppShell>
   );
 }

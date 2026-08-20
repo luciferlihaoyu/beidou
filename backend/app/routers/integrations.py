@@ -9,7 +9,7 @@ import zipfile
 from datetime import datetime, timezone
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -79,7 +79,7 @@ def _alist_client(config: IntegrationConfig) -> WebDAVClient:
 
 @router.post("/alist/test")
 async def test_alist(user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
-    """分步诊断 AList：① 登录与读取 → ② 校验根目录并创建子目录 → ③ 写入并删除测试文件。"""
+    """分步诊断 AList：① 登录与读取 → ② 创建目录 → ③ 写入并删除测试文件。"""
     config = await _get_config(user, db)
     client = _alist_client(config)
     root = config.alist_root.strip("/")
@@ -192,22 +192,157 @@ async def backup_to_alist(user: User = Depends(get_current_user), db: AsyncSessi
     return {"ok": True, "path": remote, "size": len(data)}
 
 
-# ---------- 璇玑（预留） ----------
+# ---------- 璇玑知识库 ----------
 
-@router.post("/xuanji/test")
-async def test_xuanji(user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
-    """璇玑连通性测试：带上 API Key 请求，能分辨地址不通与 Key 无效（数据同步待下一步对接）。"""
-    config = await _get_config(user, db)
+def _xuanji_base(config: IntegrationConfig) -> str:
     if not config.xuanji_url:
-        raise HTTPException(400, "请先填写璇玑地址")
-    headers = {"Authorization": f"Bearer {config.xuanji_api_key}"} if config.xuanji_api_key else {}
+        raise HTTPException(400, "请先在「账号设置 → 集成」里填写璇玑地址")
+    return config.xuanji_url.rstrip("/")
+
+
+async def _xuanji_call(config: IntegrationConfig, procedure: str, input_data: dict | None = None):
+    """调用璇玑的 tRPC 查询接口（superjson 格式，GET）。返回解包后的 data。"""
+    base = _xuanji_base(config)
+    url = f"{base}/api/trpc/{procedure}"
+    params = {}
+    if input_data is not None:
+        params["input"] = json.dumps({"json": input_data}, ensure_ascii=False)
+    headers = {}
+    if config.xuanji_api_key:
+        headers["Authorization"] = f"Bearer {config.xuanji_api_key}"
     try:
-        async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
-            resp = await client.get(config.xuanji_url.rstrip("/") + "/", headers=headers)
+        async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
+            resp = await client.get(url, params=params, headers=headers)
     except httpx.HTTPError as exc:
         raise HTTPException(400, f"无法连接璇玑: {exc.__class__.__name__}")
     if resp.status_code in (401, 403):
-        raise HTTPException(400, "璇玑拒绝了 API Key（401/403），请检查 Key 是否正确")
+        raise HTTPException(
+            400,
+            "璇玑拒绝了访问（401/403）。请检查 API Key 是否正确"
+            "（在璇玑后台 → 智能助手/Agent 中创建 API Key，权限需包含读取）",
+        )
+    try:
+        payload = resp.json()
+    except ValueError:
+        raise HTTPException(400, f"璇玑返回了无法解析的内容（HTTP {resp.status_code}），请确认地址指向璇玑站点")
+    if resp.status_code >= 400 or "error" in payload:
+        msg = ""
+        try:
+            msg = payload["error"]["json"]["message"]
+        except (KeyError, TypeError):
+            pass
+        raise HTTPException(400, f"璇玑接口错误（HTTP {resp.status_code}）：{msg or '未知错误'}")
+    # superjson 信封：{"result": {"data": {"json": ...}}}
+    try:
+        return payload["result"]["data"]["json"]
+    except (KeyError, TypeError):
+        raise HTTPException(400, "璇玑返回格式不符合预期（非 tRPC/superjson 响应）")
+
+
+@router.post("/xuanji/test")
+async def test_xuanji(user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    """璇玑连通性测试：ping 公共接口探活 + 带 Key 读知识库树验证权限。"""
+    config = await _get_config(user, db)
+    base = _xuanji_base(config)
+    try:
+        async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
+            resp = await client.get(f"{base}/api/trpc/ping")
+    except httpx.HTTPError as exc:
+        raise HTTPException(400, f"无法连接璇玑: {exc.__class__.__name__}")
     if resp.status_code >= 400:
-        raise HTTPException(400, f"璇玑返回 {resp.status_code}")
-    return {"ok": True, "message": f"璇玑可达（HTTP {resp.status_code}），资料同步功能将在下一步开通"}
+        raise HTTPException(400, f"璇玑不可达（HTTP {resp.status_code}），请检查地址")
+    tree = await _xuanji_call(config, "kb.getTree")
+    folders = tree.get("folders", []) if isinstance(tree, dict) else []
+    docs = tree.get("documents", []) if isinstance(tree, dict) else []
+    return {"ok": True, "message": f"连接成功：{len(folders)} 个文件夹、{len(docs)} 篇文档可读取"}
+
+
+@router.get("/xuanji/tree")
+async def xuanji_tree(user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    """读取璇玑知识库的文件夹与文档列表。"""
+    config = await _get_config(user, db)
+    tree = await _xuanji_call(config, "kb.getTree")
+    if not isinstance(tree, dict):
+        raise HTTPException(400, "璇玑返回格式异常")
+    folders = [
+        {"id": f.get("id"), "name": f.get("name"), "parentId": f.get("parentId"), "icon": f.get("icon")}
+        for f in tree.get("folders", [])
+    ]
+    documents = [
+        {
+            "id": d.get("id"),
+            "title": d.get("title"),
+            "folderId": d.get("folderId"),
+            "format": d.get("format"),
+            "updatedAt": str(d.get("updatedAt") or ""),
+        }
+        for d in tree.get("documents", [])
+    ]
+    return {"folders": folders, "documents": documents}
+
+
+@router.get("/xuanji/search")
+async def xuanji_search(
+    q: str = Query(min_length=1, max_length=100),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """按标题搜索璇玑文档。"""
+    config = await _get_config(user, db)
+    docs = await _xuanji_call(config, "kb.searchDocuments", {"query": q})
+    return [
+        {"id": d.get("id"), "title": d.get("title"), "folderId": d.get("folderId"), "updatedAt": str(d.get("updatedAt") or "")}
+        for d in (docs or [])
+    ]
+
+
+@router.get("/xuanji/document/{doc_id}")
+async def xuanji_document(doc_id: int, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    """读取璇玑单篇文档全文。"""
+    config = await _get_config(user, db)
+    doc = await _xuanji_call(config, "kb.getDocument", {"id": doc_id})
+    if not doc:
+        raise HTTPException(404, "璇玑中不存在这篇文档")
+    return {
+        "id": doc.get("id"),
+        "title": doc.get("title"),
+        "content": doc.get("content") or "",
+        "format": doc.get("format"),
+    }
+
+
+class XuanjiImportIn(BaseModel):
+    document_id: int
+    novel_id: int | None = None
+    folder_id: int | None = None
+
+
+@router.post("/xuanji/import")
+async def xuanji_import(data: XuanjiImportIn, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    """把璇玑文档导入为北斗资料库条目。"""
+    from ..models import LibraryFolder, LibraryItem
+
+    if data.novel_id is not None:
+        from ..deps import get_owned_novel
+
+        await get_owned_novel(data.novel_id, user, db)
+    if data.folder_id is not None:
+        folder = await db.get(LibraryFolder, data.folder_id)
+        if folder is None or folder.novel_id != data.novel_id:
+            raise HTTPException(400, "目录不存在")
+    config = await _get_config(user, db)
+    doc = await _xuanji_call(config, "kb.getDocument", {"id": data.document_id})
+    if not doc:
+        raise HTTPException(404, "璇玑中不存在这篇文档")
+    item = LibraryItem(
+        novel_id=data.novel_id,
+        folder_id=data.folder_id,
+        title=(doc.get("title") or "璇玑文档")[:200],
+        content=doc.get("content") or "",
+        tags="璇玑导入",
+        source="xuanji",
+    )
+    db.add(item)
+    await db.commit()
+    await db.refresh(item)
+    return {"ok": True, "id": item.id, "title": item.title}

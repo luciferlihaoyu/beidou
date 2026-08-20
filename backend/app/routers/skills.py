@@ -78,6 +78,11 @@ def _all_cards() -> list[dict]:
     return cards
 
 
+def get_card(slug: str) -> dict | None:
+    """按 slug 取技能卡（供 AI 对话挂接使用）。"""
+    return next((c for c in _all_cards() if c["slug"] == slug), None)
+
+
 @router.get("")
 async def list_skills(user: User = Depends(get_current_user)):
     return [

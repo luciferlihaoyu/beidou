@@ -111,13 +111,18 @@ async def delete_config(config_id: int, user: User = Depends(get_current_user), 
 
 # ---------- 流式对话核心 ----------
 
-async def _stream_openai(config: AIConfig, messages: list[dict]):
-    """以 SSE 形式转发 OpenAI 兼容接口的流式响应。"""
+async def _stream_openai(config: AIConfig, messages: list[dict], on_complete=None):
+    """以 SSE 形式转发 OpenAI 兼容接口的流式响应。
+
+    on_complete: 可选异步回调，流正常结束后收到完整回复文本（用于保存对话历史）。
+    """
     url = _normalize_base(config.base_url) + "/v1/chat/completions"
     payload = {"model": config.model, "messages": messages, "stream": True}
     headers = {"Authorization": f"Bearer {config.api_key}"}
 
     async def generate():
+        parts: list[str] = []
+        finished = False
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=15.0)) as client:
                 async with client.stream("POST", url, json=payload, headers=headers) as resp:
@@ -135,13 +140,20 @@ async def _stream_openai(config: AIConfig, messages: list[dict]):
                             chunk = json.loads(data)
                             delta = chunk["choices"][0].get("delta", {}).get("content")
                             if delta:
+                                parts.append(delta)
                                 yield f"data: {json.dumps({'content': delta}, ensure_ascii=False)}\n\n"
                         except (json.JSONDecodeError, KeyError, IndexError):
                             continue
+            finished = True
         except httpx.HTTPError as exc:
             yield f"data: {json.dumps({'error': f'无法连接 AI 接口: {exc.__class__.__name__}'}, ensure_ascii=False)}\n\n"
             return
         yield f"data: {json.dumps({'done': True})}\n\n"
+        if finished and on_complete is not None and parts:
+            try:
+                await on_complete("".join(parts))
+            except Exception:
+                pass  # 保存历史失败不影响已完成的回复
 
     return StreamingResponse(generate(), media_type="text/event-stream")
 
@@ -269,6 +281,46 @@ class ChatIn(BaseModel):
     message: str = Field(min_length=1, max_length=4000)
     chapter_id: int | None = None
     config_id: int | None = None
+    skill: str | None = Field(default=None, max_length=60)  # 技能卡 slug，挂接到本轮对话
+
+
+@router.get("/history")
+async def chat_history(
+    novel_id: int,
+    limit: int = 50,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """对话历史（按时间正序），用于面板打开时恢复上下文。"""
+    novel = await get_owned_novel(novel_id, user, db)
+    rows = (
+        await db.execute(
+            select(ChatMessage)
+            .where(ChatMessage.novel_id == novel.id)
+            .order_by(ChatMessage.id.desc())
+            .limit(min(limit, 200))
+        )
+    ).scalars().all()
+    rows.reverse()
+    return [{"role": m.role, "content": m.content, "created_at": m.created_at.isoformat()} for m in rows]
+
+
+@router.delete("/history")
+async def clear_history(novel_id: int, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    novel = await get_owned_novel(novel_id, user, db)
+    from sqlalchemy import delete as sql_delete
+
+    await db.execute(sql_delete(ChatMessage).where(ChatMessage.novel_id == novel.id))
+    await db.commit()
+    return {"ok": True}
+
+
+async def _save_assistant_reply(novel_id: int, content: str) -> None:
+    from ..db import SessionLocal
+
+    async with SessionLocal() as session:
+        session.add(ChatMessage(novel_id=novel_id, role="assistant", content=content))
+        await session.commit()
 
 
 @router.post("/chat")
@@ -278,19 +330,32 @@ async def chat(data: ChatIn, user: User = Depends(get_current_user), db: AsyncSe
 
     history = (
         await db.execute(
-            select(ChatMessage).where(ChatMessage.novel_id == novel.id).order_by(ChatMessage.id.desc()).limit(10)
+            select(ChatMessage).where(ChatMessage.novel_id == novel.id).order_by(ChatMessage.id.desc()).limit(20)
         )
     ).scalars().all()
     history.reverse()
 
     context = await _novel_context(novel, db, data.chapter_id)
-    messages = [{"role": "system", "content": SYSTEM_PROMPT + "\n\n" + context}]
+    system = SYSTEM_PROMPT + "\n\n" + context
+    if data.skill:
+        from .skills import get_card
+
+        card = get_card(data.skill)
+        if card is None:
+            raise HTTPException(404, "技能卡不存在")
+        system += (
+            f"\n\n当前对话挂接了技能卡「{card['name']}」。以下是其完整工作手册，"
+            "在本轮对话中请严格遵循其中的流程与标准执行：\n\n---\n" + card["body"] + "\n---"
+        )
+    messages = [{"role": "system", "content": system}]
     messages += [{"role": m.role, "content": m.content} for m in history]
     messages.append({"role": "user", "content": data.message})
 
     db.add(ChatMessage(novel_id=novel.id, role="user", content=data.message))
     await db.commit()
-    return await _stream_openai(config, messages)
+    return await _stream_openai(
+        config, messages, on_complete=lambda text: _save_assistant_reply(novel.id, text)
+    )
 
 
 class QuickActionIn(BaseModel):
