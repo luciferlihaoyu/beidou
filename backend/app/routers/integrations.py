@@ -79,7 +79,7 @@ def _alist_client(config: IntegrationConfig) -> WebDAVClient:
 
 @router.post("/alist/test")
 async def test_alist(user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
-    """分步诊断 AList：① 登录与读取 → ② 创建目录 → ③ 写入并删除测试文件。"""
+    """分步诊断 AList：① 登录与读取 → ② 校验根目录并创建子目录 → ③ 写入并删除测试文件。"""
     config = await _get_config(user, db)
     client = _alist_client(config)
     root = config.alist_root.strip("/")
@@ -101,15 +101,32 @@ async def test_alist(user: User = Depends(get_current_user), db: AsyncSession = 
     except httpx.HTTPError as exc:
         raise HTTPException(400, f"无法连接 AList: {exc.__class__.__name__}")
 
-    # ② 创建目录结构（根目录 + backup/uploads/covers）
+    # ② 确认根目录存在（不创建根目录本身——账户通常被限制在某个文件夹内，
+    #    碰上级路径会被拒 403），只在根目录下创建子目录
     try:
-        for sub in ("", "backup", "uploads", "covers"):
-            await client.ensure_dirs(f"{root}/{sub}".strip("/"))
+        root_exists = await client.exists(root)
     except WebDAVError as exc:
         if exc.status in (401, 403):
             raise HTTPException(
                 400,
-                f"读取正常，但创建目录 /{root} 被拒绝（{exc.status}）。请检查：① AList 后台该用户需勾选「WebDAV 管理」权限；"
+                f"没有权限访问 /{root}（{exc.status}）。请到 AList 后台 → 用户，"
+                "确认该账号的「基本路径」就是这个文件夹，且勾选了「WebDAV 读取」权限",
+            )
+        raise HTTPException(400, f"检查根目录失败：{exc}")
+    if not root_exists:
+        raise HTTPException(
+            400,
+            f"根目录 /{root} 不存在。如果它是分配给该账户的文件夹，请先在 AList 文件管理里创建它，"
+            "或检查账户「基本路径」设置是否指向这里",
+        )
+    try:
+        for sub in ("backup", "uploads", "covers"):
+            await client.ensure_dirs(f"{root}/{sub}")
+    except WebDAVError as exc:
+        if exc.status in (401, 403):
+            raise HTTPException(
+                400,
+                f"读取正常，但在 /{root} 下创建子目录被拒绝（{exc.status}）。请检查：① AList 后台该用户需勾选「WebDAV 管理」权限；"
                 "② 如果用了「路径权限/元信息」限制，确认对该路径放行；③ 该路径所在存储（如 115 网盘）是否允许通过 WebDAV 建目录",
             )
         raise HTTPException(400, f"创建目录失败：{exc}")

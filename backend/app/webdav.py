@@ -51,12 +51,37 @@ class WebDAVClient:
             raise WebDAVError("MKCOL", path, resp.status_code)
 
     async def ensure_dirs(self, path: str) -> None:
-        """逐级创建目录（类似 mkdir -p）。"""
+        """确保目录存在（类似 mkdir -p）。
+
+        优先直接创建完整路径——父目录已存在时一步成功，不会去碰上级目录
+        （账号被限制在某个文件夹内时，逐级创建会因越权上级目录而 403）。
+        只有返回 409（父目录缺失）时才回退为逐级创建。
+        """
         parts = [p for p in path.strip("/").split("/") if p]
+        if not parts:
+            return
+        try:
+            await self.mkcol(path)
+            return
+        except WebDAVError as exc:
+            if exc.status != 409:
+                raise
         current = ""
         for part in parts:
             current = f"{current}/{part}"
-            await self.mkcol(current)
+            try:
+                await self.mkcol(current)
+            except WebDAVError as exc:
+                # 中间级已存在但因权限被拒时，探测确认后继续
+                if exc.status in (401, 403) and await self._exists_quiet(current):
+                    continue
+                raise
+
+    async def _exists_quiet(self, path: str) -> bool:
+        try:
+            return await self.exists(path)
+        except WebDAVError:
+            return False
 
     async def put(self, path: str, data: bytes, content_type: str = "application/octet-stream") -> None:
         parent = path.strip("/").rsplit("/", 1)[0] if "/" in path.strip("/") else ""
