@@ -66,8 +66,9 @@
 .prose-beidou {
   font-family: "Noto Serif SC", "Source Han Serif SC", "Songti SC", "STSong",
     "SimSun", serif;
-  font-size: 1.0625rem;
-  line-height: 2.05;
+  /* 字号 / 行距走 CSS 变量，供写作排版偏好注入（回退值与原硬编码一致） */
+  font-size: var(--bd-font-size, 1.0625rem);
+  line-height: var(--bd-line-height, 2.05);
   color: hsl(220 9% 15.3%);
   outline: none;
   min-height: 100%;

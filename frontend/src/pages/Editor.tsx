@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { useNavigate, useParams } from "react-router";
 import {
+  AlignVerticalJustifyCenter,
   ArrowDown,
   ArrowUp,
   CalendarDays,
@@ -11,6 +12,7 @@ import {
   FolderInput,
   FolderPlus,
   LibraryBig,
+  ListTree,
   Loader2,
   Maximize2,
   Minimize2,
@@ -19,13 +21,15 @@ import {
   Plus,
   Search,
   Settings,
+  Settings2,
   Sparkles,
   Trash2,
+  X,
 } from "lucide-react";
 import { toast } from "sonner";
 import AppShell from "@/components/AppShell";
 import AIPanel from "@/components/AIPanel";
-import TiptapEditor, { type EditorHandle } from "@/components/TiptapEditor";
+import TiptapEditor, { type EditorHandle, type OutlineItem } from "@/components/TiptapEditor";
 import { api, type Chapter, type DailyStat, type Novel, type SearchResult, type Volume } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import {
@@ -39,6 +43,8 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
   DropdownMenuSub,
   DropdownMenuSubContent,
   DropdownMenuSubTrigger,
@@ -66,6 +72,48 @@ function countWords(html: string): number {
 
 function fmtDate(d: Date): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+// ---------- 写作排版偏好 ----------
+
+type TypoFontSize = "sm" | "md" | "lg";
+type TypoLineHeight = "compact" | "normal" | "loose";
+type TypoWidth = "std" | "wide" | "full";
+
+interface Typography {
+  fontSize: TypoFontSize;
+  lineHeight: TypoLineHeight;
+  width: TypoWidth;
+}
+
+const DEFAULT_TYPOGRAPHY: Typography = { fontSize: "md", lineHeight: "normal", width: "std" };
+
+/** 字号档位 → --bd-font-size */
+const FONT_SIZE_VAR: Record<TypoFontSize, string> = { sm: "1rem", md: "1.0625rem", lg: "1.25rem" };
+/** 行距档位 → --bd-line-height */
+const LINE_HEIGHT_VAR: Record<TypoLineHeight, string> = { compact: "1.8", normal: "2.05", loose: "2.4" };
+/** 页宽档位 → 写作卡片容器类名 */
+const WIDTH_CLASS: Record<TypoWidth, string> = { std: "max-w-3xl", wide: "max-w-5xl", full: "max-w-none" };
+
+/** 枚举字段校验：非法值回退默认档位 */
+function pickEnum<T extends string>(value: unknown, allowed: readonly T[], fallback: T): T {
+  return typeof value === "string" && (allowed as readonly string[]).includes(value) ? (value as T) : fallback;
+}
+
+/** 从 localStorage 读取排版偏好（JSON 解析失败或字段非法时回退默认值） */
+function loadTypography(): Typography {
+  try {
+    const raw = localStorage.getItem("beidou_typography");
+    if (!raw) return DEFAULT_TYPOGRAPHY;
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    return {
+      fontSize: pickEnum(parsed.fontSize, ["sm", "md", "lg"], DEFAULT_TYPOGRAPHY.fontSize),
+      lineHeight: pickEnum(parsed.lineHeight, ["compact", "normal", "loose"], DEFAULT_TYPOGRAPHY.lineHeight),
+      width: pickEnum(parsed.width, ["std", "wide", "full"], DEFAULT_TYPOGRAPHY.width),
+    };
+  } catch {
+    return DEFAULT_TYPOGRAPHY;
+  }
 }
 
 function heatColor(words: number, goal: number): string {
@@ -118,6 +166,19 @@ export default function Editor() {
   const [focus, setFocus] = useState(false);
   const [collapsedVols, setCollapsedVols] = useState<Set<number>>(new Set());
 
+  // 章内标题大纲面板（按章节归属存储：切章后旧章条目派生为空，天然失效）
+  const [outlineOpen, setOutlineOpen] = useState(false);
+  const [outline, setOutline] = useState<{ chapterId: number | null; items: OutlineItem[] }>({
+    chapterId: null,
+    items: [],
+  });
+  // 打字机模式（思源式：文末垫半屏空白 + 光标偏离中线超阈值才回中）
+  const [typewriter, setTypewriter] = useState(
+    () => localStorage.getItem("beidou_typewriter") === "1"
+  );
+  // 写作排版偏好（字号 / 行距 / 页宽），持久化于 localStorage["beidou_typography"]
+  const [typo, setTypo] = useState<Typography>(loadTypography);
+
   // 对话框
   const [chDialog, setChDialog] = useState<{ volumeId: number | null } | null>(null);
   const [chTitle, setChTitle] = useState("");
@@ -149,6 +210,8 @@ export default function Editor() {
   const [reloadTick, setReloadTick] = useState(0); // 替换后强制重载编辑器
 
   const editorRef = useRef<EditorHandle | null>(null);
+  // 写作区最外层容器（挂排版 CSS 变量 + Ctrl/Cmd+滚轮监听）
+  const writingAreaRef = useRef<HTMLDivElement | null>(null);
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingHtml = useRef<string | null>(null);
   const activeIdRef = useRef<number | null>(null);
@@ -266,6 +329,54 @@ export default function Editor() {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [focus]);
+
+  // ---------- 大纲 / 打字机 / 排版偏好 ----------
+
+  // 仅展示当前章节的大纲：编辑器重挂载后 onOutlineChange 会重新上报，
+  // 归属校验可避免 300ms 去抖窗口内点到上一章的标题位置（纯派生，无需清理副作用）
+  const outlineItems = outline.chapterId === activeId ? outline.items : [];
+
+  const handleOutlineChange = useCallback(
+    (items: OutlineItem[]) => setOutline({ chapterId: activeIdRef.current, items }),
+    []
+  );
+
+  const toggleTypewriter = useCallback(() => setTypewriter((prev) => !prev), []);
+
+  // 打字机开关写回 localStorage
+  useEffect(() => {
+    localStorage.setItem("beidou_typewriter", typewriter ? "1" : "0");
+  }, [typewriter]);
+
+  // 更新一组排版档位并写回 localStorage
+  const patchTypo = useCallback(
+    <K extends keyof Typography>(key: K, value: Typography[K]) =>
+      setTypo((prev) => ({ ...prev, [key]: value })),
+    []
+  );
+
+  // 排版变更统一写回 localStorage（单一出口，避免各入口重复落盘逻辑）
+  useEffect(() => {
+    localStorage.setItem("beidou_typography", JSON.stringify(typo));
+  }, [typo]);
+
+  // 彩蛋：写作区 Ctrl/Cmd + 滚轮 快速调整字号档位（preventDefault 阻止浏览器缩放）
+  useEffect(() => {
+    const el = writingAreaRef.current;
+    if (!el) return;
+    const onWheel = (e: WheelEvent) => {
+      if (!(e.ctrlKey || e.metaKey)) return;
+      e.preventDefault();
+      setTypo((prev) => {
+        const order: TypoFontSize[] = ["sm", "md", "lg"];
+        const step = e.deltaY < 0 ? 1 : -1; // 上滚放大、下滚缩小
+        const idx = Math.min(order.length - 1, Math.max(0, order.indexOf(prev.fontSize) + step));
+        return order[idx] === prev.fontSize ? prev : { ...prev, fontSize: order[idx] };
+      });
+    };
+    el.addEventListener("wheel", onWheel, { passive: false });
+    return () => el.removeEventListener("wheel", onWheel);
+  }, []);
 
   const totalWords = useMemo(
     () => chapters.reduce((sum, c) => sum + c.word_count, 0),
@@ -783,6 +894,15 @@ export default function Editor() {
                 variant="ghost"
                 size="icon"
                 className="h-7 w-7"
+                title="标题大纲"
+                onClick={() => setOutlineOpen((v) => !v)}
+              >
+                <ListTree className={`h-4 w-4 ${outlineOpen ? "text-primary" : ""}`} />
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-7 w-7"
                 title="全书查找替换"
                 onClick={() => setSearchOpen(true)}
               >
@@ -835,24 +955,91 @@ export default function Editor() {
           </ScrollArea>
         </aside>
 
+        {/* 标题大纲栏（专注模式下隐藏，与章节栏一致） */}
+        {outlineOpen && !focus && (
+          <aside className="flex w-52 shrink-0 flex-col border-r border-border bg-card">
+            <div className="flex h-11 items-center justify-between border-b border-border px-3">
+              <span className="text-xs font-medium text-muted-foreground">大纲</span>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-6 w-6"
+                title="关闭大纲"
+                onClick={() => setOutlineOpen(false)}
+              >
+                <X className="h-3.5 w-3.5" />
+              </Button>
+            </div>
+            <ScrollArea className="min-h-0 flex-1">
+              {outlineItems.length === 0 ? (
+                <p className="px-4 py-6 text-xs leading-6 text-muted-foreground">
+                  正文输入 “# 标题” 即可生成大纲
+                </p>
+              ) : (
+                <ul className="p-1">
+                  {outlineItems.map((item, i) => (
+                    <li key={`${item.pos}:${i}`}>
+                      <button
+                        onClick={() => editorRef.current?.jumpToHeading(item.pos)}
+                        title={item.title || "无标题"}
+                        className={`block w-full truncate rounded-md py-1.5 pr-2.5 text-left text-xs transition-colors hover:bg-muted ${
+                          item.level === 1
+                            ? "pl-0 font-medium text-foreground"
+                            : item.level === 2
+                              ? "pl-3 text-muted-foreground"
+                              : "pl-6 text-muted-foreground"
+                        }`}
+                      >
+                        {item.title || "无标题"}
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </ScrollArea>
+          </aside>
+        )}
+
         {/* 写作区 */}
-        <div className="flex min-w-0 flex-1 flex-col bg-background">
+        <div
+          ref={writingAreaRef}
+          className="flex min-w-0 flex-1 flex-col bg-background"
+          style={
+            {
+              "--bd-font-size": FONT_SIZE_VAR[typo.fontSize],
+              "--bd-line-height": LINE_HEIGHT_VAR[typo.lineHeight],
+            } as CSSProperties
+          }
+        >
           {activeId !== null && activeContent !== null ? (
             <>
               <div className="min-h-0 flex-1 overflow-hidden">
-                <div className="mx-auto h-full max-w-3xl overflow-hidden bg-card shadow-[0_1px_20px_rgba(0,0,0,0.03)]">
+                <div
+                  className={`mx-auto h-full ${WIDTH_CLASS[typo.width]} overflow-hidden bg-card shadow-[0_1px_20px_rgba(0,0,0,0.03)]`}
+                >
                   <TiptapEditor
                     key={`${activeId}:${reloadTick}`}
                     content={activeContent}
                     onUpdate={onEditorUpdate}
+                    onOutlineChange={handleOutlineChange}
+                    typewriter={typewriter}
                     onReady={(h) => (editorRef.current = h)}
                   />
                 </div>
               </div>
               {/* 写作状态栏 */}
               <div className="flex h-8 shrink-0 items-center justify-between border-t border-border bg-card px-4 text-[11px] text-muted-foreground">
-                <span className="min-w-0 truncate">
-                  {activeChapter?.display_title ?? ""}
+                <span className="flex min-w-0 items-center gap-1.5">
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className={`h-5 w-5 shrink-0 ${typewriter ? "text-primary" : "text-muted-foreground"}`}
+                    title="打字机模式"
+                    onClick={toggleTypewriter}
+                  >
+                    <AlignVerticalJustifyCenter className="h-3.5 w-3.5" />
+                  </Button>
+                  <span className="min-w-0 truncate">{activeChapter?.display_title ?? ""}</span>
                 </span>
                 <span className="flex shrink-0 items-center gap-3 tnum">
                   <span>本章 {liveWords.toLocaleString()} 字</span>
@@ -865,6 +1052,57 @@ export default function Editor() {
                     <span>今日 +{todayWords.toLocaleString()} 字</span>
                   )}
                   {speed !== null && <span>{speed.toLocaleString()} 字/时</span>}
+                  {/* 写作排版偏好：字号 / 行距 / 页宽 */}
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <Button variant="ghost" size="icon" className="h-5 w-5" title="写作排版">
+                        <Settings2 className="h-3.5 w-3.5" />
+                      </Button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="end" className="w-36">
+                      <DropdownMenuLabel className="px-2 py-1 text-[10px] font-normal text-muted-foreground">
+                        字号
+                      </DropdownMenuLabel>
+                      {([
+                        ["sm", "小"],
+                        ["md", "中"],
+                        ["lg", "大"],
+                      ] as const).map(([value, label]) => (
+                        <DropdownMenuItem key={value} onClick={() => patchTypo("fontSize", value)}>
+                          <Check className={`size-3.5 ${typo.fontSize === value ? "" : "opacity-0"}`} />
+                          {label}
+                        </DropdownMenuItem>
+                      ))}
+                      <DropdownMenuSeparator />
+                      <DropdownMenuLabel className="px-2 py-1 text-[10px] font-normal text-muted-foreground">
+                        行距
+                      </DropdownMenuLabel>
+                      {([
+                        ["compact", "紧凑"],
+                        ["normal", "标准"],
+                        ["loose", "宽松"],
+                      ] as const).map(([value, label]) => (
+                        <DropdownMenuItem key={value} onClick={() => patchTypo("lineHeight", value)}>
+                          <Check className={`size-3.5 ${typo.lineHeight === value ? "" : "opacity-0"}`} />
+                          {label}
+                        </DropdownMenuItem>
+                      ))}
+                      <DropdownMenuSeparator />
+                      <DropdownMenuLabel className="px-2 py-1 text-[10px] font-normal text-muted-foreground">
+                        页宽
+                      </DropdownMenuLabel>
+                      {([
+                        ["std", "标准"],
+                        ["wide", "宽"],
+                        ["full", "全宽"],
+                      ] as const).map(([value, label]) => (
+                        <DropdownMenuItem key={value} onClick={() => patchTypo("width", value)}>
+                          <Check className={`size-3.5 ${typo.width === value ? "" : "opacity-0"}`} />
+                          {label}
+                        </DropdownMenuItem>
+                      ))}
+                    </DropdownMenuContent>
+                  </DropdownMenu>
                 </span>
               </div>
             </>
