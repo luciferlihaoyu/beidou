@@ -52,8 +52,17 @@ if static_dir and (static_dir / "index.html").exists():
     app.mount("/assets", StaticFiles(directory=static_dir / "assets"), name="assets")
 
     @app.get("/{full_path:path}")
-    async def spa(full_path: str):
-        target = static_dir / full_path
-        if full_path and target.is_file():
+    async def spa(full_path: str) -> FileResponse:
+        """SPA 回退：命中静态目录内的真实文件则返回之，否则回退 index.html。
+
+        安全：``full_path`` 来自 URL 路径段（Starlette 已做 URL 解码，
+        ``%2e%2e%2f`` 会变成 ``../``）。先 ``resolve()`` 归一化目标路径，
+        再用 ``is_relative_to`` 校验其仍位于静态目录之内；不满足（含符号
+        链接逃逸、绝对路径注入等）一律回退 index.html，杜绝读取静态
+        目录之外的任意文件。
+        """
+        root = static_dir.resolve()
+        target = (static_dir / full_path).resolve()
+        if full_path and target.is_relative_to(root) and target.is_file():
             return FileResponse(target)
         return FileResponse(static_dir / "index.html")
