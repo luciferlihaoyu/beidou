@@ -362,11 +362,12 @@ export default function Account() {
                   <Input
                     value={integForm.alist_root}
                     onChange={(e) => setIntegForm({ ...integForm, alist_root: e.target.value })}
-                    placeholder="/beidou"
+                    placeholder="/（账户基本路径）或留空"
                     className="tnum"
                   />
                   <p className="text-xs text-muted-foreground">
-                    会自动创建 backup / uploads / covers 三个子目录
+                    留空 = 直接用该 AList 账户的基本路径；填子目录（如 /novels）则在其下再加一层
+                    三个子目录 backup / uploads / covers 都会建到这里
                   </p>
                 </div>
                 <div className="flex gap-2 pt-1">

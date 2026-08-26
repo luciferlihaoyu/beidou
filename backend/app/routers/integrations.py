@@ -38,7 +38,7 @@ class IntegrationIn(BaseModel):
     alist_url: str = Field(default="", max_length=300)
     alist_username: str = Field(default="", max_length=100)
     alist_password: str = Field(default="", max_length=300)  # 留空 = 不修改
-    alist_root: str = Field(default="/beidou", max_length=200)
+    alist_root: str = Field(default="", max_length=200)  # 留空 = 直接用该 AList 账户的基本路径作为根目录
     xuanji_url: str = Field(default="", max_length=300)
     xuanji_api_key: str = Field(default="", max_length=300)  # 留空 = 不修改
 
@@ -61,7 +61,7 @@ async def save_integration(data: IntegrationIn, user: User = Depends(get_current
     config = await _get_config(user, db)
     config.alist_url = data.alist_url.strip()
     config.alist_username = data.alist_username.strip()
-    config.alist_root = ("/" + data.alist_root.strip().strip("/")) if data.alist_root.strip() else "/beidou"
+    config.alist_root = ("/" + data.alist_root.strip().strip("/")) if data.alist_root.strip() else "/"
     config.xuanji_url = data.xuanji_url.strip()
     if data.alist_password:
         config.alist_password = data.alist_password
@@ -124,10 +124,10 @@ async def test_alist(user: User = Depends(get_current_user), db: AsyncSession = 
         raise HTTPException(
             400,
             f"目录已就绪，但写入测试文件失败：{exc.message}。目标存储可能不允许写入"
-            "（如部分网盘挂载），建议把「基本路径」改到一个本地存储路径",
+            "（如部分网盘挂载），请把该 AList 账户挂载到一个可写的本地存储作为其根目录",
         )
 
-    return {"ok": True, "message": f"连接成功，/{root}/（backup、uploads、covers）已就绪，读写均正常"}
+    return {"ok": True, "message": f"连接成功，{config.alist_root}（backup、uploads、covers）已就绪，读写均正常"}
 
 
 def _sqlite_path() -> str:
