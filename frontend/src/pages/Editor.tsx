@@ -4,6 +4,7 @@ import {
   AlignVerticalJustifyCenter,
   ArrowDown,
   ArrowUp,
+  BookmarkPlus,
   CalendarDays,
   Check,
   ChevronRight,
@@ -11,6 +12,7 @@ import {
   FileText,
   FolderInput,
   FolderPlus,
+  History,
   LibraryBig,
   ListTree,
   Loader2,
@@ -29,6 +31,7 @@ import {
 import { toast } from "sonner";
 import AppShell from "@/components/AppShell";
 import AIPanel from "@/components/AIPanel";
+import SnapshotPanel from "@/components/SnapshotPanel";
 import TiptapEditor, { type EditorHandle, type OutlineItem } from "@/components/TiptapEditor";
 import { api, type Chapter, type DailyStat, type Novel, type SearchResult, type Volume } from "@/lib/api";
 import { Button } from "@/components/ui/button";
@@ -208,6 +211,12 @@ export default function Editor() {
   const [replaceWith, setReplaceWith] = useState("");
   const [replacing, setReplacing] = useState(false);
   const [reloadTick, setReloadTick] = useState(0); // 替换后强制重载编辑器
+
+  // 章节快照（面板 + 手动存稿点 Dialog）
+  const [snapshotOpen, setSnapshotOpen] = useState(false);
+  const [saveSnapshotOpen, setSaveSnapshotOpen] = useState(false);
+  const [snapshotLabel, setSnapshotLabel] = useState("");
+  const [savingSnapshot, setSavingSnapshot] = useState(false);
 
   const editorRef = useRef<EditorHandle | null>(null);
   // 写作区最外层容器（挂排版 CSS 变量 + Ctrl/Cmd+滚轮监听）
@@ -461,6 +470,58 @@ export default function Editor() {
       void loadChapters();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "重命名失败");
+    }
+  }
+
+  // ---------- 章节快照 ----------
+
+  /** 打开「保存存稿点」Dialog 前先 flushSave，避免未落盘内容被快照忽略 */
+  function openSaveSnapshotDialog() {
+    if (activeId === null) {
+      toast.error("请先选择章节");
+      return;
+    }
+    void flushSave();
+    setSnapshotLabel("");
+    setSaveSnapshotOpen(true);
+  }
+
+  async function submitSaveSnapshot() {
+    if (activeId === null) return;
+    setSavingSnapshot(true);
+    try {
+      // 先把最新内容落盘，确保快照拿到的是当前编辑器状态
+      await flushSave();
+      await api.post(`/api/novels/${novelId}/chapters/${activeId}/snapshots`, {
+        label: snapshotLabel.trim() || undefined,
+      });
+      toast.success("已保存存稿点");
+      setSaveSnapshotOpen(false);
+      setSnapshotLabel("");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "保存存稿点失败");
+    } finally {
+      setSavingSnapshot(false);
+    }
+  }
+
+  /** 快照面板恢复成功后重新拉章节正文并重挂编辑器 */
+  async function reloadActiveChapter() {
+    const id = activeIdRef.current;
+    if (id === null) return;
+    try {
+      const c = await api.get<Chapter>(`/api/novels/${novelId}/chapters/${id}`);
+      if (activeIdRef.current !== id) return; // 恢复期间切章了，丢弃过期结果
+      setActiveContent(c.content ?? "");
+      setLiveWords(c.word_count);
+      prevWords.current = c.word_count;
+      pendingHtml.current = null;
+      setSaveState("saved");
+      setReloadTick((t) => t + 1);
+      // 恢复后的章节总字数也可能变化，刷新侧边目录
+      void loadChapters();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "恢复后重新加载章节失败");
     }
   }
 
@@ -872,6 +933,17 @@ export default function Editor() {
             variant="ghost"
             size="sm"
             className="h-8"
+            title="保存存稿点（手动快照，可加备注）"
+            disabled={activeId === null}
+            onClick={openSaveSnapshotDialog}
+          >
+            <BookmarkPlus className="mr-1 h-4 w-4" />
+            保存存稿点
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-8"
             title="专注模式（Esc 退出）"
             onClick={() => {
               void flushSave();
@@ -1030,6 +1102,26 @@ export default function Editor() {
               {/* 写作状态栏 */}
               <div className="flex h-8 shrink-0 items-center justify-between border-t border-border bg-card px-4 text-[11px] text-muted-foreground">
                 <span className="flex min-w-0 items-center gap-1.5">
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-5 w-5 shrink-0"
+                    title="保存存稿点（手动快照，可加备注）"
+                    disabled={activeId === null}
+                    onClick={openSaveSnapshotDialog}
+                  >
+                    <BookmarkPlus className="h-3.5 w-3.5" />
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-5 w-5 shrink-0"
+                    title="章节快照（查看/对比/恢复）"
+                    disabled={activeId === null}
+                    onClick={() => setSnapshotOpen(true)}
+                  >
+                    <History className="h-3.5 w-3.5" />
+                  </Button>
                   <Button
                     variant="ghost"
                     size="icon"
@@ -1342,6 +1434,50 @@ export default function Editor() {
             ))}
         </DialogContent>
       </Dialog>
+
+      {/* 保存存稿点（手动快照） */}
+      <Dialog open={saveSnapshotOpen} onOpenChange={(v) => !v && setSaveSnapshotOpen(false)}>
+        <DialogContent className="sm:max-w-sm">
+          <DialogHeader>
+            <DialogTitle>保存存稿点</DialogTitle>
+          </DialogHeader>
+          <p className="text-xs text-muted-foreground">
+            可填备注（留空则只记录时间）。当前章节的最新内容会被快照下来。
+          </p>
+          <Input
+            value={snapshotLabel}
+            onChange={(e) => setSnapshotLabel(e.target.value)}
+            placeholder="如：大纲转折点、第三次修改版"
+            autoFocus
+            maxLength={100}
+            onKeyDown={(e) => e.key === "Enter" && void submitSaveSnapshot()}
+          />
+          <DialogFooter>
+            <Button
+              variant="ghost"
+              onClick={() => setSaveSnapshotOpen(false)}
+              disabled={savingSnapshot}
+            >
+              取消
+            </Button>
+            <Button onClick={() => void submitSaveSnapshot()} disabled={savingSnapshot}>
+              {savingSnapshot ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : null}
+              保存
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* 章节快照面板（侧边 Sheet：列表/对比/详情 + 恢复二次确认） */}
+      {activeId !== null && (
+        <SnapshotPanel
+          open={snapshotOpen}
+          onOpenChange={setSnapshotOpen}
+          novelId={novelId}
+          chapterId={activeId}
+          onRestored={() => void reloadActiveChapter()}
+        />
+      )}
     </AppShell>
   );
 }

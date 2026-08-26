@@ -259,3 +259,30 @@ export interface IntegrationState {
   xuanji_url: string;
   has_xuanji_key: boolean;
 }
+
+// ---------- 章节快照 ----------
+
+/** 列表端：不含 content；详情端在此基础上加 content 字段（见 SnapshotDetail） */
+export interface Snapshot {
+  id: number;
+  created_at: string;
+  label: string;
+  trigger: "auto" | "manual" | "pre_rollback";
+  word_count: number;
+  content_hash: string;
+}
+
+export interface SnapshotDetail extends Snapshot {
+  content: string;
+}
+
+export interface SnapshotRestoreResult {
+  ok: boolean;
+  pre_rollback_id: number;
+  restored_snapshot: SnapshotDetail;
+}
+
+/** diff 端点：a 为快照 id，b 传 `current` 表示当前章节正文 */
+export interface SnapshotDiffResult {
+  html: string;
+}
