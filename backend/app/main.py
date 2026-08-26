@@ -8,7 +8,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .config import settings
 from .db import init_db
-from .routers import ai, auth, chapters, export, integrations, library, novels, search, skills, stats, volumes, settings as settings_router
+from .routers import ai, auth, chapters, export, integrations, library, novels, search, skills, snapshots, stats, volumes, settings as settings_router
 
 
 @asynccontextmanager
@@ -39,6 +39,7 @@ app.include_router(integrations.router)
 app.include_router(export.router)
 app.include_router(stats.router)
 app.include_router(search.router)
+app.include_router(snapshots.router)
 
 
 @app.get("/api/health")

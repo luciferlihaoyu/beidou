@@ -150,6 +150,14 @@ async def update_chapter(
         chapter.volume_id = data.volume_id
     await db.commit()
     await db.refresh(chapter)
+    # 章节正文更新后挂接 auto 快照：节流 + hash 去重，副作用忽略（失败也不应影响编辑）
+    if data.content is not None:
+        from ..snapshot_service import create_snapshot
+
+        try:
+            await create_snapshot(db, chapter, "auto")
+        except Exception:  # noqa: BLE001  快照失败不影响章节保存
+            pass
     pairs = await _ordered_with_numbers(novel, db)
     number = next(n for c, n in pairs if c.id == chapter.id)
     return _out(chapter, number)

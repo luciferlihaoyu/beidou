@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from sqlalchemy import ForeignKey, String, Text, UniqueConstraint
+from sqlalchemy import ForeignKey, Index, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .db import Base
@@ -207,3 +207,30 @@ class IntegrationConfig(Base):
     xuanji_url: Mapped[str] = mapped_column(String(300), default="")
     xuanji_api_key: Mapped[str] = mapped_column(String(300), default="")
     updated_at: Mapped[datetime] = mapped_column(default=utcnow, onupdate=utcnow)
+
+
+class ChapterSnapshot(Base):
+    """章节快照/存稿点：单章节粒度的内容存档。
+
+    - content 存原始 HTML（编辑器内容）
+    - content_text 派生的纯文本，用于 diff 渲染（避免 HTML 标签噪声）
+    - content_hash: sha256(chapter.content)，去重用
+    - trigger: auto / manual / pre_rollback
+    """
+
+    __tablename__ = "chapter_snapshots"
+    __table_args__ = (
+        Index("ix_snap_chapter_created", "chapter_id", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    chapter_id: Mapped[int] = mapped_column(
+        ForeignKey("chapters.id", ondelete="CASCADE"), index=True
+    )
+    content: Mapped[str] = mapped_column(Text)  # HTML
+    content_text: Mapped[str] = mapped_column(Text)  # 纯文本，diff 用
+    word_count: Mapped[int] = mapped_column(default=0)
+    content_hash: Mapped[str] = mapped_column(String(64), index=True)  # sha256 hex
+    label: Mapped[str] = mapped_column(String(100), default="")  # manual 存稿点名
+    trigger: Mapped[str] = mapped_column(String(16))  # auto / manual / pre_rollback
+    created_at: Mapped[datetime] = mapped_column(default=utcnow, index=True)

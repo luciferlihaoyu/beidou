@@ -4,7 +4,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .db import get_db
-from .models import Novel, User
+from .models import Chapter, Novel, User
 from .security import decode_token
 
 bearer = HTTPBearer(auto_error=False)
@@ -34,6 +34,19 @@ async def get_owned_novel(
     if novel is None or (novel.user_id != user.id and user.role != "admin"):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "作品不存在")
     return novel
+
+
+async def get_owned_chapter(
+    novel_id: int,
+    chapter_id: int,
+    novel: Novel = Depends(get_owned_novel),
+    db: AsyncSession = Depends(get_db),
+) -> Chapter:
+    """校验章节属于当前作品（novel_id 路径参数与 chapter.novel_id 一致）；越权/不存在均 404。"""
+    chapter = await db.get(Chapter, chapter_id)
+    if chapter is None or chapter.novel_id != novel.id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "章节不存在")
+    return chapter
 
 
 async def get_default_ai_config(user: User, db: AsyncSession):
