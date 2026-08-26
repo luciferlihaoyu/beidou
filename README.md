@@ -42,7 +42,7 @@
 
 ### 💾 备份与存储
 - 本地 IndexedDB 离线存储
-- WebDAV NAS 备份（群晖/威联通等）
+- AList 远程备份（原生接口，兼容网盘/NAS 挂载）
 - 手动/自动备份 + 历史记录
 
 ### 👥 用户系统
@@ -55,7 +55,7 @@
 - 模型配置（多提供商、测试、设默认）
 - 数据库统计 + 备份
 - 用户管理（审批/角色/禁用）
-- 备份管理（WebDAV 配置/手动备份）
+- 备份管理（AList 配置/手动备份）
 
 ---
 
@@ -147,7 +147,7 @@ beidou/
 │   │   │   ├── models_config.py # 模型配置
 │   │   │   ├── knowledge.py    # 知识库 + 脑图数据
 │   │   │   ├── export.py       # 多格式导出
-│   │   │   ├── backup.py       # WebDAV 备份
+│   │   │   ├── integrations.py  # AList 备份 + 璇玑知识库
 │   │   │   ├── database.py     # 数据库统计
 │   │   │   └── admin.py        # 用户管理
 │   │   ├── models/             # ORM 模型
@@ -195,7 +195,7 @@ beidou/
 | | `POST /api/ai/review` | AI 审查 |
 | 知识库 | `GET /api/knowledge-bases/{id}/graph` | 脑图数据 |
 | 导出 | `GET /api/novels/{id}/export?format=epub` | 导出小说 |
-| 备份 | `POST /api/backup/webdav` | WebDAV 备份 |
+| 备份 | `POST /api/integrations/alist/backup` | 备份到 AList |
 
 ---
 
@@ -204,7 +204,7 @@ beidou/
 1. **多 Agent 协同** — 可配置多个 AI Agent，各有独立系统提示词和模型绑定
 2. **知识图谱** — 类 Obsidian 的力导向脑图，可视化知识关联
 3. **全格式导出** — 一键导出 TXT/EPUB/DOCX/PDF，自动分章
-4. **NAS 备份** — 支持 WebDAV 协议，连接群晖/威联通等 NAS 设备
+4. **远程备份** — 通过 AList 原生接口上传备份，兼容各类网盘与 NAS 挂载
 5. **中国风 UI** — 深蓝星空 + 金色点缀 + 毛玻璃效果，东方美学与科技感融合
 
 ---

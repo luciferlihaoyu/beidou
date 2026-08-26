@@ -194,7 +194,7 @@ class LibraryItem(Base):
 
 
 class IntegrationConfig(Base):
-    """第三方集成配置（每用户一行）：AList WebDAV 备份 / 璇玑知识库对接。"""
+    """第三方集成配置（每用户一行）：AList 备份 / 璇玑知识库对接。"""
 
     __tablename__ = "integration_configs"
 

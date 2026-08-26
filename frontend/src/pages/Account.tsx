@@ -315,7 +315,7 @@ export default function Account() {
                 存储与集成
               </h2>
               <p className="mt-0.5 text-xs text-muted-foreground">
-                AList 用于数据备份、文本上传与封面图存储；璇玑为个人知识库，配置后可在资料库中浏览并导入文档
+                AList 通过原生接口连接（无需开启 WebDAV），用于数据备份、文本上传与封面图存储；璇玑为个人知识库，配置后可在资料库中浏览并导入文档
               </p>
             </div>
 

@@ -1,4 +1,4 @@
-"""第三方集成：AList WebDAV（备份/上传/封面存储）与璇玑知识库（预留）。
+"""第三方集成：AList 原生接口（备份/上传/封面存储）与璇玑知识库（预留）。
 
 配置存于 integration_configs 表（每用户一行），密码类字段不出接口。
 """
@@ -14,11 +14,11 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ..alist import AlistClient, AlistError
 from ..config import settings
 from ..db import get_db
 from ..deps import get_current_user
 from ..models import IntegrationConfig, User
-from ..webdav import WebDAVClient, WebDAVError
 
 router = APIRouter(prefix="/api/integrations", tags=["integrations"])
 
@@ -71,10 +71,10 @@ async def save_integration(data: IntegrationIn, user: User = Depends(get_current
     return {"ok": True}
 
 
-def _alist_client(config: IntegrationConfig) -> WebDAVClient:
+def _alist_client(config: IntegrationConfig) -> AlistClient:
     if not (config.alist_url and config.alist_username and config.alist_password):
         raise HTTPException(400, "请先完整填写 AList 地址、账号和密码")
-    return WebDAVClient(config.alist_url, config.alist_username, config.alist_password)
+    return AlistClient(config.alist_url, config.alist_username, config.alist_password)
 
 
 @router.post("/alist/test")
@@ -84,70 +84,48 @@ async def test_alist(user: User = Depends(get_current_user), db: AsyncSession = 
     client = _alist_client(config)
     root = config.alist_root.strip("/")
 
-    # ① 登录 + WebDAV 读取
+    # ① 登录 + 原生接口读取（网络异常已在客户端内统一包装为 AlistError）
     try:
         await client.test()
-    except WebDAVError as exc:
-        if exc.status == 401:
-            raise HTTPException(400, "账号或密码错误（401）。请核对 AList 的用户名和密码")
-        if exc.status == 403:
-            raise HTTPException(
-                400,
-                "登录成功但没有 WebDAV 权限（403）。请到 AList 后台 → 用户，确认该账号勾选了「WebDAV 读取」",
-            )
-        if exc.status == 404:
-            raise HTTPException(400, "WebDAV 路径不存在（404）。地址只需填站点根地址（如 https://alist.example.com），程序会自动补 /dav")
-        raise HTTPException(400, str(exc))
-    except httpx.HTTPError as exc:
-        raise HTTPException(400, f"无法连接 AList: {exc.__class__.__name__}")
+    except AlistError as exc:
+        if exc.status == 0:
+            # status==0 表示请求未到达业务层（域名/DNS/连接失败等网络层错误）
+            raise HTTPException(400, f"无法连接 AList，请检查地址与网络（{exc.message}）")
+        raise HTTPException(400, f"AList 拒绝了登录：{exc.message}。请核对用户名和密码")
 
     # ② 确认根目录存在（不创建根目录本身——账户通常被限制在某个文件夹内，
-    #    碰上级路径会被拒 403），只在根目录下创建子目录
+    #    碰上级路径会被拒），只在根目录下创建子目录
     try:
-        root_exists = await client.exists(root)
-    except WebDAVError as exc:
-        if exc.status in (401, 403):
-            raise HTTPException(
-                400,
-                f"没有权限访问 /{root}（{exc.status}）。请到 AList 后台 → 用户，"
-                "确认该账号的「基本路径」就是这个文件夹，且勾选了「WebDAV 读取」权限",
-            )
-        raise HTTPException(400, f"检查根目录失败：{exc}")
+        root_exists = await client.exists(root or "/")
+    except AlistError as exc:
+        raise HTTPException(400, f"登录成功，但检查基本路径失败：{exc.message}")
     if not root_exists:
         raise HTTPException(
             400,
-            f"根目录 /{root} 不存在。如果它是分配给该账户的文件夹，请先在 AList 文件管理里创建它，"
-            "或检查账户「基本路径」设置是否指向这里",
+            f"基本路径 /{root} 不存在。请检查「基本路径」设置是否正确，"
+            "或先在 AList 文件管理里创建该文件夹",
         )
     try:
         for sub in ("backup", "uploads", "covers"):
             await client.ensure_dirs(f"{root}/{sub}")
-    except WebDAVError as exc:
-        if exc.status in (401, 403):
-            raise HTTPException(
-                400,
-                f"读取正常，但在 /{root} 下创建子目录被拒绝（{exc.status}）。请检查：① AList 后台该用户需勾选「WebDAV 管理」权限；"
-                "② 如果用了「路径权限/元信息」限制，确认对该路径放行；③ 该路径所在存储（如 115 网盘）是否允许通过 WebDAV 建目录",
-            )
-        raise HTTPException(400, f"创建目录失败：{exc}")
-    except httpx.HTTPError as exc:
-        raise HTTPException(400, f"连接中断: {exc.__class__.__name__}")
+    except AlistError as exc:
+        raise HTTPException(
+            400,
+            f"读取正常，但在 /{root} 下创建子目录失败：{exc.message}。该账号可能对此目录没有写入权限，"
+            "请到 AList 后台确认该账号的权限设置",
+        )
 
     # ③ 真实写入测试：上传一个小文件再删掉
     probe = f"{root}/.beidou-write-test"
     try:
         await client.put(probe, b"ok", "text/plain")
-        await client.delete(probe)
-    except WebDAVError as exc:
-        if exc.status in (401, 403):
-            raise HTTPException(
-                400,
-                f"目录已就绪，但写入文件被拒绝（{exc.status}）。该存储（如 115 网盘）可能不允许通过 WebDAV 上传，"
-                "建议在 AList 后台换一个支持写入的存储，或把根目录改到本地存储路径",
-            )
-        raise HTTPException(400, f"写入测试失败：{exc}")
-    except httpx.HTTPError as exc:
-        raise HTTPException(400, f"连接中断: {exc.__class__.__name__}")
+        await client.remove(probe)
+    except AlistError as exc:
+        raise HTTPException(
+            400,
+            f"目录已就绪，但写入测试文件失败：{exc.message}。目标存储可能不允许写入"
+            "（如部分网盘挂载），建议把「基本路径」改到一个本地存储路径",
+        )
 
     return {"ok": True, "message": f"连接成功，/{root}/（backup、uploads、covers）已就绪，读写均正常"}
 
@@ -185,10 +163,8 @@ async def backup_to_alist(user: User = Depends(get_current_user), db: AsyncSessi
     remote = f"{config.alist_root.strip('/')}/backup/beidou-{now}.zip"
     try:
         await client.put(remote, data, "application/zip")
-    except WebDAVError as exc:
+    except AlistError as exc:
         raise HTTPException(400, str(exc))
-    except httpx.HTTPError as exc:
-        raise HTTPException(400, f"无法连接 AList: {exc.__class__.__name__}")
     return {"ok": True, "path": remote, "size": len(data)}
 
 
