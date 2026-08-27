@@ -619,7 +619,6 @@ export default function Account() {
               <Label>模型</Label>
               <div className="flex gap-2">
                 <Input
-                  list="model-options"
                   value={form.model}
                   onChange={(e) => setForm({ ...form, model: e.target.value })}
                   className="tnum"
@@ -636,11 +635,28 @@ export default function Account() {
                   {modelsLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : "获取模型列表"}
                 </Button>
               </div>
-              <datalist id="model-options">
-                {models.map((m) => (
-                  <option key={m} value={m} />
-                ))}
-              </datalist>
+              {models.length > 0 ? (
+                <div className="max-h-32 overflow-y-auto rounded border border-input bg-muted/30 p-1">
+                  {models.map((m) => (
+                    <button
+                      type="button"
+                      key={m}
+                      onClick={() => setForm({ ...form, model: m })}
+                      className={
+                        "block w-full truncate rounded px-2 py-1 text-left text-xs tnum transition-colors hover:bg-muted " +
+                        (form.model === m ? "bg-primary/10 font-medium text-primary" : "text-foreground/80")
+                      }
+                      title={m}
+                    >
+                      {m}
+                    </button>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-[11px] text-muted-foreground">
+                  点「获取模型列表」从 {form.base_url || "接口"} 拉取可选项，或直接手填模型名
+                </p>
+              )}
             </div>
             <label className="flex items-center gap-2 text-sm">
               <input
