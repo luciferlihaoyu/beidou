@@ -31,9 +31,20 @@ import {
 import { toast } from "sonner";
 import AppShell from "@/components/AppShell";
 import AIPanel from "@/components/AIPanel";
+import ChapterMetaEditor from "@/components/ChapterMetaEditor";
 import SnapshotPanel from "@/components/SnapshotPanel";
 import TiptapEditor, { type EditorHandle, type OutlineItem } from "@/components/TiptapEditor";
-import { api, type Chapter, type DailyStat, type Novel, type SearchResult, type Volume } from "@/lib/api";
+import {
+  api,
+  listChapters,
+  updateChapter,
+  type Chapter,
+  type ChapterStatus,
+  type DailyStat,
+  type Novel,
+  type SearchResult,
+  type Volume,
+} from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -55,6 +66,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 
 type SaveState = "saved" | "saving" | "dirty";
 
@@ -169,6 +181,9 @@ export default function Editor() {
   const [focus, setFocus] = useState(false);
   const [collapsedVols, setCollapsedVols] = useState<Set<number>>(new Set());
 
+  // 章节列表状态过滤："all" 表示不过滤；"draft"/"writing"/"done" 调 GET ?status=... 拉服务端过滤后的列表
+  const [statusFilter, setStatusFilter] = useState<"all" | ChapterStatus>("all");
+
   // 章内标题大纲面板（按章节归属存储：切章后旧章条目派生为空，天然失效）
   const [outlineOpen, setOutlineOpen] = useState(false);
   const [outline, setOutline] = useState<{ chapterId: number | null; items: OutlineItem[] }>({
@@ -226,11 +241,22 @@ export default function Editor() {
   const activeIdRef = useRef<number | null>(null);
   activeIdRef.current = activeId;
 
-  const loadChapters = useCallback(async () => {
-    const list = await api.get<Chapter[]>(`/api/novels/${novelId}/chapters`);
-    setChapters(list);
-    return list;
-  }, [novelId]);
+  /**
+   * 拉取章节列表。
+   * - 默认按 statusFilter 过滤；statusFilter 变化时需要刷新（通过显式传入参数触发）
+   * - 列表过滤会改变 chapters 内容；调用方负责协调 activeId
+   */
+  const loadChapters = useCallback(
+    async (filter: "all" | ChapterStatus = statusFilter) => {
+      const list = await listChapters(
+        novelId,
+        filter === "all" ? {} : { status: filter }
+      );
+      setChapters(list);
+      return list;
+    },
+    [novelId, statusFilter]
+  );
 
   const loadVolumes = useCallback(async () => {
     const list = await api.get<Volume[]>(`/api/novels/${novelId}/volumes`);
@@ -287,9 +313,7 @@ export default function Editor() {
     pendingHtml.current = null;
     setSaveState("saving");
     try {
-      const updated = await api.put<Chapter>(`/api/novels/${novelId}/chapters/${chapterId}`, {
-        content: html,
-      });
+      const updated = await updateChapter(novelId, chapterId, { content: html });
       setChapters((prev) =>
         prev.map((c) => (c.id === chapterId ? { ...c, word_count: updated.word_count } : c))
       );
@@ -455,7 +479,7 @@ export default function Editor() {
 
   async function moveToVolume(chapter: Chapter, volumeId: number | null) {
     try {
-      await api.put(`/api/novels/${novelId}/chapters/${chapter.id}`, { volume_id: volumeId });
+      await updateChapter(novelId, chapter.id, { volume_id: volumeId });
       await Promise.all([loadChapters(), loadVolumes()]);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "移动失败");
@@ -465,11 +489,71 @@ export default function Editor() {
   async function renameChapter() {
     if (!renaming) return;
     try {
-      await api.put(`/api/novels/${novelId}/chapters/${renaming.id}`, { title: renameValue.trim() });
+      await updateChapter(novelId, renaming.id, { title: renameValue.trim() });
       setRenaming(null);
       void loadChapters();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "重命名失败");
+    }
+  }
+
+  // ---------- 章节 status / tags 即时编辑 ----------
+
+  /**
+   * 状态改动：乐观更新本地 + 即时 PUT，失败回滚并提示。
+   * 不刷新列表的原因：本地已同步，避免列表重排造成的选中跳动。
+   */
+  async function changeChapterStatus(chapterId: number, newStatus: ChapterStatus) {
+    const before = chapters.find((c) => c.id === chapterId);
+    if (!before || before.status === newStatus) return;
+    setChapters((prev) =>
+      prev.map((c) => (c.id === chapterId ? { ...c, status: newStatus } : c))
+    );
+    try {
+      await updateChapter(novelId, chapterId, { status: newStatus });
+    } catch (err) {
+      // 回滚
+      setChapters((prev) =>
+        prev.map((c) => (c.id === chapterId ? { ...c, status: before.status } : c))
+      );
+      toast.error(err instanceof Error ? err.message : "状态更新失败");
+    }
+  }
+
+  /** 标签改动：同上模式，乐观更新 + 失败回滚 */
+  async function changeChapterTags(chapterId: number, newTags: string[]) {
+    const before = chapters.find((c) => c.id === chapterId);
+    if (!before) return;
+    const same =
+      before.tags.length === newTags.length &&
+      before.tags.every((t, i) => t === newTags[i]);
+    if (same) return;
+    setChapters((prev) =>
+      prev.map((c) => (c.id === chapterId ? { ...c, tags: newTags } : c))
+    );
+    try {
+      await updateChapter(novelId, chapterId, { tags: newTags });
+    } catch (err) {
+      setChapters((prev) =>
+        prev.map((c) => (c.id === chapterId ? { ...c, tags: before.tags } : c))
+      );
+      toast.error(err instanceof Error ? err.message : "标签更新失败");
+    }
+  }
+
+  /**
+   * status 过滤 tabs 切换：拉到过滤后的列表，并把 activeId 限制在新列表内。
+   * 若当前章节被过滤掉，把 activeId 切到过滤后列表的第一项（保持写作区不空白）。
+   */
+  async function handleStatusFilterChange(next: "all" | ChapterStatus) {
+    setStatusFilter(next);
+    const list = await listChapters(
+      novelId,
+      next === "all" ? {} : { status: next }
+    );
+    setChapters(list);
+    if (activeId !== null && !list.some((c) => c.id === activeId)) {
+      setActiveId(list[0]?.id ?? null);
     }
   }
 
@@ -730,7 +814,33 @@ export default function Editor() {
               chapter.id === activeId ? "text-primary" : "text-muted-foreground/50"
             }`}
           />
+          <span
+            aria-label={`状态：${chapter.status}`}
+            className={`inline-block h-1.5 w-1.5 shrink-0 rounded-full ${
+              chapter.status === "draft"
+                ? "status-dot-draft"
+                : chapter.status === "writing"
+                  ? "status-dot-writing"
+                  : "status-dot-done"
+            }`}
+          />
           <span className="min-w-0 flex-1 truncate">{chapter.display_title}</span>
+          {chapter.tags.length > 0 && (
+            <span className="flex shrink-0 items-center gap-0.5 text-[10px] text-muted-foreground">
+              {chapter.tags.slice(0, 2).map((t) => (
+                <span
+                  key={t}
+                  className="max-w-[60px] truncate rounded bg-muted px-1 py-px text-[10px]"
+                  title={t}
+                >
+                  {t}
+                </span>
+              ))}
+              {chapter.tags.length > 2 && (
+                <span className="text-[10px] text-muted-foreground/70">+{chapter.tags.length - 2}</span>
+              )}
+            </span>
+          )}
           <span className="text-[10px] text-muted-foreground tnum group-hover:hidden">
             {chapter.word_count > 0 ? chapter.word_count : ""}
           </span>
@@ -1006,12 +1116,41 @@ export default function Editor() {
               </Button>
             </div>
           </div>
+          {/* 章节状态过滤 tabs：点击切换即向服务端发 ?status=... 拉过滤列表 */}
+          <div className="border-b border-border px-2 py-1.5">
+            <Tabs
+              value={statusFilter}
+              onValueChange={(v) => void handleStatusFilterChange(v as "all" | ChapterStatus)}
+            >
+              <TabsList className="h-7 w-full">
+                <TabsTrigger value="all" className="h-5 flex-1 text-[11px]">
+                  全部
+                </TabsTrigger>
+                <TabsTrigger value="draft" className="h-5 flex-1 text-[11px]">
+                  <span className="mr-1 inline-block h-1.5 w-1.5 rounded-full status-dot-draft" />
+                  草稿
+                </TabsTrigger>
+                <TabsTrigger value="writing" className="h-5 flex-1 text-[11px]">
+                  <span className="mr-1 inline-block h-1.5 w-1.5 rounded-full status-dot-writing" />
+                  写作中
+                </TabsTrigger>
+                <TabsTrigger value="done" className="h-5 flex-1 text-[11px]">
+                  <span className="mr-1 inline-block h-1.5 w-1.5 rounded-full status-dot-done" />
+                  已完成
+                </TabsTrigger>
+              </TabsList>
+            </Tabs>
+          </div>
           <ScrollArea className="min-h-0 flex-1">
             {chapters.length === 0 && volumes.length === 0 ? (
               <div className="px-4 py-10 text-center text-xs leading-6 text-muted-foreground">
                 还没有章节
                 <br />
                 点右上角 + 新建章节
+              </div>
+            ) : chapters.length === 0 ? (
+              <div className="px-4 py-10 text-center text-xs leading-6 text-muted-foreground">
+                该状态下没有章节
               </div>
             ) : (
               <div className="p-2">
@@ -1025,6 +1164,20 @@ export default function Editor() {
               </div>
             )}
           </ScrollArea>
+          {/* 当前章节元信息：紧贴切换器下方，受控编辑 status / tags */}
+          {activeChapter && (
+            <div className="border-t border-border bg-card px-2.5 py-2">
+              <div className="mb-1.5 truncate text-[11px] font-medium text-muted-foreground">
+                {activeChapter.display_title}
+              </div>
+              <ChapterMetaEditor
+                status={activeChapter.status}
+                tags={activeChapter.tags}
+                onStatusChange={(s) => void changeChapterStatus(activeChapter.id, s)}
+                onTagsChange={(t) => void changeChapterTags(activeChapter.id, t)}
+              />
+            </div>
+          )}
         </aside>
 
         {/* 标题大纲栏（专注模式下隐藏，与章节栏一致） */}

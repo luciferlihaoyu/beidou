@@ -163,3 +163,14 @@
     opacity: 0;
   }
 }
+
+/* 章节状态色点：与 ChapterMetaEditor / 列表徽章共用 */
+.status-dot-draft {
+  background: #9ca3af; /* 灰 */
+}
+.status-dot-writing {
+  background: #3b82f6; /* 蓝 */
+}
+.status-dot-done {
+  background: #22c55e; /* 绿 */
+}

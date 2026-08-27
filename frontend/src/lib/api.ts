@@ -154,6 +154,8 @@ export interface SearchResult {
   count: number;
 }
 
+export type ChapterStatus = "draft" | "writing" | "done";
+
 export interface Chapter {
   id: number;
   volume_id: number | null;
@@ -163,6 +165,8 @@ export interface Chapter {
   sort_order: number;
   word_count: number;
   updated_at: string;
+  status: ChapterStatus;
+  tags: string[];
   content?: string;
 }
 
@@ -285,4 +289,50 @@ export interface SnapshotRestoreResult {
 /** diff 端点：a 为快照 id，b 传 `current` 表示当前章节正文 */
 export interface SnapshotDiffResult {
   html: string;
+}
+
+// ---------- 章节 API 助手 ----------
+
+/** listChapters 查询参数：status 精确匹配，tag 数组表示「任一命中」并集 */
+export interface ListChaptersQuery {
+  status?: ChapterStatus;
+  tag?: string[];
+}
+
+/**
+ * 拉取某小说的全部章节。
+ * - status 过滤：单值精确匹配
+ * - tag 过滤：多值并集（任一命中），FastAPI 多值参数通过 `?tag=a&tag=b` 重复键传
+ */
+export function listChapters(
+  novelId: number,
+  query: ListChaptersQuery = {}
+): Promise<Chapter[]> {
+  const params = new URLSearchParams();
+  if (query.status) params.set("status", query.status);
+  if (query.tag && query.tag.length > 0) {
+    // URLSearchParams.append 重复键生成 ?tag=a&tag=b，与 FastAPI list[str] 对齐
+    for (const t of query.tag) params.append("tag", t);
+  }
+  const qs = params.toString();
+  const path = `/api/novels/${novelId}/chapters${qs ? `?${qs}` : ""}`;
+  return api.get<Chapter[]>(path);
+}
+
+/** updateChapter 可选字段：未指定则服务端不修改该字段 */
+export interface ChapterUpdate {
+  title?: string;
+  content?: string;
+  volume_id?: number | null;
+  status?: ChapterStatus;
+  tags?: string[];
+}
+
+/** 更新章节元数据或正文。返回服务端落盘后的完整章节对象。 */
+export function updateChapter(
+  novelId: number,
+  chapterId: number,
+  data: ChapterUpdate
+): Promise<Chapter> {
+  return api.put<Chapter>(`/api/novels/${novelId}/chapters/${chapterId}`, data);
 }
