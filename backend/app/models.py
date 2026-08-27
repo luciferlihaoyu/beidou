@@ -65,6 +65,10 @@ class Chapter(Base):
     content: Mapped[str] = mapped_column(Text, default="")  # HTML
     sort_order: Mapped[int] = mapped_column(default=0)
     word_count: Mapped[int] = mapped_column(default=0)
+    # 章节状态：draft（草稿） / writing（写作中） / done（已完成）；默认 draft
+    status: Mapped[str] = mapped_column(String(16), default="draft")
+    # 章节标签：自由输入，存 JSON 数组字符串（SQLite 无原生数组）；默认 []
+    tags: Mapped[str] = mapped_column(Text, default="[]")
     created_at: Mapped[datetime] = mapped_column(default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(default=utcnow, onupdate=utcnow)
 

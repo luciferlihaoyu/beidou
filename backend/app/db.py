@@ -23,6 +23,10 @@ async def init_db():
 
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        # 幂等补字段：SQLite 上 SQLAlchemy 不会自动 emit ALTER，所以手工 PRAGMA + ADD COLUMN
+        # 仅对存量表生效；新表会在 create_all 阶段拿到新列
+        await _ensure_column(conn, "chapters", "status", "TEXT NOT NULL DEFAULT 'draft'")
+        await _ensure_column(conn, "chapters", "tags", "TEXT NOT NULL DEFAULT '[]'")
 
     await _migrate()
 
@@ -40,6 +44,19 @@ async def init_db():
                 )
             )
             await session.commit()
+
+
+async def _ensure_column(conn, table: str, column: str, definition: str) -> None:
+    """若表缺少指定列则 ALTER TABLE ADD COLUMN。幂等：每次启动都跑安全。
+
+    SQLite 限制：ADD COLUMN 不支持外键约束（与本章无关）；NOT NULL 必须给 DEFAULT。
+    conn 是 AsyncConnection（来自 ``async with engine.begin()``）。
+    """
+    from sqlalchemy import text
+
+    rows = (await conn.execute(text(f"PRAGMA table_info({table})"))).fetchall()
+    if not any(r[1] == column for r in rows):
+        await conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {definition}"))
 
 
 async def _migrate():

@@ -1,6 +1,12 @@
-"""章节：序号（第X章）由系统按显示顺序计算，不落库；title 只存自定义名。"""
+"""章节：序号（第X章）由系统按显示顺序计算，不落库；title 只存自定义名。
 
-from fastapi import APIRouter, Depends, HTTPException
+章节状态（status）：draft / writing / done；默认 draft
+章节标签（tags）：自由输入，存为 JSON 数组字符串，读时 json.loads 反序列化
+"""
+
+import json
+
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -21,6 +27,8 @@ class ChapterOut(BaseModel):
     display_title: str  # 第X章 + 自定义名
     sort_order: int
     word_count: int
+    status: str = "draft"  # 草稿 / 写作中 / 已完成
+    tags: list[str] = []  # 自由标签，列表
     updated_at: object = None
 
 
@@ -37,6 +45,10 @@ class ChapterUpdateIn(BaseModel):
     title: str | None = Field(default=None, max_length=200)
     content: str | None = None
     volume_id: int | None = None  # 提供时移动到其他卷（null = 未分卷）
+    # status 合法值仅三档；非法值由 Pydantic 422 自动拒绝
+    status: str | None = Field(default=None, pattern="^(draft|writing|done)$")
+    # tags: None = 不改；显式传 [] = 清空；传 ["a","b"] = 覆盖
+    tags: list[str] | None = None
 
 
 class ReorderIn(BaseModel):
@@ -52,7 +64,33 @@ async def _ordered_with_numbers(novel: Novel, db: AsyncSession) -> list[tuple[Ch
     return [(c, i + 1) for i, c in enumerate(ordered)]
 
 
+def _filter_chapter_pairs(
+    pairs: list[tuple[Chapter, int]],
+    status: str | None,
+    tag: list[str] | None,
+) -> list[tuple[Chapter, int]]:
+    """纯函数：按 status 精确匹配 + tag 包含匹配（任一命中）过滤章节对。
+
+    拆出纯函数便于单测（直呼路由时 Query 包装不会被 FastAPI 解析，函数体内
+    迭代 Query 对象会 TypeError；纯函数直传 list[str] 即可）。
+    tag 匹配以引号包裹避开子串误中（如 tag="伏" 不会误中 tag="伏笔"）。
+    status 与 tag 都为 None/空时直接返回原列表。
+    """
+    if status is None and not tag:
+        return pairs
+    return [
+        (c, n)
+        for c, n in pairs
+        if (status is None or c.status == status)
+        and (not tag or any(f'"{t}"' in (c.tags or "") for t in tag))
+    ]
+
+
 def _out(chapter: Chapter, number: int) -> dict:
+    """章节转 dict。tags 是 JSON 字符串，输出前反序列化为 list[str]。
+
+    列表端点会基于本 dict 排除 ``content`` 字段，``status`` / ``tags`` 保留。
+    """
     return {
         "id": chapter.id,
         "volume_id": chapter.volume_id,
@@ -61,14 +99,24 @@ def _out(chapter: Chapter, number: int) -> dict:
         "display_title": chapter_display_title(chapter.title, number),
         "sort_order": chapter.sort_order,
         "word_count": chapter.word_count,
+        "status": chapter.status,
+        "tags": json.loads(chapter.tags or "[]"),
         "updated_at": chapter.updated_at,
         "content": chapter.content,
     }
 
 
 @router.get("", response_model=list[ChapterOut])
-async def list_chapters(novel: Novel = Depends(get_owned_novel), db: AsyncSession = Depends(get_db)):
+async def list_chapters(
+    status: str | None = Query(default=None, pattern="^(draft|writing|done)$"),
+    tag: list[str] | None = Query(default=None),
+    novel: Novel = Depends(get_owned_novel),
+    db: AsyncSession = Depends(get_db),
+):
+    # 内存过滤：_ordered_with_numbers 已全量加载章节，章数 <500 直接 Python 过滤即可，
+    # 避免和 order_chapters 排序逻辑对不齐。tag 匹配以引号包裹避开子串误中。
     pairs = await _ordered_with_numbers(novel, db)
+    pairs = _filter_chapter_pairs(pairs, status, tag)
     return [{k: v for k, v in _out(c, n).items() if k != "content"} for c, n in pairs]
 
 
@@ -148,6 +196,12 @@ async def update_chapter(
         )
         chapter.sort_order = (result.scalar_one_or_none() or 0) + 1
         chapter.volume_id = data.volume_id
+    # status / tags：None 表示不改；显式传值则覆盖（Pydantic pattern 已校验 status）
+    if data.status is not None:
+        chapter.status = data.status
+    if data.tags is not None:
+        # ensure_ascii=False 保留中文标签原文；list → JSON 字符串存进 DB
+        chapter.tags = json.dumps(data.tags, ensure_ascii=False)
     await db.commit()
     await db.refresh(chapter)
     # 章节正文更新后挂接 auto 快照：节流 + hash 去重，副作用忽略（失败也不应影响编辑）
