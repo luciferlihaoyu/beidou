@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { DatabaseBackup, KeyRound, Loader2, MoreHorizontal, PenLine, Plug, Plus, Star, Trash2 } from "lucide-react";
+import { DatabaseBackup, KeyRound, Loader2, MoreHorizontal, PenLine, Plug, Plus, Sparkles, Star, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import AppShell from "@/components/AppShell";
 import { api, type AIConfig, type IntegrationState } from "@/lib/api";
@@ -189,24 +189,50 @@ export default function Account() {
     }
   }
 
-  async function fetchModels() {
+  async function fetchModels(forConfigId?: number) {
+    // 优先用 config_id 让后端从 DB 读 key（避免重复输入）；新配置或缺 key 时退回 base_url+api_key
     const key = form.api_key.trim();
-    if (!key) {
-      if (editing?.has_key) return toast.info("拉取模型列表需要重新输入一次 API Key（服务端不回传 Key）");
-      return toast.error("请先填写 API Key");
+    const useConfigId = forConfigId ?? (editing?.id ?? null);
+    if (!useConfigId && !key) {
+      return toast.error("请先填写 API Key，或在编辑现有配置时由系统自动读取");
     }
     setModelsLoading(true);
     try {
-      const r = await api.post<{ models: string[] }>("/api/ai/models", {
-        base_url: form.base_url,
-        api_key: key,
-      });
+      const payload: { base_url?: string; api_key?: string; config_id?: number } = {};
+      if (useConfigId) {
+        payload.config_id = useConfigId;
+        // 编辑现有配置时允许用户用新 key 覆盖；新建配置时必传
+        if (key) {
+          payload.api_key = key;
+        }
+      } else {
+        payload.base_url = form.base_url;
+        payload.api_key = key;
+      }
+      const r = await api.post<{ models: string[] }>("/api/ai/models", payload);
       if (r.models.length === 0) {
         toast.info("接口没有返回模型列表，请手动填写模型名");
       } else {
         setModels(r.models);
         toast.success(`获取到 ${r.models.length} 个模型，点模型输入框选择`);
       }
+    } catch (e) {
+      toast.error((e as Error).message);
+    } finally {
+      setModelsLoading(false);
+    }
+  }
+
+  async function fetchModelsForConfig(c: AIConfig) {
+    // 在不打开编辑弹窗的情况下预览该配置的可用模型（直接传 config_id，DB 里有 key）
+    if (!c.has_key) return toast.error("该配置还没有 Key，请先编辑填写");
+    setModelsLoading(true);
+    try {
+      const r = await api.post<{ models: string[] }>("/api/ai/models", { config_id: c.id });
+      if (r.models.length === 0) {
+        return toast.info(`「${c.name}」接口没有返回模型列表`);
+      }
+      toast.success(`「${c.name}」共 ${r.models.length} 个模型：${r.models.slice(0, 6).join("、")}${r.models.length > 6 ? " …" : ""}`);
     } catch (e) {
       toast.error((e as Error).message);
     } finally {
@@ -284,6 +310,10 @@ export default function Account() {
                         <DropdownMenuItem onClick={() => openDialog(c)}>
                           <PenLine className="mr-2 h-4 w-4" />
                           编辑
+                        </DropdownMenuItem>
+                        <DropdownMenuItem onClick={() => void fetchModelsForConfig(c)}>
+                          <Sparkles className="mr-2 h-4 w-4" />
+                          获取可用模型
                         </DropdownMenuItem>
                         <DropdownMenuItem
                           className="text-destructive"

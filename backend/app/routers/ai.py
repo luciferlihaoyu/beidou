@@ -190,17 +190,40 @@ async def test_connection(data: TestIn, user: User = Depends(get_current_user)):
 
 
 class ModelsIn(BaseModel):
-    base_url: str
-    api_key: str
+    """拉取模型列表的入参：二选一传 config_id（用 DB 已存 key）或 base_url+api_key（dry-run）。"""
+
+    base_url: str | None = Field(default=None, max_length=300)
+    api_key: str | None = Field(default=None, max_length=300)
+    config_id: int | None = None
 
 
 @router.post("/models")
-async def list_models(data: ModelsIn, user: User = Depends(get_current_user)):
-    """从接口方拉取可用模型列表（OpenAI 兼容 GET /v1/models）。"""
-    url = _normalize_base(data.base_url) + "/v1/models"
+async def list_models(data: ModelsIn, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    """从接口方拉取可用模型列表（OpenAI 兼容 GET /v1/models）。
+
+    两种用法：
+    - 传 ``config_id``：从数据库读已保存的 base_url + api_key（推荐，避免重复输入）
+    - 传 ``base_url`` + ``api_key``：dry-run（适合"还没保存配置就想试一下"的场景）
+    至少传其中一种。
+    """
+    base_url = (data.base_url or "").strip()
+    api_key = (data.api_key or "").strip()
+    if data.config_id is not None:
+        config = await db.get(AIConfig, data.config_id)
+        if config is None or config.user_id != user.id:
+            raise HTTPException(404, "配置不存在")
+        if not base_url:
+            base_url = config.base_url
+        if not api_key:
+            if not config.api_key:
+                raise HTTPException(400, "该配置没有保存 API Key，请先在配置里填写")
+            api_key = config.api_key
+    if not base_url or not api_key:
+        raise HTTPException(400, "请提供 config_id 或同时提供 base_url 与 api_key")
+    url = _normalize_base(base_url) + "/v1/models"
     try:
         async with httpx.AsyncClient(timeout=20.0) as client:
-            resp = await client.get(url, headers={"Authorization": f"Bearer {data.api_key}"})
+            resp = await client.get(url, headers={"Authorization": f"Bearer {api_key}"})
     except httpx.HTTPError as exc:
         raise HTTPException(400, f"无法连接: {exc.__class__.__name__}")
     if resp.status_code in (401, 403):

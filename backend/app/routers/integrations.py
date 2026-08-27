@@ -115,8 +115,9 @@ async def test_alist(user: User = Depends(get_current_user), db: AsyncSession = 
             "请到 AList 后台确认该账号的权限设置",
         )
 
-    # ③ 真实写入测试：上传一个小文件再删掉
-    probe = f"{root}/.beidou-write-test"
+    # ③ 真实写入测试：写到 backup 子目录（与 backup_to_alist 同路径），避免
+    # 部分挂载"根目录只读、子目录可写"导致的"测试失败但备份成功"假阳性
+    probe = f"{root}/backup/.beidou-write-test" if root else "/backup/.beidou-write-test"
     try:
         await client.put(probe, b"ok", "text/plain")
         await client.remove(probe)

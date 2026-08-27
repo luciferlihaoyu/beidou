@@ -154,24 +154,31 @@ export default function AIPanel({
           {configs.length > 0 && (
             <Select value={configId ? String(configId) : "default"} onValueChange={pickConfig}>
               <SelectTrigger
-                className="h-7 w-auto max-w-36 gap-1 border-0 bg-muted/60 px-2 text-xs shadow-none focus:ring-0 [&>svg]:h-3 [&>svg]:w-3"
-                title="切换 AI 模型"
+                className="h-8 gap-1.5 border border-border bg-muted/40 px-2.5 text-xs shadow-none focus:ring-1 focus:ring-primary/40"
+                title="切换 AI 模型（默认配置 / 各已存配置）"
               >
-                <SelectValue />
+                <Sparkles className="h-3 w-3 text-primary" />
+                <SelectValue placeholder="默认配置" />
               </SelectTrigger>
-              <SelectContent align="end">
+              <SelectContent align="end" className="min-w-56">
                 <SelectItem value="default" className="text-xs">
-                  默认配置
-                  {configs.find((c) => c.is_default) && (
-                    <span className="ml-1 text-muted-foreground">
-                      · {configs.find((c) => c.is_default)!.model}
-                    </span>
-                  )}
+                  <div className="flex flex-col gap-0.5">
+                    <span className="font-medium">默认配置</span>
+                    {configs.find((c) => c.is_default) && (
+                      <span className="text-[11px] text-muted-foreground">
+                        {configs.find((c) => c.is_default)!.name} · {configs.find((c) => c.is_default)!.model}
+                      </span>
+                    )}
+                  </div>
                 </SelectItem>
                 {configs.map((c) => (
                   <SelectItem key={c.id} value={String(c.id)} className="text-xs">
-                    {c.name}
-                    <span className="ml-1 text-muted-foreground">· {c.model}</span>
+                    <div className="flex flex-col gap-0.5">
+                      <span className="font-medium">{c.name}</span>
+                      <span className="text-[11px] text-muted-foreground tnum">
+                        {c.base_url.replace(/^https?:\/\//, "")} · {c.model}
+                      </span>
+                    </div>
                   </SelectItem>
                 ))}
               </SelectContent>
