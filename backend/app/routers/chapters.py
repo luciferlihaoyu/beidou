@@ -12,7 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import get_db
-from ..deps import count_words, get_owned_novel
+from ..deps import count_words, count_words_split, get_owned_novel
 from ..models import Chapter, Novel, Volume
 from ..utils import chapter_display_title, order_chapters
 
@@ -27,6 +27,7 @@ class ChapterOut(BaseModel):
     display_title: str  # 第X章 + 自定义名
     sort_order: int
     word_count: int
+    word_count_split: dict[str, int] = {}  # 双口径：{"cjk": N, "en": M, "total": K}
     status: str = "draft"  # 草稿 / 写作中 / 已完成
     tags: list[str] = []  # 自由标签，列表
     updated_at: object = None
@@ -90,6 +91,8 @@ def _out(chapter: Chapter, number: int) -> dict:
     """章节转 dict。tags 是 JSON 字符串，输出前反序列化为 list[str]。
 
     列表端点会基于本 dict 排除 ``content`` 字段，``status`` / ``tags`` 保留。
+    word_count_split 由 ``count_words_split`` 实时计算（不存 DB，避免每次
+    编辑后重算所有章节快照）。
     """
     return {
         "id": chapter.id,
@@ -99,6 +102,7 @@ def _out(chapter: Chapter, number: int) -> dict:
         "display_title": chapter_display_title(chapter.title, number),
         "sort_order": chapter.sort_order,
         "word_count": chapter.word_count,
+        "word_count_split": count_words_split(chapter.content or ""),
         "status": chapter.status,
         "tags": json.loads(chapter.tags or "[]"),
         "updated_at": chapter.updated_at,

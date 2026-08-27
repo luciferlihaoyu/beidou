@@ -83,3 +83,26 @@ def count_words(text: str) -> int:
 
     plain = strip_html(text)
     return len(re.sub(r"\s", "", plain))
+
+
+def count_words_split(text: str) -> dict[str, int]:
+    """双口径字数统计：中文 / English / 总计（去空白所有字符数）。
+
+    - 中文：CJK 统一汉字 + 假名 + 谚文音节（不含标点，每个"字"算 1）。
+      Unicode 范围：U+4E00-9FFF（基本汉字）、U+3040-309F（平假名）、
+      U+30A0-30FF（片假名）、U+AC00-D7AF（谚文）。中文全角标点不计入。
+    - English：连续 ASCII 字母组成的单词数（按 \b 切分）。
+    - 总计：去掉所有空白后剩余字符数（含中文/英文/标点/数字等），
+      等价于 count_words()，保留三档一致。
+
+    适合中英混写作者在状态栏同时看到「中文 N / English M / 总计 K」三档。
+    """
+    import re
+
+    from .utils import strip_html
+
+    plain = strip_html(text)
+    cjk = len(re.findall(r"[\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af]", plain))
+    en = len(re.findall(r"\b[A-Za-z]+\b", plain))
+    total = len(re.sub(r"\s", "", plain))
+    return {"cjk": cjk, "en": en, "total": total}

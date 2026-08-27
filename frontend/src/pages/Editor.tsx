@@ -842,7 +842,16 @@ export default function Editor() {
             </span>
           )}
           <span className="text-[10px] text-muted-foreground tnum group-hover:hidden">
-            {chapter.word_count > 0 ? chapter.word_count : ""}
+            {chapter.word_count_split ? (
+              <>
+                中{chapter.word_count_split.cjk}
+                {chapter.word_count_split.en > 0 && (
+                  <span className="opacity-70"> · EN{chapter.word_count_split.en}</span>
+                )}
+              </>
+            ) : (
+              chapter.word_count > 0 ? chapter.word_count : ""
+            )}
           </span>
           <DropdownMenu>
             <DropdownMenuTrigger asChild>

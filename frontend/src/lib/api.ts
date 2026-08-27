@@ -156,6 +156,14 @@ export interface SearchResult {
 
 export type ChapterStatus = "draft" | "writing" | "done";
 
+/** 中英双口径字数：中文（汉字/假名/谚文字符数）、English（英文单词数）、总计（去空白所有字符）。
+ * 与后端 deps.count_words_split 口径一致。 */
+export interface WordCountSplit {
+  cjk: number;
+  en: number;
+  total: number;
+}
+
 export interface Chapter {
   id: number;
   volume_id: number | null;
@@ -164,6 +172,7 @@ export interface Chapter {
   display_title: string;
   sort_order: number;
   word_count: number;
+  word_count_split?: WordCountSplit;  // 后端 _out 实时计算，老数据可缺失
   updated_at: string;
   status: ChapterStatus;
   tags: string[];
