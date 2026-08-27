@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { DatabaseBackup, KeyRound, Loader2, MoreHorizontal, PenLine, Plug, Plus, Sparkles, Star, Trash2 } from "lucide-react";
+import { DatabaseBackup, Download, KeyRound, Loader2, MoreHorizontal, PenLine, Plug, Plus, Sparkles, Star, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import AppShell from "@/components/AppShell";
 import { api, type AIConfig, type IntegrationState } from "@/lib/api";
@@ -67,6 +67,10 @@ export default function Account() {
   const [integSaving, setIntegSaving] = useState(false);
   const [alistTesting, setAlistTesting] = useState(false);
   const [backingUp, setBackingUp] = useState(false);
+  const [backupsOpen, setBackupsOpen] = useState(false);
+  const [backups, setBackups] = useState<{ filename: string; size: number; modified_at: string }[]>([]);
+  const [backupsLoading, setBackupsLoading] = useState(false);
+  const [downloading, setDownloading] = useState<string | null>(null);
   const [xuanjiTesting, setXuanjiTesting] = useState(false);
 
   const load = useCallback(() => {
@@ -119,10 +123,68 @@ export default function Account() {
     try {
       const r = await api.post<{ path: string; size: number }>("/api/integrations/alist/backup");
       toast.success(`备份完成：${r.path}（${(r.size / 1024).toFixed(0)} KB）`);
+      // 备份后刷新备份列表
+      if (backupsOpen) await loadBackups();
     } catch (e) {
       toast.error((e as Error).message);
     } finally {
       setBackingUp(false);
+    }
+  }
+
+  async function loadBackups() {
+    setBackupsLoading(true);
+    try {
+      const r = await api.get<{ backups: { filename: string; size: number; modified_at: string }[] }>(
+        "/api/integrations/alist/backups"
+      );
+      setBackups(r.backups);
+    } catch (e) {
+      toast.error((e as Error).message);
+    } finally {
+      setBackupsLoading(false);
+    }
+  }
+
+  async function openBackups() {
+    setBackupsOpen(true);
+    await loadBackups();
+  }
+
+  async function downloadBackup(filename: string) {
+    setDownloading(filename);
+    try {
+      // 直接 fetch 拿 blob——走 a[download] 触发浏览器下载（不暴露 token）
+      const token = localStorage.getItem("beidou_token");
+      const resp = await fetch(
+        `/api/integrations/alist/backups/${encodeURIComponent(filename)}/download`,
+        { headers: token ? { Authorization: `Bearer ${token}` } : {} }
+      );
+      if (!resp.ok) {
+        const text = await resp.text().catch(() => "");
+        let msg = `下载失败 (${resp.status})`;
+        try {
+          const data = JSON.parse(text);
+          if (typeof data.detail === "string") msg = data.detail;
+        } catch {
+          /* ignore */
+        }
+        throw new Error(msg);
+      }
+      const blob = await resp.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      toast.success(`已下载：${filename}`);
+    } catch (e) {
+      toast.error((e as Error).message);
+    } finally {
+      setDownloading(null);
     }
   }
 
@@ -413,6 +475,10 @@ export default function Account() {
                     )}
                     立即备份
                   </Button>
+                  <Button variant="outline" size="sm" onClick={() => void openBackups()}>
+                    <Download className="mr-1 h-3.5 w-3.5" />
+                    查看备份
+                  </Button>
                 </div>
               </div>
 
@@ -592,6 +658,66 @@ export default function Account() {
               测试连接
             </Button>
             <Button onClick={() => void save()}>保存</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* AList 备份列表：从 AList 远程拉备份 zip 到本地下载（手动还原） */}
+      <Dialog open={backupsOpen} onOpenChange={setBackupsOpen}>
+        <DialogContent className="sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>AList 备份</DialogTitle>
+            <p className="text-xs text-muted-foreground">
+              从 AList {integ?.alist_root || "/"} 下的 backup/ 目录列出。点击「下载」拿到本地后需手动停服、
+              替换 beidou.db、重启服务（避免运行中覆盖数据库导致损坏）。
+            </p>
+          </DialogHeader>
+          {backupsLoading ? (
+            <div className="flex items-center justify-center gap-2 py-8 text-sm text-muted-foreground">
+              <Loader2 className="h-4 w-4 animate-spin" />
+              读取中…
+            </div>
+          ) : backups.length === 0 ? (
+            <div className="rounded-lg border border-dashed border-input py-10 text-center text-sm text-muted-foreground">
+              还没有备份，点「立即备份」生成一个
+            </div>
+          ) : (
+            <ul className="max-h-80 divide-y divide-border overflow-y-auto">
+              {backups.map((b) => (
+                <li key={b.filename} className="flex items-center gap-3 py-2.5">
+                  <DatabaseBackup className="h-4 w-4 shrink-0 text-primary" />
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-sm font-medium tnum">{b.filename}</p>
+                    <p className="mt-0.5 text-[11px] text-muted-foreground tnum">
+                      {(b.size / 1024).toFixed(0)} KB · {b.modified_at.replace("T", " ").replace(/\..*$/, "")}
+                    </p>
+                  </div>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={downloading === b.filename}
+                    onClick={() => void downloadBackup(b.filename)}
+                    className="shrink-0"
+                  >
+                    {downloading === b.filename ? (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    ) : (
+                      <Download className="mr-1 h-3.5 w-3.5" />
+                    )}
+                    下载
+                  </Button>
+                </li>
+              ))}
+            </ul>
+          )}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => void loadBackups()} disabled={backupsLoading}>
+              <Loader2 className={"mr-1 h-3.5 w-3.5 " + (backupsLoading ? "animate-spin" : "")} />
+              刷新
+            </Button>
+            <Button variant="ghost" onClick={() => setBackupsOpen(false)}>
+              关闭
+            </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

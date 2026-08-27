@@ -185,6 +185,35 @@ class AlistClient:
         }
         await self._req("PUT", "/api/fs/put", data=data, headers=headers, timeout=PUT_TIMEOUT)
 
+    async def get_bytes(self, path: str) -> bytes:
+        """下载文件到内存：先 POST /api/fs/get 拿 raw_url（带签名直链），再 GET raw_url 取字节。
+
+        用于小文件（如备份 zip）；不适合大文件（会全部加载到内存）。
+        """
+        meta = await self._req("POST", "/api/fs/get", json_body={"path": self._norm(path)})
+        raw_url = meta.get("raw_url")
+        if not raw_url:
+            raise AlistError(f"AList 未返回下载链接（{path}）", status=500)
+        # raw_url 可能是相对路径（/d/...），拼上 base
+        if raw_url.startswith("/"):
+            url = self.base + raw_url
+        elif raw_url.startswith("http://") or raw_url.startswith("https://"):
+            url = raw_url
+        else:
+            url = self.base + "/" + raw_url.lstrip("/")
+        try:
+            async with httpx.AsyncClient(
+                timeout=httpx.Timeout(60.0, connect=15.0),
+                follow_redirects=True,
+                transport=self._transport,
+            ) as client:
+                resp = await client.get(url)
+        except httpx.HTTPError as exc:
+            raise AlistError(f"下载 AList 文件失败: {exc.__class__.__name__}") from exc
+        if resp.status_code != 200:
+            raise AlistError(f"下载 AList 文件返回 {resp.status_code}", status=resp.status_code)
+        return resp.content
+
     async def remove(self, path: str) -> None:
         """删除文件；不存在视为成功。"""
         trimmed = path.strip("/")

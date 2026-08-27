@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -167,6 +168,67 @@ async def backup_to_alist(user: User = Depends(get_current_user), db: AsyncSessi
     except AlistError as exc:
         raise HTTPException(400, str(exc))
     return {"ok": True, "path": remote, "size": len(data)}
+
+
+@router.get("/alist/backups")
+async def list_alist_backups(user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    """列出 AList 上 {root}/backup/ 目录里的 beidou-*.zip 备份，按时间倒序（最新在前）。
+
+    返回 [{filename, size, modified_at}]。仅列出 beidou- 开头的 zip，避免误暴露其他文件。
+    失败时抛 400，错误文案与 backup 端点一致。
+    """
+    config = await _get_config(user, db)
+    client = _alist_client(config)
+    root = config.alist_root.strip("/")
+    backup_dir = f"{root}/backup" if root else "/backup"
+    try:
+        items = await client.list_dir(backup_dir)
+    except AlistError as exc:
+        raise HTTPException(400, f"读取 AList 备份目录失败：{exc.message}")
+    backups = []
+    for item in items:
+        name = item.get("name") or ""
+        if not (name.startswith("beidou-") and name.endswith(".zip")):
+            continue
+        if item.get("is_dir"):
+            continue
+        modified = item.get("modified") or item.get("updated_at") or ""
+        backups.append({
+            "filename": name,
+            "size": int(item.get("size") or 0),
+            "modified_at": str(modified),
+        })
+    backups.sort(key=lambda b: b["modified_at"], reverse=True)
+    return {"backups": backups}
+
+
+@router.get("/alist/backups/{filename:path}/download")
+async def download_alist_backup(
+    filename: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """从 AList 拉一个备份 zip 到本地下载（流式）。用户在 UI 选备份后浏览器直接下载。
+
+    路径防穿越：filename 必须以 beidou- 开头、.zip 结尾，且不含 "/"（防 ../）。
+    """
+    if not (filename.startswith("beidou-") and filename.endswith(".zip")):
+        raise HTTPException(400, "备份文件名必须以 beidou- 开头、.zip 结尾")
+    if "/" in filename or "\\" in filename or ".." in filename:
+        raise HTTPException(400, "备份文件名非法")
+    config = await _get_config(user, db)
+    client = _alist_client(config)
+    root = config.alist_root.strip("/")
+    remote = f"{root}/backup/{filename}" if root else f"/backup/{filename}"
+    try:
+        data = await client.get_bytes(remote)
+    except AlistError as exc:
+        raise HTTPException(400, f"从 AList 拉取备份失败：{exc.message}")
+    return StreamingResponse(
+        io.BytesIO(data),
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 # ---------- 璇玑知识库 ----------
