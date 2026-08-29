@@ -7,7 +7,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from .config import settings
-from .db import init_db
+from .db import engine, init_db
 from .routers import ai, auth, chapters, export, integrations, library, novels, search, skills, snapshots, stats, volumes, settings as settings_router
 
 
@@ -45,6 +45,24 @@ app.include_router(snapshots.router)
 @app.get("/api/health")
 async def health():
     return {"ok": True, "name": "beidou"}
+
+
+@app.get("/health")
+async def unified_health():
+    """统一健康端点（P0-3）：与璇玑/天宫一致，GET /health → {ok, name, db}。
+
+    探活方式：对 SQLite 执行 ``SELECT 1``；失败则 db=False。保留上方
+    ``/api/health`` 仅做向后兼容，不再扩展。
+    """
+    from sqlalchemy import text
+
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(text("SELECT 1"))
+        db_ok = True
+    except Exception:
+        db_ok = False
+    return {"ok": db_ok, "name": "beidou", "db": db_ok}
 
 
 # 静态托管前端构建产物（SPA 回退）
