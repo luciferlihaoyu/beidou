@@ -8,7 +8,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .config import settings
 from .db import engine, init_db
-from .routers import ai, auth, chapters, export, integrations, library, novels, search, skills, snapshots, stats, volumes, settings as settings_router
+from .routers import ai, auth, chapters, export, integrations, library, novels, search, sso, skills, snapshots, stats, volumes, settings as settings_router
 
 
 @asynccontextmanager
@@ -28,6 +28,7 @@ app.add_middleware(
 )
 
 app.include_router(auth.router)
+app.include_router(sso.router)
 app.include_router(novels.router)
 app.include_router(volumes.router)
 app.include_router(chapters.router)
