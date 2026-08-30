@@ -33,6 +33,7 @@ import jwt
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse, RedirectResponse
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import settings
@@ -60,7 +61,9 @@ def _cleanup_expired_jtis(now: int) -> None:
 async def _resolve_or_create_user(db: AsyncSession, payload: dict) -> User:
     """按 username（缺省回退 sub）解析本地用户；不存在则自动建档（SSO 免密）。"""
     sub = payload.get("sub")
-    username = (payload.get("username") or str(sub)).strip()[:64]
+    # 类型防御：username 可为任意 JSON 类型（如 int/None），统一转 str 后
+    # 再规整，避免非字符串调用 .strip() 触发 AttributeError → 500。
+    username = str(payload.get("username") or sub).strip()[:64]
     result = await db.execute(select(User).where(User.username == username))
     user = result.scalar_one_or_none()
     if user is not None:
@@ -73,7 +76,18 @@ async def _resolve_or_create_user(db: AsyncSession, payload: dict) -> User:
         role=role,
     )
     db.add(user)
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError:
+        # 并发首登竞态：同 username 已被其他请求先建（unique 约束）。
+        # 回退为直接查询该用户即可，不再 500。
+        await db.rollback()
+        result = await db.execute(select(User).where(User.username == username))
+        existing = result.scalar_one_or_none()
+        if existing is None:
+            # 防御兜底：IntegrityError 只可能来自 username 冲突，此处理论不可达。
+            raise HTTPException(500, "SSO 登录态建立失败，请重试")
+        return existing
     await db.refresh(user)
     return user
 
@@ -101,12 +115,19 @@ async def sso_launch(
     if payload.get("typ") != "sso-launch" or payload.get("app") != "beidou":
         raise HTTPException(401, _INVALID_MSG)
 
-    # 必填 claims：sub / exp / jti（缺失视为无效凭证）
-    if payload.get("sub") is None:
+    # 必填 claims：sub / exp / jti / iat（缺失或类型非法视为无效凭证）
+    sub = payload.get("sub")
+    if sub is None or not str(sub).strip():
         raise HTTPException(401, _INVALID_MSG)
     exp = payload.get("exp")
     jti = payload.get("jti")
-    if not isinstance(exp, int) or not isinstance(jti, str) or not jti:
+    iat = payload.get("iat")
+    if (
+        not isinstance(exp, int)
+        or not isinstance(jti, str)
+        or not jti
+        or not isinstance(iat, int)
+    ):
         raise HTTPException(401, _INVALID_MSG)
 
     # 5) jti 一次性：先清理过期项，命中已存在 → 401；否则登记（TTL=各自 exp）
