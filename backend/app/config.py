@@ -27,7 +27,7 @@ class Settings(BaseSettings):
     # 未配置时 /sso/launch 返回 501「SSO 未配置」。
     tiangong_sso_secret: str = ""
 
-    # 部署环境：\"production\"/\"prod\" 时强制强凭据、拒绝弱默认（对齐天宫 local-auth-router 的加固）。
+    # 部署环境："production"/"prod" 时强制强凭据、拒绝弱默认（对齐天宫 local-auth-router 的加固）。
     beidou_env: str = "development"
 
     @property
