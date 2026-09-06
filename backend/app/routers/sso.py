@@ -29,6 +29,7 @@ SSO Launch 协议 v1（固定契约，不得更改）：
 
 import time
 
+import httpx
 import jwt
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse, RedirectResponse
@@ -50,6 +51,69 @@ _USED_JTIS: dict[str, int] = {}
 _SSO_ALGORITHM = "HS256"
 
 _INVALID_MSG = "凭证无效或已过期"
+
+# ─── v2（EdDSA/JWKS）公钥缓存 ───
+# {kid: {"key": PyJWK, "fetched": unix}}；TTL 1 小时，kid 未命中强制刷新一次。
+_JWK_CACHE: dict[str, dict] = {}
+_JWK_TTL = 3600
+
+
+def _fetch_jwks_sync(url: str) -> dict:
+    """同步拉取 JWKS（FastAPI 线程池里跑，不阻塞事件循环）。"""
+    resp = httpx.get(url, timeout=5.0)
+    resp.raise_for_status()
+    return resp.json()
+
+
+def _verify_v2(token: str) -> dict:
+    """v2 验签：拉天宫 JWKS 按 kid 找 Ed25519 公钥验 EdDSA 票。
+
+    - 缓存命中 kid 直接验；未命中/验签失败强制刷新一次再验（轮换容错）。
+    - PyJWT 自动校验 exp；任何失败抛 jwt.PyJWTError（调用方统一 401）。
+    """
+    try:
+        header = jwt.get_unverified_header(token)
+    except jwt.PyJWTError:
+        raise
+    kid = header.get("kid")
+    alg = header.get("alg")
+
+    now = time.time()
+
+    def _pick(k: str | None):
+        if k and k in _JWK_CACHE and now - _JWK_CACHE[k]["fetched"] < _JWK_TTL:
+            return _JWK_CACHE[k]["key"]
+        return None
+
+    pyjwk = _pick(kid)
+    if pyjwk is None and settings.tiangong_jwks_url:
+        jwks = _fetch_jwks_sync(settings.tiangong_jwks_url)
+        for k in jwks.get("keys", []):
+            if k.get("kid"):
+                _JWK_CACHE[k["kid"]] = {
+                    "key": jwt.PyJWK.from_dict(k),
+                    "fetched": now,
+                }
+        pyjwk = _pick(kid)
+
+    if pyjwk is None:
+        # kid 未知的票（轮换后新 kid）：强制刷一次 JWKS 再试
+        if settings.tiangong_jwks_url:
+            jwks = _fetch_jwks_sync(settings.tiangong_jwks_url)
+            for k in jwks.get("keys", []):
+                if k.get("kid"):
+                    _JWK_CACHE[k["kid"]] = {
+                        "key": jwt.PyJWK.from_dict(k),
+                        "fetched": now,
+                    }
+            pyjwk = _pick(kid)
+        if pyjwk is None:
+            raise jwt.InvalidKeyError("kid not found in JWKS")
+
+    if alg != "EdDSA":
+        raise jwt.InvalidAlgorithmError(f"unexpected alg {alg}")
+
+    return jwt.decode(token, pyjwk.key, algorithms=["EdDSA"])
 
 
 def _cleanup_expired_jtis(now: int) -> None:
@@ -97,18 +161,29 @@ async def sso_launch(
     token: str = Query(default=""),
     db: AsyncSession = Depends(get_db),
 ):
-    # 1) SSO 配置：未配置 → 501
-    if not settings.tiangong_sso_secret:
+    # 1) SSO 配置：v2（JWKS）与 v1（共享密钥）都未配置 → 501
+    if not settings.tiangong_jwks_url and not settings.tiangong_sso_secret:
         return JSONResponse(status_code=501, content={"detail": "SSO 未配置"})
 
     # 2) token 存在
     if not token:
         raise HTTPException(401, _INVALID_MSG)
 
-    # 3) 验签 + exp（PyJWT 自动校验 exp）
-    try:
-        payload = jwt.decode(token, settings.tiangong_sso_secret, algorithms=[_SSO_ALGORITHM])
-    except jwt.PyJWTError:
+    # 3) 验签 + exp：v2（EdDSA/JWKS）优先，未配置或验签失败时回退 v1（HS256）
+    payload = None
+    if settings.tiangong_jwks_url:
+        try:
+            payload = _verify_v2(token)
+        except jwt.PyJWTError:
+            payload = None  # 落到 v1 回退；两端都失败才最终 401
+        except Exception:  # JWKS 网络故障等，同样回退
+            payload = None
+    if payload is None and settings.tiangong_sso_secret:
+        try:
+            payload = jwt.decode(token, settings.tiangong_sso_secret, algorithms=[_SSO_ALGORITHM])
+        except jwt.PyJWTError:
+            raise HTTPException(401, _INVALID_MSG)
+    if payload is None:
         raise HTTPException(401, _INVALID_MSG)
 
     # 4) typ + app 定向校验

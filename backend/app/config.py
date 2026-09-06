@@ -27,6 +27,11 @@ class Settings(BaseSettings):
     # 未配置时 /sso/launch 返回 501「SSO 未配置」。
     tiangong_sso_secret: str = ""
 
+    # SSO 协议 v2（EdDSA/Ed25519）：天宫 JWKS 公钥端点（环境变量 TIANGONG_JWKS_URL）。
+    # 配置后 /sso/launch 优先走 v2 验签（拉 JWKS 按 kid 匹配公钥验 EdDSA 票）；
+    # 未配置时回退 v1（TIANGONG_SSO_SECRET 共享密钥 HS256）。
+    tiangong_jwks_url: str = ""
+
     # 部署环境："production"/"prod" 时强制强凭据、拒绝弱默认（对齐天宫 local-auth-router 的加固）。
     beidou_env: str = "development"
 
