@@ -1,0 +1,10 @@
+{
+  "dependencies": {
+    "zeabur": "^0.22.0"
+  },
+  "_npx": {
+    "packages": [
+      "zeabur@latest"
+    ]
+  }
+}
