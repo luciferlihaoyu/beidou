@@ -8,6 +8,7 @@ import {
   BookmarkPlus,
   BookOpen,
   CalendarDays,
+  Award,
   Check,
   ChevronRight,
   Download,
@@ -39,6 +40,7 @@ import CommandPalette from "@/components/CommandPalette";
 import KnowledgeCabinet from "@/components/KnowledgeCabinet";
 import IdeaNotes from "@/components/IdeaNotes";
 import OutlineBoard from "@/components/OutlineBoard";
+import GoalsBadges from "@/components/GoalsBadges";
 import SnapshotPanel from "@/components/SnapshotPanel";
 import TiptapEditor, { type EditorHandle, type OutlineItem } from "@/components/TiptapEditor";
 import { useGlobalShortcuts } from "@/hooks/useGlobalShortcuts";
@@ -395,6 +397,9 @@ export default function Editor() {
 
   // 大纲卡片视图（Scrivener 风格）
   const [boardOpen, setBoardOpen] = useState(false);
+
+  // 写作仪表盘（连击 + 徽章）
+  const [goalsOpen, setGoalsOpen] = useState(false);
 
   // 块引用数据：人物 / 设定 / 伏笔，供编辑器 chip 浮卡预览
   const [refData, setRefData] = useState<ReferenceData>({
@@ -1187,6 +1192,15 @@ export default function Editor() {
                 variant="ghost"
                 size="icon"
                 className="h-7 w-7"
+                title="写作仪表盘（连击 + 徽章）"
+                onClick={() => setGoalsOpen(true)}
+              >
+                <Award className="h-4 w-4" />
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-7 w-7"
                 title="全书查找替换"
                 onClick={() => setSearchOpen(true)}
               >
@@ -1574,6 +1588,14 @@ export default function Editor() {
             setActiveContent(null);
           }}
           onNewChapter={() => setChDialog({ volumeId: null })}
+        />
+
+        {/* 写作仪表盘（连击 + 徽章） */}
+        <GoalsBadges
+          open={goalsOpen}
+          onOpenChange={setGoalsOpen}
+          novelId={novelId}
+          dailyGoal={novel?.daily_goal ?? null}
         />
 
         {/* 命令面板（ctrl+k 触发） */}
