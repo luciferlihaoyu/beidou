@@ -159,6 +159,24 @@ class WritingStat(Base):
     words: Mapped[int] = mapped_column(default=0)
 
 
+class PomoLog(Base):
+    """番茄钟完成事件：用户点「完成番茄」时上报一行；多端/移动共享。
+
+    - phase="write"：完成一个 25min 写作番茄（计入今日番茄数）
+    - phase="break"：完成 5min 休息（v1 仅记录，不计入番茄数）
+    - completed_at：UTC 时刻（前端按本地时区统计"今日"）
+    """
+
+    __tablename__ = "pomo_logs"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    novel_id: Mapped[int | None] = mapped_column(ForeignKey("novels.id", ondelete="SET NULL"), index=True, default=None)
+    phase: Mapped[str] = mapped_column(String(10), default="write")  # write | break
+    duration_min: Mapped[int] = mapped_column(default=25)
+    completed_at: Mapped[datetime] = mapped_column(default=lambda: datetime.now(timezone.utc))
+
+
 class LibraryFolder(Base):
     """资料库目录。novel_id 为 NULL 表示公共库，否则为某本小说的专属库。"""
 

@@ -1,17 +1,22 @@
 /** 番茄钟 hook：25 min 写作 + 5 min 休息循环。
  *
- * - 状态机：idle → running → break → idle（用户可中途 stop）
- * - 计时通过 setInterval 驱动，每秒更新剩余时间
- * - 完成：自动切到下一状态（running → break, break → idle）
- * - 完成时回调 onPhaseComplete(phase) 让 UI toast/统计
- * - 今日番茄数持久化到 localStorage（按 yyyy-mm-dd key），
- *   跨日重置；累计总番茄数另存一份
+ * 状态机：idle → running → break → idle（用户可中途 stop）
+ * 计时：setInterval 驱动
  *
- * 设计为 hook 是为了让 Editor.tsx 集成最简：usePomodoro() 拿到 {state, start, stop, ...}
+ * 后端化（P2-1）：
+ * - 启动时调 GET /api/pomodoro/today?novel_id=N 同步今日 / 累计
+ * - 完成 25min 写作番茄时：调 POST /api/pomodoro/complete
+ *   上报后端 → 失败时仍 fallback localStorage
+ * - 5min 休息完成不上报（v1：break 不计番茄）
+ *
+ * localStorage 仅作"离线 fallback / UI 立即响应"：
+ * - 后端返回前先用 localStorage 显示
+ * - 后端返回后以服务端为准
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
+import { api } from "@/lib/api";
 
 export type PomodoroPhase = "idle" | "running" | "break";
 
@@ -19,42 +24,68 @@ export const POMODORO_WRITE_MIN = 25;
 export const POMODORO_BREAK_MIN = 5;
 const SECOND = 1000;
 
-const TODAY_KEY = "beidou:pomodoro:date";
-const COUNT_KEY = "beidou:pomodoro:count";
-const TOTAL_KEY = "beidou:pomodoro:total";
+const LS_DATE_KEY = "beidou:pomodoro:date";
+const LS_TODAY_KEY = "beidou:pomodoro:count";
+const LS_TOTAL_KEY = "beidou:pomodoro:total";
 
 function todayStr(): string {
   const d = new Date();
   return d.toISOString().slice(0, 10);
 }
 
-function readTodayCount(): number {
-  if (localStorage.getItem(TODAY_KEY) !== todayStr()) return 0;
-  return Number(localStorage.getItem(COUNT_KEY) || "0");
+function readLsToday(): number {
+  if (localStorage.getItem(LS_DATE_KEY) !== todayStr()) return 0;
+  return Number(localStorage.getItem(LS_TODAY_KEY) || "0");
 }
 
-function writeTodayCount(n: number) {
-  localStorage.setItem(TODAY_KEY, todayStr());
-  localStorage.setItem(COUNT_KEY, String(n));
+function readLsTotal(): number {
+  return Number(localStorage.getItem(LS_TOTAL_KEY) || "0");
 }
 
-function readTotalCount(): number {
-  return Number(localStorage.getItem(TOTAL_KEY) || "0");
+function writeLs(today: number, total: number) {
+  localStorage.setItem(LS_DATE_KEY, todayStr());
+  localStorage.setItem(LS_TODAY_KEY, String(today));
+  localStorage.setItem(LS_TOTAL_KEY, String(total));
 }
 
-function writeTotalCount(n: number) {
-  localStorage.setItem(TOTAL_KEY, String(n));
+export interface UsePomodoroOptions {
+  /** 番茄归属的小说 ID（用于后端统计归属本作品的番茄） */
+  novelId?: number;
 }
 
-export function usePomodoro() {
+export function usePomodoro(opts: UsePomodoroOptions = {}) {
+  const { novelId } = opts;
   const [phase, setPhase] = useState<PomodoroPhase>("idle");
-  // 剩余秒数：仅在 running/break 时有意义
   const [remaining, setRemaining] = useState<number>(POMODORO_WRITE_MIN * 60);
-  const [todayCount, setTodayCount] = useState<number>(readTodayCount());
-  const [totalCount, setTotalCount] = useState<number>(readTotalCount());
-  // 用 ref 持有当前 phase 给定时器回调访问最新值（避免 setInterval 闭包问题）
+  // 初始值先从 localStorage 拿（避免首屏空），后端回来后覆盖
+  const [todayCount, setTodayCount] = useState<number>(readLsToday());
+  const [totalCount, setTotalCount] = useState<number>(readLsTotal());
   const phaseRef = useRef<PomodoroPhase>("idle");
   phaseRef.current = phase;
+  const novelIdRef = useRef<number | undefined>(novelId);
+  novelIdRef.current = novelId;
+
+  // 启动时拉后端今日 / 累计
+  useEffect(() => {
+    if (!novelId) return;
+    let cancelled = false;
+    api
+      .get<{ today: number; total: number; date: string }>(
+        `/api/pomodoro/today?novel_id=${novelId}`
+      )
+      .then((r) => {
+        if (cancelled) return;
+        setTodayCount(r.today);
+        setTotalCount(r.total);
+        writeLs(r.today, r.total);
+      })
+      .catch(() => {
+        // 离线 / 未登录：保持 localStorage
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [novelId]);
 
   const start = useCallback(() => {
     setPhase("running");
@@ -71,27 +102,57 @@ export function usePomodoro() {
     setRemaining(POMODORO_WRITE_MIN * 60);
   }, []);
 
-  // 计时器：每秒扣减；到 0 时根据 phase 切换
+  // 上报后端（P2-1）
+  const reportComplete = useCallback(
+    async (phaseDone: "write" | "break", durationMin: number) => {
+      if (!novelIdRef.current) return;
+      try {
+        const r = await api.post<{ ok: boolean; today: number }>(
+          "/api/pomodoro/complete",
+          {
+            novel_id: novelIdRef.current,
+            phase: phaseDone,
+            duration_min: durationMin,
+          }
+        );
+        // 后端返回 today：以服务端为准刷新 UI + localStorage
+        setTodayCount(r.today);
+        // 累计从后端拉一次（避免漏写）
+        try {
+          const t = await api.get<{ today: number; total: number }>(
+            `/api/pomodoro/today?novel_id=${novelIdRef.current}`
+          );
+          setTotalCount(t.total);
+          writeLs(t.today, t.total);
+        } catch {
+          // 忽略
+        }
+      } catch {
+        // 上报失败：保持 localStorage 已有计数
+      }
+    },
+    []
+  );
+
   useEffect(() => {
     if (phase === "idle") return;
     const id = setInterval(() => {
       setRemaining((r) => {
         if (r > 1) return r - 1;
-        // 倒计时结束
         if (phaseRef.current === "running") {
-          // 完成一个写作番茄：累计今日 + 累计
-          const newToday = readTodayCount() + 1;
-          writeTodayCount(newToday);
+          // 完成 25min 写作番茄
+          const newToday = readLsToday() + 1;
+          const newTotal = readLsTotal() + 1;
+          writeLs(newToday, newTotal);
           setTodayCount(newToday);
-          const newTotal = readTotalCount() + 1;
-          writeTotalCount(newTotal);
           setTotalCount(newTotal);
           toast.success(`🍅 完成第 ${newToday} 个番茄！休息 ${POMODORO_BREAK_MIN} 分钟`);
-          // 切到休息阶段
+          // 上报后端
+          void reportComplete("write", POMODORO_WRITE_MIN);
           setPhase("break");
           return POMODORO_BREAK_MIN * 60;
         } else {
-          // break 结束：回 idle
+          // break 结束：v1 不上报
           toast("休息结束，准备开始下一个番茄");
           setPhase("idle");
           return POMODORO_WRITE_MIN * 60;
@@ -99,7 +160,7 @@ export function usePomodoro() {
       });
     }, SECOND);
     return () => clearInterval(id);
-  }, [phase]);
+  }, [phase, reportComplete]);
 
   return {
     phase,
@@ -109,7 +170,6 @@ export function usePomodoro() {
     start,
     startBreak,
     stop,
-    // 派生：格式化 mm:ss
     remainingLabel: `${Math.floor(remaining / 60)
       .toString()
       .padStart(2, "0")}:${(remaining % 60).toString().padStart(2, "0")}`,

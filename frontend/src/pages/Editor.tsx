@@ -383,7 +383,7 @@ export default function Editor() {
   const [cheatsheetOpen, setCheatsheetOpen] = useState(false);
 
   // 番茄钟
-  const pomodoro = usePomodoro();
+  const pomodoro = usePomodoro({ novelId });
 
   // 命令面板：state + AI 配置（命令面板要列出可切换的配置）
   const [cmdOpen, setCmdOpen] = useState(false);
