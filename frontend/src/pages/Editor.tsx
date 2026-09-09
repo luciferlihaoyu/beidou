@@ -1125,6 +1125,7 @@ export default function Editor() {
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end">
               <DropdownMenuItem onClick={() => exportNovel("txt")}>TXT 纯文本</DropdownMenuItem>
+              <DropdownMenuItem onClick={() => exportNovel("md")}>Markdown · 简书/飞书/GitBook 通用</DropdownMenuItem>
               <DropdownMenuItem onClick={() => exportNovel("epub")}>EPUB 电子书</DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>

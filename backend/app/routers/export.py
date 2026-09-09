@@ -1,4 +1,12 @@
-"""多格式导出：TXT / HTML / EPUB。按分卷组织目录，章节自动带"第X章"连续编号。"""
+"""多格式导出：TXT / HTML / EPUB / Markdown。按分卷组织目录，章节自动带"第X章"连续编号。
+
+Markdown 格式（P2-3）：
+- 简化的 HTML → MD 转换（不装 html2text）
+- 支持：<p> → 段落, <h1-3> → 标题, <strong>/<b> → **, <em>/<i> → *, <br> → 换行
+- 不支持：表格、图片（替换为 alt 文字占位）
+- 块引用（<blockquote>）→ > 引用
+- Reference chip（<span data-ref>）→ @name 形式保留
+"""
 
 import io
 import html as html_mod
@@ -167,12 +175,13 @@ FORMATS = {
     "txt": ("text/plain; charset=utf-8", _export_txt, ".txt"),
     "html": ("text/html; charset=utf-8", _export_html, ".html"),
     "epub": ("application/epub+zip", _export_epub, ".epub"),
+    # Markdown：注册位置在 _export_md 定义之后（见文件底部）
 }
 
 
 @router.get("")
 async def export_novel(
-    format: str = Query(default="txt", pattern="^(txt|html|epub)$"),
+    format: str = Query(default="txt", pattern="^(txt|html|epub|md)$"),
     novel: Novel = Depends(get_owned_novel),
     db: AsyncSession = Depends(get_db),
 ):
@@ -188,3 +197,148 @@ async def export_novel(
     if format == "html":
         return Response(content=data, media_type=media_type)
     return StreamingResponse(io.BytesIO(data), media_type=media_type, headers=headers)
+
+
+# ---- Markdown 导出（P2-3）----
+
+_HTML_ESC = {"&": "&amp;", "<": "&lt;", ">": "&gt;"}
+
+
+def _md_escape(text: str) -> str:
+    return "".join(_HTML_ESC.get(c, c) for c in text)
+
+
+def _html_to_md(html: str) -> str:
+    """简化 HTML → Markdown（不装 html2text）。
+
+    块级：先处理 blockquote（> 引用）和 li（- 项），再处理标题/段落；
+    行内：先 strong/em/code/img/ref，最后去残留标签。
+    """
+    import re as _re
+
+    if not html:
+        return ""
+
+    # 行内
+    strong_re = _re.compile(
+        r"<(strong|b)\b[^>]*>(.*?)</\1>", _re.IGNORECASE | _re.DOTALL
+    )
+    em_re = _re.compile(
+        r"<(em|i)\b[^>]*>(.*?)</\1>", _re.IGNORECASE | _re.DOTALL
+    )
+    code_re = _re.compile(
+        r"<code\b[^>]*>(.*?)</code>", _re.IGNORECASE | _re.DOTALL
+    )
+    img_re = _re.compile(
+        r'<img\b[^>]*alt=["\']?([^"\'\s>]*)["\']?[^>]*/?>', _re.IGNORECASE
+    )
+    ref_re = _re.compile(
+        r'<span[^>]*data-ref=["\']([^"\']+)["\'][^>]*>(.*?)</span>',
+        _re.IGNORECASE | _re.DOTALL,
+    )
+
+    s = html
+    s = strong_re.sub(lambda m: f"**{m.group(2)}**", s)
+    s = em_re.sub(lambda m: f"*{m.group(2)}*", s)
+    s = code_re.sub(lambda m: f"`{m.group(1)}`", s)
+    s = img_re.sub(lambda m: f"[{_md_escape(m.group(1))}]", s)
+    # ref chip：HTML 文本里已是 @小明——直接保留（不要再加 @）
+    s = ref_re.sub(lambda m: m.group(2) or f"@{m.group(1).split(':', 1)[-1]}", s)
+
+    # 块级：blockquote
+    bq_re = _re.compile(
+        r"<blockquote\b[^>]*>(.*?)</blockquote>", _re.IGNORECASE | _re.DOTALL
+    )
+    s = bq_re.sub(
+        lambda m: "\n\n" + "\n".join("> " + ln for ln in m.group(1).splitlines() if ln.strip()) + "\n\n",
+        s,
+    )
+
+    # 块级：li
+    li_re = _re.compile(
+        r"<li\b[^>]*>(.*?)</li>", _re.IGNORECASE | _re.DOTALL
+    )
+    s = li_re.sub(lambda m: "\n- " + m.group(1).strip(), s)
+
+    # 块级：标题
+    heading_re = _re.compile(
+        r"<(h1|h2|h3|h4|h5|h6)\b[^>]*>(.*?)</\1>", _re.IGNORECASE | _re.DOTALL
+    )
+    s = heading_re.sub(
+        lambda m: "\n\n" + "#" * int(m.group(1)[1]) + " " + m.group(2).strip() + "\n\n",
+        s,
+    )
+
+    # 块级：段落
+    p_re = _re.compile(
+        r"<p\b[^>]*>(.*?)</p>", _re.IGNORECASE | _re.DOTALL
+    )
+    s = p_re.sub(lambda m: "\n\n" + m.group(1).strip() + "\n\n", s)
+
+    # br
+    s = _re.sub(r"<br\s*/?>", "\n", s, flags=_re.IGNORECASE)
+
+    # 去所有残留标签
+    s = _re.sub(r"<[^>]+>", "", s)
+
+    # HTML 实体反转
+    s = (
+        s.replace("&nbsp;", " ")
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", '"')
+        .replace("&#39;", "'")
+    )
+
+    # 整理空白
+    lines = s.split("\n")
+    out: list[str] = []
+    prev_blank = True
+    for ln in lines:
+        stripped = ln.rstrip()
+        if not stripped:
+            if not prev_blank:
+                out.append("")
+            prev_blank = True
+        else:
+            out.append(stripped)
+            prev_blank = False
+    return "\n".join(out).strip()
+
+
+def _export_md(novel: Novel, groups) -> bytes:
+    parts: list[str] = []
+    parts.append(f"# 《{novel.title}》")
+    meta: list[str] = []
+    if novel.author:
+        meta.append(f"作者：{novel.author}")
+    if novel.genre:
+        meta.append(f"类型：{novel.genre}")
+    if novel.tags:
+        meta.append(f"标签：{', '.join(novel.tags)}")
+    if novel.status:
+        meta.append(f"状态：{novel.status}")
+    if meta:
+        parts.append("\n".join(meta))
+    if novel.synopsis:
+        parts.append(f"\n> {novel.synopsis.strip()}\n")
+    parts.append("---")
+
+    vol_index = 0
+    for volume, chapters in groups:
+        vol_title = _volume_heading(vol_index + 1, volume)
+        if vol_title:
+            vol_index += 1
+            parts.append(f"\n## {vol_title}\n")
+        for chapter, num in chapters:
+            display = chapter_display_title(chapter, num)
+            parts.append(f"\n## {display}\n")
+            md_body = _html_to_md(chapter.content)
+            if md_body:
+                parts.append(md_body)
+            parts.append("")
+    return ("\n".join(parts) + "\n").encode("utf-8")
+
+# 在文件末尾注册 md 格式（必须在 _export_md 定义之后）
+FORMATS["md"] = ("text/markdown; charset=utf-8", _export_md, ".md")
