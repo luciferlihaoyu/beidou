@@ -20,6 +20,7 @@ import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
 import { api, type DailyStat } from "@/lib/api";
 import { computeStreak, type MilestoneBadge } from "@/lib/streak";
+import WritingHeatmap from "@/components/WritingHeatmap";
 
 interface Props {
   open: boolean;
@@ -156,6 +157,11 @@ export default function GoalsBadges({ open, onOpenChange, novelId, dailyGoal }: 
                 还没有任何徽章。开始码字吧！
               </p>
             )}
+
+            {/* P4-1 写作时段热力图 */}
+            <div className="border-t border-border pt-4">
+              <WritingHeatmap novelId={novelId} />
+            </div>
           </div>
         )}
       </DialogContent>

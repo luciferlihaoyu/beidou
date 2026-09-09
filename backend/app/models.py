@@ -159,6 +159,23 @@ class WritingStat(Base):
     words: Mapped[int] = mapped_column(default=0)
 
 
+class WritingHourlyStat(Base):
+    """按时段（每小时 0-23）统计字数（P4-1 写作时段分析）。
+
+    与 WritingStat 同步写：保存章节时 record_writing 同时累计日总和与时段。
+    主键 (novel_id, date, hour) — 同一小时内多次写作累加在一行。
+    """
+
+    __tablename__ = "writing_hourly_stats"
+    __table_args__ = (UniqueConstraint("novel_id", "date", "hour", name="uq_writing_hourly_stat_pk"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    novel_id: Mapped[int] = mapped_column(ForeignKey("novels.id", ondelete="CASCADE"), index=True)
+    date: Mapped[str] = mapped_column(String(10))  # YYYY-MM-DD
+    hour: Mapped[int] = mapped_column(default=0)  # 0-23
+    words: Mapped[int] = mapped_column(default=0)
+
+
 class PomoLog(Base):
     """番茄钟完成事件：用户点「完成番茄」时上报一行；多端/移动共享。
 
