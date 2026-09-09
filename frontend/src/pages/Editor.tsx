@@ -6,6 +6,7 @@ import {
   ArrowUp,
   BookMarked,
   BookmarkPlus,
+  BookOpen,
   CalendarDays,
   Check,
   ChevronRight,
@@ -37,6 +38,7 @@ import ShortcutCheatsheet from "@/components/ShortcutCheatsheet";
 import CommandPalette from "@/components/CommandPalette";
 import KnowledgeCabinet from "@/components/KnowledgeCabinet";
 import IdeaNotes from "@/components/IdeaNotes";
+import OutlineBoard from "@/components/OutlineBoard";
 import SnapshotPanel from "@/components/SnapshotPanel";
 import TiptapEditor, { type EditorHandle, type OutlineItem } from "@/components/TiptapEditor";
 import { useGlobalShortcuts } from "@/hooks/useGlobalShortcuts";
@@ -390,6 +392,9 @@ export default function Editor() {
 
   // 右栏面板：AI / 知识舱 切换
   const [rightTab, setRightTab] = useState<"ai" | "knowledge">("ai");
+
+  // 大纲卡片视图（Scrivener 风格）
+  const [boardOpen, setBoardOpen] = useState(false);
 
   // 块引用数据：人物 / 设定 / 伏笔，供编辑器 chip 浮卡预览
   const [refData, setRefData] = useState<ReferenceData>({
@@ -1173,6 +1178,15 @@ export default function Editor() {
                 variant="ghost"
                 size="icon"
                 className="h-7 w-7"
+                title="大纲卡片视图（Scrivener 风格 + 拖拽排序）"
+                onClick={() => setBoardOpen(true)}
+              >
+                <BookOpen className="h-4 w-4" />
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-7 w-7"
                 title="全书查找替换"
                 onClick={() => setSearchOpen(true)}
               >
@@ -1547,6 +1561,20 @@ export default function Editor() {
 
         {/* 灵感便签（写作时随叫随到） */}
         <IdeaNotes novelId={novelId} />
+
+        {/* 大纲卡片视图（Scrivener 风格 + 拖拽排序） */}
+        <OutlineBoard
+          open={boardOpen}
+          onOpenChange={setBoardOpen}
+          novelId={novelId}
+          chapters={chapters}
+          volumes={volumes}
+          onJumpChapter={(id) => {
+            setActiveId(id);
+            setActiveContent(null);
+          }}
+          onNewChapter={() => setChDialog({ volumeId: null })}
+        />
 
         {/* 命令面板（ctrl+k 触发） */}
         <CommandPalette
