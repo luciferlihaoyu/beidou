@@ -44,7 +44,7 @@ import OutlineBoard from "@/components/OutlineBoard";
 import GoalsBadges from "@/components/GoalsBadges";
 import FullTextSearch from "@/components/FullTextSearch";
 import EditorThemeSettings from "@/components/EditorThemeSettings";
-import RecycleBinView from "@/components/RecycleBin";
+import RecycleBinView, { type RestoredPayload } from "@/components/RecycleBin";
 import { type EditorTheme, loadTheme } from "@/lib/editorTheme";
 import SnapshotPanel from "@/components/SnapshotPanel";
 import TiptapEditor, { type EditorHandle, type OutlineItem } from "@/components/TiptapEditor";
@@ -1666,10 +1666,24 @@ export default function Editor() {
           open={recycleOpen}
           onOpenChange={setRecycleOpen}
           currentNovelId={novelId}
-          onRestored={() => {
-            // 恢复后可能影响章节/人物/设定列表——轻量刷新
-            void loadChapters();
-            void runSearch();
+          onRestored={(payload?: RestoredPayload) => {
+            // 章节/人物/设定恢复：刷列表
+            if (!payload || payload.kind !== "paragraph") {
+              void loadChapters();
+              void runSearch();
+              return;
+            }
+            // 段落恢复：跳到目标章节 + 追加段落到末尾
+            if (payload.chapterId) {
+              setActiveId(payload.chapterId);
+              setActiveContent(null);
+              // 等编辑器重挂载后再 append：观察 reloadTick 或延迟
+              // 这里用 setTimeout 简单处理；TiptapEditor key=activeId:reloadTick 重挂载
+              setTimeout(() => {
+                const html = (payload.paragraphs ?? []).join("\n");
+                if (html) editorRef.current?.appendContent(html);
+              }, 350);
+            }
           }}
         />
 

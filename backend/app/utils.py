@@ -22,6 +22,42 @@ def strip_html(html: str) -> str:
     return "\n".join(lines).strip("\n")
 
 
+def split_into_paragraphs(html: str) -> list[str]:
+    """把 Tiptap HTML 按块级标签切分成段落列表（P4-3 段落级废纸篓）。
+
+    切分边界：</p>, </h1-6>, </li>, </blockquote>, </div>
+    每段保留原 HTML（不去标签），方便恢复时直接 insertContent。
+
+    跳过空段（只含空白 / 换行）。
+    """
+    if not html:
+        return []
+    _PARA_RE = re.compile(
+        r"(</(?:p|h1|h2|h3|h4|h5|h6|li|blockquote|div)>)", re.IGNORECASE
+    )
+    parts = _PARA_RE.split(html)
+    # 重新组合：每段 = 标签段 + 关闭标签
+    paras: list[str] = []
+    buf: list[str] = []
+    for p in parts:
+        buf.append(p)
+        if re.match(_PARA_RE, p):
+            chunk = "".join(buf).strip()
+            if chunk and not _is_paragraph_empty(chunk):
+                paras.append(chunk)
+            buf = []
+    leftover = "".join(buf).strip()
+    if leftover and not _is_paragraph_empty(leftover):
+        paras.append(leftover)
+    return paras
+
+
+def _is_paragraph_empty(html_chunk: str) -> bool:
+    """段落是否只含空白 / 不可见节点（图片暂不算空）。"""
+    text = _TAG_RE.sub("", html_chunk).strip()
+    return not text
+
+
 _CN_DIGITS = "零一二三四五六七八九"
 _CN_UNITS = ((1000, "千"), (100, "百"), (10, "十"))
 

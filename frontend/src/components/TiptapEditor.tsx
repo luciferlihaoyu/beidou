@@ -16,6 +16,7 @@ export interface OutlineItem {
 
 export interface EditorHandle {
   insertAtCursor: (text: string) => void;
+  appendContent: (html: string) => void;
   getText: () => string;
   /** 跳转到指定标题位置（大纲面板点击用） */
   jumpToHeading: (pos: number) => void;
@@ -148,6 +149,18 @@ export default function TiptapEditor({
             .map((l) => `<p>${l.replace(/</g, "&lt;")}</p>`)
             .join("");
           editor.chain().focus().insertContent(paragraphs).run();
+        },
+        appendContent: (html: string) => {
+          if (!editor || editor.isDestroyed) return;
+          // 追加到文档末尾（moveToEnd + insertContent）
+          // 用 insertContentAt 显式插到 docSize 位置
+          const end = editor.state.doc.content.size;
+          editor
+            .chain()
+            .focus()
+            .insertContentAt(end, html)
+            .scrollIntoView()
+            .run();
         },
         getText: () => editor.getText(),
         jumpToHeading: (pos: number) => {

@@ -178,6 +178,8 @@ async def update_chapter(
     db: AsyncSession = Depends(get_db),
 ):
     chapter = await _get_chapter(novel, chapter_id, db)
+    # P4-3 段落级废纸篓：记录旧正文用于 diff（在改之前快照）
+    old_content_snapshot = chapter.content if data.content is not None else None
     content_changed = False
     if data.title is not None:
         chapter.title = data.title.strip()
@@ -208,8 +210,54 @@ async def update_chapter(
     if data.tags is not None:
         # ensure_ascii=False 保留中文标签原文；list → JSON 字符串存进 DB
         chapter.tags = json.dumps(data.tags, ensure_ascii=False)
+    # P4-3 段落级废纸篓：在 commit 前算 diff（被删的段落入档）
+    archived_paragraphs: list[str] = []
+    if old_content_snapshot is not None and data.content is not None:
+        try:
+            from ..utils import split_into_paragraphs
+
+            old_paras = split_into_paragraphs(old_content_snapshot)
+            new_paras = split_into_paragraphs(data.content)
+            new_set = set(new_paras)
+            # 整段不在 new_paras 集合里的 → 被删（v1 简化：不区分"删"和"移"，
+            # 段落移动也会入档——可接受 false positive；避免 LCS 复杂度）
+            for p in old_paras:
+                if p not in new_set:
+                    archived_paragraphs.append(p)
+        except Exception:  # noqa: BLE001
+            archived_paragraphs = []
     await db.commit()
     await db.refresh(chapter)
+    # 段落级废纸篓归档（commit 后做，避免污染事务）
+    if archived_paragraphs:
+        try:
+            from ..routers.recycle import archive_to_recycle
+
+            owner = await _get_novel_owner(db, novel.id)
+            if owner is not None:
+                display_title = chapter.title or f"第{chapter.sort_order}章"
+                # 把多段落合并到一条废纸篓条目（payload 存 list）
+                # 名字：用首段摘要（前 40 字）
+                from ..utils import strip_html as _strip
+
+                first_text = _strip(archived_paragraphs[0])[:40]
+                await archive_to_recycle(
+                    db,
+                    user=owner,
+                    novel_id=novel.id,
+                    kind="paragraph",
+                    name=f"{display_title} · 删 {len(archived_paragraphs)} 段",
+                    payload={
+                        "chapter_id": chapter.id,
+                        "chapter_title": display_title,
+                        "paragraphs": archived_paragraphs,
+                        "preview": _strip(archived_paragraphs[0])[:300],
+                    },
+                )
+                # 已在 archive_to_recycle 内 add，不需要额外 commit
+                await db.commit()
+        except Exception:  # noqa: BLE001  废纸篓失败不影响保存
+            pass
     # 同步 FTS 索引（P3-1 全文搜索）：title / content 改了就 upsert
     if content_changed or data.title is not None:
         try:

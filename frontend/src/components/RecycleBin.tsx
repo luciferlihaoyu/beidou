@@ -12,6 +12,7 @@ import { toast } from "sonner";
 import {
   AlertCircle,
   BookOpen,
+  FileText,
   Globe,
   Loader2,
   RotateCcw,
@@ -46,15 +47,22 @@ const KIND_META: Record<string, { icon: React.ReactNode; label: string; color: s
   character: { icon: <User className="h-3.5 w-3.5" />, label: "人物", color: "bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-200" },
   setting: { icon: <Globe className="h-3.5 w-3.5" />, label: "设定", color: "bg-emerald-100 text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-200" },
   foreshadow: { icon: <AlertCircle className="h-3.5 w-3.5" />, label: "伏笔", color: "bg-purple-100 text-purple-800 dark:bg-purple-900/40 dark:text-purple-200" },
+  paragraph: { icon: <FileText className="h-3.5 w-3.5" />, label: "段落", color: "bg-sky-100 text-sky-700 dark:bg-sky-900/40 dark:text-sky-200" },
 };
+
+export interface RestoredPayload {
+  kind: "paragraph" | "chapter" | "character" | "setting" | "foreshadow";
+  chapterId?: number;
+  paragraphs?: string[];
+}
 
 interface Props {
   open: boolean;
   onOpenChange: (v: boolean) => void;
   /** 当前小说 ID（用于过滤+高亮；传 None = 看所有） */
   currentNovelId: number | null;
-  /** 删除后回调：可能需要刷新章节/人物列表 */
-  onRestored?: () => void;
+  /** 恢复后回调：可能需要刷新章节/人物列表 + 处理段落插入 */
+  onRestored?: (payload?: RestoredPayload) => void;
 }
 
 export default function RecycleBinView({
@@ -90,9 +98,28 @@ export default function RecycleBinView({
   async function restore(id: number) {
     setBusyId(id);
     try {
-      await api.post(`/api/recycle/${id}/restore`, {});
-      toast.success("已恢复");
-      onRestored?.();
+      // 先查一下 kind（用列表缓存的 items）
+      const it = items?.find((x) => x.id === id);
+      if (it?.kind === "paragraph") {
+        // 段落恢复：新端点，返回 paragraphs + chapter_id
+        const r = await api.post<{
+          ok: boolean;
+          kind: string;
+          chapter_id: number | null;
+          chapter_title: string;
+          paragraphs: string[];
+        }>(`/api/recycle/${id}/restore_paragraph`, {});
+        toast.success(`已恢复 ${r.paragraphs.length} 段到「${r.chapter_title}」末尾`);
+        onRestored?.({
+          kind: "paragraph",
+          chapterId: r.chapter_id ?? undefined,
+          paragraphs: r.paragraphs,
+        });
+      } else {
+        await api.post(`/api/recycle/${id}/restore`, {});
+        toast.success("已恢复");
+        onRestored?.();
+      }
       await load();
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "恢复失败");

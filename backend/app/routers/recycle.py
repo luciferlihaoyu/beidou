@@ -194,6 +194,39 @@ async def restore_entry(
     return {"ok": True, "kind": kind}
 
 
+@router.post("/{entry_id}/restore_paragraph")
+async def restore_paragraph(
+    entry_id: int,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """段落级恢复：返回被删的 paragraphs + chapter_id（前端负责追加到章节末尾）。
+
+    v1 简化：不精确恢复原位置（需要 diff 算法），只追加到章节末尾。
+    同时删除废纸篓条目。
+    """
+    entry = await db.get(RecycleBin, entry_id)
+    if entry is None or entry.user_id != user.id:
+        raise HTTPException(404, "条目不存在")
+    if entry.kind != "paragraph":
+        raise HTTPException(400, "非段落类型条目")
+    try:
+        data = json.loads(entry.payload)
+    except json.JSONDecodeError:
+        raise HTTPException(500, "存档已损坏")
+    paragraphs = data.get("paragraphs", [])
+    chapter_id = data.get("chapter_id")
+    await db.delete(entry)
+    await db.commit()
+    return {
+        "ok": True,
+        "kind": "paragraph",
+        "chapter_id": chapter_id,
+        "chapter_title": data.get("chapter_title", ""),
+        "paragraphs": paragraphs,
+    }
+
+
 @router.delete("/{entry_id}")
 async def hard_delete_entry(
     entry_id: int,
