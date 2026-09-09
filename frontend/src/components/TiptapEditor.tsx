@@ -4,6 +4,7 @@ import StarterKit from "@tiptap/starter-kit";
 import { Placeholder } from "@tiptap/extension-placeholder";
 import { CharacterCount } from "@tiptap/extension-character-count";
 import { Reference } from "@/extensions/Reference";
+import AIBubbleMenu from "@/components/editor/AIBubbleMenu";
 
 /** 章内标题大纲条目：pos 为文档绝对位置，供跳转与缩进展示 */
 export interface OutlineItem {
@@ -43,6 +44,8 @@ export default function TiptapEditor({
   onReady,
   onOutlineChange,
   typewriter = false,
+  novelId,
+  chapterId,
 }: {
   content: string;
   placeholder?: string;
@@ -50,6 +53,8 @@ export default function TiptapEditor({
   onReady?: (handle: EditorHandle) => void;
   onOutlineChange?: (items: OutlineItem[]) => void;
   typewriter?: boolean;
+  novelId?: number;
+  chapterId?: number | null;
 }) {
   // useEditor 的回调在创建时闭包捕获一次 props，经 ref 转发保证始终拿到最新值
   // （ref 写入放 effect 中同步，遵守渲染期不可触碰 ref 的约束）
@@ -170,6 +175,7 @@ export default function TiptapEditor({
       style={typewriter ? { paddingBottom: "50vh" } : undefined}
     >
       <EditorContent editor={editor} className={typewriter ? "min-h-full" : "h-full"} />
+      {novelId && editor && <AIBubbleMenu editor={editor} novelId={novelId} chapterId={chapterId ?? null} />}
     </div>
   );
 }

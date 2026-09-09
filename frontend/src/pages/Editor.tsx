@@ -1331,6 +1331,8 @@ export default function Editor() {
                       onUpdate={onEditorUpdate}
                       onOutlineChange={handleOutlineChange}
                       typewriter={typewriter}
+                      novelId={novelId}
+                      chapterId={activeId}
                       onReady={(h) => (editorRef.current = h)}
                     />
                 </div>
