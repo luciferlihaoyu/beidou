@@ -21,6 +21,7 @@ import {
   Search,
   Sparkles,
   User,
+  Wand2,
 } from "lucide-react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -58,7 +59,7 @@ export default function KnowledgeCabinet({
   activeContentHtml,
   onInsertReference,
 }: KnowledgeCabinetProps) {
-  const [tab, setTab] = useState<"refs" | "char" | "setting" | "foreshadow">("refs");
+  const [tab, setTab] = useState<"refs" | "suggest" | "char" | "setting" | "foreshadow">("refs");
   const [search, setSearch] = useState("");
 
   // 解析当前章节已用的 ref：按 kind 分组 → 唯一 target
@@ -75,6 +76,48 @@ export default function KnowledgeCabinet({
     return byKind;
   }, [activeContentHtml]);
 
+  // AI 推荐：找出"章节正文里出现过 name/title，但还没被引用过"的实体
+  // 用纯文本子串匹配（先把 HTML 剥成纯文本）
+  const suggestions = useMemo(() => {
+    const html = activeContentHtml || "";
+    const text = stripHtmlInline(html);
+    if (!text.trim()) return { char: [], setting: [], foreshadow: [] };
+    const isReferenced = (kind: ReferenceKind, target: string) =>
+      usedRefs[kind].some((r) => r.target === target);
+    function countOccurrences(haystack: string, needle: string) {
+      if (!needle) return 0;
+      let count = 0;
+      let pos = 0;
+      while (true) {
+        const idx = haystack.indexOf(needle, pos);
+        if (idx === -1) break;
+        count++;
+        pos = idx + needle.length;
+      }
+      return count;
+    }
+    function rank<T extends { name?: string; title?: string }>(
+      items: T[],
+      pickText: (it: T) => string,
+      kind: ReferenceKind
+    ): { item: T; count: number }[] {
+      return items
+        .map((it) => {
+          const t = pickText(it).trim();
+          if (!t || isReferenced(kind, t)) return null;
+          return { item: it, count: countOccurrences(text, t) };
+        })
+        .filter((x): x is { item: T; count: number } => x !== null && x.count > 0)
+        .sort((a, b) => b.count - a.count)
+        .slice(0, 10);
+    }
+    return {
+      char: rank(characters, (c) => c.name, "char"),
+      setting: rank(settings, (s) => s.title, "setting"),
+      foreshadow: rank(foreshadows, (f) => f.title, "foreshadow"),
+    };
+  }, [activeContentHtml, characters, settings, foreshadows, usedRefs]);
+
   function filter<T extends { name?: string; title?: string }>(items: T[]): T[] {
     if (!search.trim()) return items;
     const q = search.trim().toLowerCase();
@@ -85,10 +128,14 @@ export default function KnowledgeCabinet({
     <div className="flex h-full flex-col">
       <Tabs value={tab} onValueChange={(v) => setTab(v as typeof tab)} className="flex h-full flex-col">
         <div className="border-b border-border bg-card px-2 pt-2">
-          <TabsList className="grid w-full grid-cols-4">
-            <TabsTrigger value="refs" className="text-xs">
+          <TabsList className="grid w-full grid-cols-5">
+            <TabsTrigger value="refs" className="text-xs" title="本章已引用的实体">
               <Sparkles className="mr-1 h-3 w-3" />
               本章
+            </TabsTrigger>
+            <TabsTrigger value="suggest" className="text-xs" title="本章提到但未引用的实体（建议补引用）">
+              <Wand2 className="mr-1 h-3 w-3" />
+              推荐
             </TabsTrigger>
             <TabsTrigger value="char" className="text-xs">
               <User className="mr-1 h-3 w-3" />
@@ -134,6 +181,61 @@ export default function KnowledgeCabinet({
             {usedRefs.char.length + usedRefs.setting.length + usedRefs.foreshadow.length === 0 && (
               <div className="rounded border border-dashed border-input p-6 text-center text-xs text-muted-foreground">
                 本章还没有引用。点击下方列表的「插入」按钮，或输入 <code className="rounded bg-muted px-1">{"{{char:名字}}"}</code>
+              </div>
+            )}
+          </TabsContent>
+
+          {/* AI 推荐：章节里出现但没被引用 */}
+          <TabsContent value="suggest" className="m-0 space-y-3 p-2">
+            {(["char", "setting", "foreshadow"] as const).map((kind) => {
+              const list = suggestions[kind];
+              if (list.length === 0) return null;
+              const label = { char: "人物", setting: "设定", foreshadow: "伏笔" }[kind];
+              return (
+                <div key={kind} className="space-y-1.5">
+                  <div className="flex items-center gap-1.5 px-1 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+                    {KIND_ICON[kind]} {label}（命中 {list.length}）
+                  </div>
+                  {list.map(({ item, count }) => {
+                    const title = (
+                      "name" in item ? (item as Character).name : (item as WorldviewEntry | Foreshadowing).title
+                    );
+                    return (
+                      <div
+                        key={item.id}
+                        className="group flex items-center gap-2 rounded-md border border-border bg-card p-2 transition-colors hover:border-primary/40"
+                      >
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-1.5">
+                            <span className="truncate text-sm font-medium">{title}</span>
+                            <span className="rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-800 dark:bg-amber-900/40 dark:text-amber-200">
+                              章内 {count} 次
+                            </span>
+                          </div>
+                          <p className="mt-0.5 truncate text-[11px] text-muted-foreground">
+                            章里提了但还没建立引用，建议补上
+                          </p>
+                        </div>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          className="h-7 shrink-0 px-1.5"
+                          onClick={() => onInsertReference(kind, title)}
+                          title={`插入「@${title}」`}
+                        >
+                          <Plus className="h-3.5 w-3.5" />
+                        </Button>
+                      </div>
+                    );
+                  })}
+                </div>
+              );
+            })}
+            {suggestions.char.length + suggestions.setting.length + suggestions.foreshadow.length === 0 && (
+              <div className="rounded border border-dashed border-input p-6 text-center text-xs text-muted-foreground">
+                {activeContentHtml?.trim()
+                  ? "本章里没找到未引用的实体。所有提到的人/设定/伏笔都已建立引用 🎉"
+                  : "当前章节还没有内容"}
               </div>
             )}
           </TabsContent>
@@ -304,6 +406,20 @@ function EmptyHint({ children }: { children: React.ReactNode }) {
       {children}
     </div>
   );
+}
+
+/** 简易 HTML 去标签（与后端 utils.strip_html 行为一致：段落换行） */
+function stripHtmlInline(html: string): string {
+  return html
+    .replace(/<\/(p|h1|h2|h3|h4|li|blockquote|div)>/gi, "\n")
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<[^>]+>/g, "")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'");
 }
 
 // 防止 Tree-Shake
