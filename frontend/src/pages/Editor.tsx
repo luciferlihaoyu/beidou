@@ -4,6 +4,7 @@ import {
   AlignVerticalJustifyCenter,
   ArrowDown,
   ArrowUp,
+  BookMarked,
   BookmarkPlus,
   CalendarDays,
   Check,
@@ -34,6 +35,7 @@ import AIPanel from "@/components/AIPanel";
 import ChapterMetaEditor from "@/components/ChapterMetaEditor";
 import ShortcutCheatsheet from "@/components/ShortcutCheatsheet";
 import CommandPalette from "@/components/CommandPalette";
+import KnowledgeCabinet from "@/components/KnowledgeCabinet";
 import SnapshotPanel from "@/components/SnapshotPanel";
 import TiptapEditor, { type EditorHandle, type OutlineItem } from "@/components/TiptapEditor";
 import { useGlobalShortcuts } from "@/hooks/useGlobalShortcuts";
@@ -384,6 +386,9 @@ export default function Editor() {
   useEffect(() => {
     api.get<AIConfig[]>("/api/ai/configs").then(setAiConfigs).catch(() => setAiConfigs([]));
   }, []);
+
+  // 右栏面板：AI / 知识舱 切换
+  const [rightTab, setRightTab] = useState<"ai" | "knowledge">("ai");
 
   // 块引用数据：人物 / 设定 / 伏笔，供编辑器 chip 浮卡预览
   const [refData, setRefData] = useState<ReferenceData>({
@@ -1492,14 +1497,47 @@ export default function Editor() {
           )}
         </div>
 
-        {/* AI 面板 */}
+        {/* 右栏：AI / 知识舱 tab 切换 */}
         {aiOpen && !focus && (
-          <aside className="w-80 shrink-0 border-l border-border">
-            <AIPanel
-              novelId={novelId}
-              chapterId={activeId}
-              onInsert={(text) => editorRef.current?.insertAtCursor(text)}
-            />
+          <aside className="flex w-80 shrink-0 flex-col border-l border-border">
+            <div className="flex h-9 shrink-0 items-center gap-1 border-b border-border bg-card px-2 text-[11px]">
+              <button
+                className={`rounded px-2 py-0.5 ${rightTab === "ai" ? "bg-primary/10 font-medium text-primary" : "text-muted-foreground hover:text-foreground"}`}
+                onClick={() => setRightTab("ai")}
+                title="AI 助手"
+              >
+                <Sparkles className="mr-1 inline h-3 w-3" />
+                AI
+              </button>
+              <button
+                className={`rounded px-2 py-0.5 ${rightTab === "knowledge" ? "bg-primary/10 font-medium text-primary" : "text-muted-foreground hover:text-foreground"}`}
+                onClick={() => setRightTab("knowledge")}
+                title="知识舱（人物 / 设定 / 伏笔）"
+              >
+                <BookMarked className="mr-1 inline h-3 w-3" />
+                知识舱
+              </button>
+            </div>
+            {rightTab === "ai" ? (
+              <div className="min-h-0 flex-1">
+                <AIPanel
+                  novelId={novelId}
+                  chapterId={activeId}
+                  onInsert={(text) => editorRef.current?.insertAtCursor(text)}
+                />
+              </div>
+            ) : (
+              <KnowledgeCabinet
+                characters={refData.characters}
+                settings={refData.settings}
+                foreshadows={refData.foreshadows}
+                activeContentHtml={activeContent ?? ""}
+                onInsertReference={(kind, target) => {
+                  editorRef.current?.insertReference(kind, target);
+                  toast.success(`已插入 @${target}`);
+                }}
+              />
+            )}
           </aside>
         )}
 
