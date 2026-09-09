@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import ForeignKey, Index, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -192,6 +192,27 @@ class PomoLog(Base):
     phase: Mapped[str] = mapped_column(String(10), default="write")  # write | break
     duration_min: Mapped[int] = mapped_column(default=25)
     completed_at: Mapped[datetime] = mapped_column(default=lambda: datetime.now(timezone.utc))
+
+
+class RecycleBin(Base):
+    """废纸篓（P4-2）：删除的实体（章节/人物/设定/伏笔）入档 30 天后自动清理。
+
+    - kind: chapter | character | setting | foreshadow
+    - payload: 原始字段 JSON 字符串（恢复时反序列化重建）
+    - original_id: 实体原始 ID（恢复后不再是新 ID，是原 ID？v1 直接新建，丢掉原 ID）
+    - expires_at: 默认 30 天后；后台启动 / 调用列表时 lazy 清理
+    """
+
+    __tablename__ = "recycle_bin"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    novel_id: Mapped[int | None] = mapped_column(ForeignKey("novels.id", ondelete="SET NULL"), index=True, default=None)
+    kind: Mapped[str] = mapped_column(String(20), index=True)
+    name: Mapped[str] = mapped_column(String(200), default="")  # 显示用：章节标题 / 人物名
+    payload: Mapped[str] = mapped_column(Text)  # JSON 字符串
+    deleted_at: Mapped[datetime] = mapped_column(default=lambda: datetime.now(timezone.utc), index=True)
+    expires_at: Mapped[datetime] = mapped_column(default=lambda: datetime.now(timezone.utc) + timedelta(days=30), index=True)
 
 
 class LibraryFolder(Base):

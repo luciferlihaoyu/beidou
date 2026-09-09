@@ -8,7 +8,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .config import settings
 from .db import engine, init_db
-from .routers import ai, auth, chapters, export, integrations, library, novels, pomodoro, search, sso, skills, snapshots, stats, volumes, settings as settings_router
+from .routers import ai, auth, chapters, export, integrations, library, novels, pomodoro, recycle, search, sso, skills, snapshots, stats, volumes, settings as settings_router
 
 
 @asynccontextmanager
@@ -42,6 +42,7 @@ app.include_router(chapters.router)
 app.include_router(settings_router.router)
 app.include_router(ai.router)
 app.include_router(pomodoro.router)
+app.include_router(recycle.router)
 app.include_router(skills.router)
 app.include_router(library.router)
 app.include_router(integrations.router)

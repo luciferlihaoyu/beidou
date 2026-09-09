@@ -66,6 +66,30 @@ async def delete_character(item_id: int, novel: Novel = Depends(get_owned_novel)
     item = await db.get(Character, item_id)
     if item is None or item.novel_id != novel.id:
         raise HTTPException(404, "角色不存在")
+    # P4-2 废纸篓：先存档
+    try:
+        from ..deps import get_current_user  # noqa: F401  placeholder import
+        from ..routers.recycle import archive_to_recycle
+        from .chapters import _get_novel_owner
+
+        owner = await _get_novel_owner(db, novel.id)
+        if owner is not None:
+            await archive_to_recycle(
+                db,
+                user=owner,
+                novel_id=novel.id,
+                kind="character",
+                name=item.name,
+                payload={
+                    "name": item.name,
+                    "role": item.role,
+                    "tags": item.tags,
+                    "description": item.description,
+                    "relations": item.relations,
+                },
+            )
+    except Exception:  # noqa: BLE001
+        pass
     await db.delete(item)
     await db.commit()
     return {"ok": True}
@@ -123,6 +147,26 @@ async def delete_worldview(item_id: int, novel: Novel = Depends(get_owned_novel)
     item = await db.get(WorldviewEntry, item_id)
     if item is None or item.novel_id != novel.id:
         raise HTTPException(404, "条目不存在")
+    try:
+        from ..routers.recycle import archive_to_recycle
+        from .chapters import _get_novel_owner
+
+        owner = await _get_novel_owner(db, novel.id)
+        if owner is not None:
+            await archive_to_recycle(
+                db,
+                user=owner,
+                novel_id=novel.id,
+                kind="setting",
+                name=item.title,
+                payload={
+                    "category": item.category,
+                    "title": item.title,
+                    "content": item.content,
+                },
+            )
+    except Exception:  # noqa: BLE001
+        pass
     await db.delete(item)
     await db.commit()
     return {"ok": True}
@@ -182,6 +226,26 @@ async def delete_foreshadowing(
     item = await db.get(Foreshadowing, item_id)
     if item is None or item.novel_id != novel.id:
         raise HTTPException(404, "伏笔不存在")
+    try:
+        from ..routers.recycle import archive_to_recycle
+        from .chapters import _get_novel_owner
+
+        owner = await _get_novel_owner(db, novel.id)
+        if owner is not None:
+            await archive_to_recycle(
+                db,
+                user=owner,
+                novel_id=novel.id,
+                kind="foreshadow",
+                name=item.title,
+                payload={
+                    "title": item.title,
+                    "content": item.content,
+                    "status": item.status,
+                },
+            )
+    except Exception:  # noqa: BLE001
+        pass
     await db.delete(item)
     await db.commit()
     return {"ok": True}

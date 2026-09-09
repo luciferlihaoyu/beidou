@@ -236,6 +236,28 @@ async def delete_chapter(
     chapter_id: int, novel: Novel = Depends(get_owned_novel), db: AsyncSession = Depends(get_db)
 ):
     chapter = await _get_chapter(novel, chapter_id, db)
+    # P4-2 废纸篓：先存档再删
+    try:
+        from ..routers.recycle import archive_to_recycle
+
+        await archive_to_recycle(
+            db,
+            user=await _get_novel_owner(db, novel.id),
+            novel_id=novel.id,
+            kind="chapter",
+            name=chapter.title or f"第{chapter.sort_order}章",
+            payload={
+                "title": chapter.title,
+                "content": chapter.content,
+                "word_count": chapter.word_count,
+                "sort_order": chapter.sort_order,
+                "volume_id": chapter.volume_id,
+                "status": chapter.status,
+                "tags": chapter.tags,
+            },
+        )
+    except Exception:  # noqa: BLE001
+        pass
     # 删 FTS 行（必须在 commit 前；CASCADE 不会触发虚拟表）
     try:
         from ..search_fts import remove_chapter
@@ -246,6 +268,13 @@ async def delete_chapter(
     await db.delete(chapter)
     await db.commit()
     return {"ok": True}
+
+
+async def _get_novel_owner(db: AsyncSession, novel_id: int) -> "User":
+    from ..models import Novel as _N, User
+
+    n = await db.get(_N, novel_id)
+    return await db.get(User, n.owner_id) if n else None
 
 
 @router.post("/reorder")

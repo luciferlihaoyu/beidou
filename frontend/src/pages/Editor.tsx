@@ -44,6 +44,7 @@ import OutlineBoard from "@/components/OutlineBoard";
 import GoalsBadges from "@/components/GoalsBadges";
 import FullTextSearch from "@/components/FullTextSearch";
 import EditorThemeSettings from "@/components/EditorThemeSettings";
+import RecycleBinView from "@/components/RecycleBin";
 import { type EditorTheme, loadTheme } from "@/lib/editorTheme";
 import SnapshotPanel from "@/components/SnapshotPanel";
 import TiptapEditor, { type EditorHandle, type OutlineItem } from "@/components/TiptapEditor";
@@ -411,6 +412,9 @@ export default function Editor() {
   // 写作区主题（横线 + 背景图）
   const [theme, setTheme] = useState<EditorTheme>(() => loadTheme());
   const [themeOpen, setThemeOpen] = useState(false);
+
+  // 废纸篓
+  const [recycleOpen, setRecycleOpen] = useState(false);
 
   // 块引用数据：人物 / 设定 / 伏笔，供编辑器 chip 浮卡预览
   const [refData, setRefData] = useState<ReferenceData>({
@@ -1235,6 +1239,15 @@ export default function Editor() {
                 variant="ghost"
                 size="icon"
                 className="h-7 w-7"
+                title="废纸篓（删除 30 天内可恢复）"
+                onClick={() => setRecycleOpen(true)}
+              >
+                <Trash2 className="h-4 w-4" />
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-7 w-7"
                 title="全书查找替换"
                 onClick={() => setSearchOpen(true)}
               >
@@ -1647,6 +1660,18 @@ export default function Editor() {
 
         {/* 写作区主题（横线 + 背景图） */}
         <EditorThemeSettings open={themeOpen} onOpenChange={setThemeOpen} theme={theme} onChange={setTheme} />
+
+        {/* 废纸篓（P4-2） */}
+        <RecycleBinView
+          open={recycleOpen}
+          onOpenChange={setRecycleOpen}
+          currentNovelId={novelId}
+          onRestored={() => {
+            // 恢复后可能影响章节/人物/设定列表——轻量刷新
+            void loadChapters();
+            void runSearch();
+          }}
+        />
 
         {/* 命令面板（ctrl+k 触发） */}
         <CommandPalette
