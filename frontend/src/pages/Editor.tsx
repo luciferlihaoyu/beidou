@@ -32,8 +32,10 @@ import { toast } from "sonner";
 import AppShell from "@/components/AppShell";
 import AIPanel from "@/components/AIPanel";
 import ChapterMetaEditor from "@/components/ChapterMetaEditor";
+import ShortcutCheatsheet from "@/components/ShortcutCheatsheet";
 import SnapshotPanel from "@/components/SnapshotPanel";
 import TiptapEditor, { type EditorHandle, type OutlineItem } from "@/components/TiptapEditor";
+import { useGlobalShortcuts } from "@/hooks/useGlobalShortcuts";
 import {
   api,
   listChapters,
@@ -362,6 +364,32 @@ export default function Editor() {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [focus]);
+
+  // 快捷键：速查面板状态（? 打开 / Esc 关闭）
+  const [cheatsheetOpen, setCheatsheetOpen] = useState(false);
+
+  // 全局快捷键注册。allowInEditable 列出在编辑元素聚焦时仍可触发的（? 用于随时呼出速查）
+  useGlobalShortcuts(
+    {
+      "?": () => setCheatsheetOpen(true),
+      "ctrl+k": () => setCheatsheetOpen(true), // 命令面板待做，先复用速查作为占位
+      "ctrl+s": (e) => {
+        e.preventDefault();
+        void flushSave();
+      },
+      "ctrl+shift+t": () => toggleTypewriter(),
+      f11: (e) => {
+        e.preventDefault();
+        setFocus((v) => !v);
+      },
+      escape: () => {
+        // 优先关弹窗，再退沉浸
+        if (cheatsheetOpen) setCheatsheetOpen(false);
+        else if (focus) setFocus(false);
+      },
+    },
+    { allowInEditable: ["?"] }
+  );
 
   // ---------- 大纲 / 打字机 / 排版偏好 ----------
 
@@ -1392,6 +1420,9 @@ export default function Editor() {
             />
           </aside>
         )}
+
+        {/* 快捷键速查面板（? 触发） */}
+        <ShortcutCheatsheet open={cheatsheetOpen} onOpenChange={setCheatsheetOpen} />
 
         {/* 专注模式浮动退出 */}
         {focus && (
