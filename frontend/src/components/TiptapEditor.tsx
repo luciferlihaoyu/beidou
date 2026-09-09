@@ -3,6 +3,7 @@ import { EditorContent, useEditor, type Editor } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
 import { Placeholder } from "@tiptap/extension-placeholder";
 import { CharacterCount } from "@tiptap/extension-character-count";
+import { Reference } from "@/extensions/Reference";
 
 /** 章内标题大纲条目：pos 为文档绝对位置，供跳转与缩进展示 */
 export interface OutlineItem {
@@ -16,6 +17,8 @@ export interface EditorHandle {
   getText: () => string;
   /** 跳转到指定标题位置（大纲面板点击用） */
   jumpToHeading: (pos: number) => void;
+  /** 插入块引用：人物 / 设定 / 伏笔，渲染为带色 chip + 浮卡预览 */
+  insertReference: (kind: "char" | "setting" | "foreshadow", target: string) => void;
 }
 
 /** 遍历文档收集标题（pos 为文档绝对位置） */
@@ -92,6 +95,7 @@ export default function TiptapEditor({
       StarterKit.configure({ heading: { levels: [1, 2, 3] } }),
       Placeholder.configure({ placeholder }),
       CharacterCount,
+      Reference,
     ],
     content,
     editorProps: {
@@ -142,6 +146,15 @@ export default function TiptapEditor({
           // 重挂载窗口内 handle 可能仍指向已销毁实例，向销毁 view dispatch 会抛错
           if (!editor || editor.isDestroyed) return;
           editor.chain().setTextSelection(pos).scrollIntoView().focus().run();
+        },
+        insertReference: (kind, target) => {
+          if (!editor || editor.isDestroyed || !target) return;
+          editor
+            .chain()
+            .focus()
+            .insertContent({ type: "reference", attrs: { kind, target } })
+            .insertContent(" ")
+            .run();
         },
       });
     }

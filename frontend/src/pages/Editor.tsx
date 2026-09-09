@@ -38,17 +38,21 @@ import SnapshotPanel from "@/components/SnapshotPanel";
 import TiptapEditor, { type EditorHandle, type OutlineItem } from "@/components/TiptapEditor";
 import { useGlobalShortcuts } from "@/hooks/useGlobalShortcuts";
 import { POMODORO_WRITE_MIN, usePomodoro } from "@/hooks/usePomodoro";
+import { ReferenceDataProvider, type ReferenceData } from "@/contexts/ReferenceDataContext";
 import {
   api,
   listChapters,
   updateChapter,
   type AIConfig,
+  type Character,
   type Chapter,
   type ChapterStatus,
   type DailyStat,
+  type Foreshadowing,
   type Novel,
   type SearchResult,
   type Volume,
+  type WorldviewEntry,
 } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import {
@@ -380,6 +384,33 @@ export default function Editor() {
   useEffect(() => {
     api.get<AIConfig[]>("/api/ai/configs").then(setAiConfigs).catch(() => setAiConfigs([]));
   }, []);
+
+  // 块引用数据：人物 / 设定 / 伏笔，供编辑器 chip 浮卡预览
+  const [refData, setRefData] = useState<ReferenceData>({
+    characters: [],
+    settings: [],
+    foreshadows: [],
+  });
+  useEffect(() => {
+    if (!novelId) return;
+    let cancelled = false;
+    Promise.all([
+      api
+        .get<Character[]>(`/api/novels/${novelId}/characters`)
+        .catch(() => [] as Character[]),
+      api
+        .get<WorldviewEntry[]>(`/api/novels/${novelId}/worldview`)
+        .catch(() => [] as WorldviewEntry[]),
+      api
+        .get<Foreshadowing[]>(`/api/novels/${novelId}/foreshadowings`)
+        .catch(() => [] as Foreshadowing[]),
+    ]).then(([characters, settings, foreshadows]) => {
+      if (!cancelled) setRefData({ characters, settings, foreshadows });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [novelId]);
 
   // 全局快捷键注册。allowInEditable 列出在编辑元素聚焦时仍可触发的（? 用于随时呼出速查）
   useGlobalShortcuts(
@@ -1288,19 +1319,20 @@ export default function Editor() {
           }
         >
           {activeId !== null && activeContent !== null ? (
-            <>
-              <div className="min-h-0 flex-1 overflow-hidden">
-                <div
-                  className={`mx-auto h-full ${WIDTH_CLASS[typo.width]} overflow-hidden bg-card shadow-[0_1px_20px_rgba(0,0,0,0.03)]`}
-                >
-                  <TiptapEditor
-                    key={`${activeId}:${reloadTick}`}
-                    content={activeContent}
-                    onUpdate={onEditorUpdate}
-                    onOutlineChange={handleOutlineChange}
-                    typewriter={typewriter}
-                    onReady={(h) => (editorRef.current = h)}
-                  />
+            <ReferenceDataProvider value={refData}>
+              <>
+                <div className="min-h-0 flex-1 overflow-hidden">
+                  <div
+                    className={`mx-auto h-full ${WIDTH_CLASS[typo.width]} overflow-hidden bg-card shadow-[0_1px_20px_rgba(0,0,0,0.03)]`}
+                  >
+                    <TiptapEditor
+                      key={`${activeId}:${reloadTick}`}
+                      content={activeContent}
+                      onUpdate={onEditorUpdate}
+                      onOutlineChange={handleOutlineChange}
+                      typewriter={typewriter}
+                      onReady={(h) => (editorRef.current = h)}
+                    />
                 </div>
               </div>
               {/* 写作状态栏 */}
@@ -1434,7 +1466,8 @@ export default function Editor() {
                   </DropdownMenu>
                 </span>
               </div>
-            </>
+              </>
+            </ReferenceDataProvider>
           ) : chapters.length === 0 ? (
             <div className="flex h-full flex-col items-center justify-center">
               <FileText className="mb-4 h-10 w-10 text-primary/25" strokeWidth={1.2} />
