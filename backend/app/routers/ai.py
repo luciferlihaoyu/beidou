@@ -386,6 +386,7 @@ class QuickActionIn(BaseModel):
     chapter_id: int | None = None
     instruction: str = Field(default="", max_length=1000)
     config_id: int | None = None
+    target_words: int | None = Field(default=None, ge=50, le=4000)  # 续写字数（P3-2）
 
 
 ACTION_PROMPTS = {
@@ -405,6 +406,9 @@ async def quick_action(
     config = await get_ai_config(user, db, data.config_id)
     context = await _novel_context(novel, db, data.chapter_id)
     prompt = ACTION_PROMPTS[action]
+    # 续写：用户可指定字数（短 200 / 中 500 / 长 1500）
+    if action == "continue" and data.target_words:
+        prompt = f"请基于以上设定与当前章节内容，直接续写约 {data.target_words} 字的正文。只输出正文，不要解释。"
     if data.instruction:
         prompt += f"\n补充要求：{data.instruction}"
     messages = [

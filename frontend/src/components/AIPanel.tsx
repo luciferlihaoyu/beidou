@@ -1,5 +1,16 @@
 import { useEffect, useRef, useState } from "react";
-import { ArrowDownToLine, ChevronDown, Loader2, SendHorizonal, Sparkles, Square, Wand2, X } from "lucide-react";
+import {
+  ArrowDownToLine,
+  Check,
+  ChevronDown,
+  Loader2,
+  RefreshCcw,
+  SendHorizonal,
+  Sparkles,
+  Square,
+  Wand2,
+  X,
+} from "lucide-react";
 import { toast } from "sonner";
 import { api, streamPost, type AIConfig, type SkillCard } from "@/lib/api";
 import { Button } from "@/components/ui/button";
@@ -9,14 +20,25 @@ import { Textarea } from "@/components/ui/textarea";
 
 const CONFIG_KEY = "beidou:ai-config";
 
+type ContinueLength = "short" | "medium" | "long";
+const CONTINUE_OPTIONS: { key: ContinueLength; label: string; desc: string; words: number }[] = [
+  { key: "short", label: "短", desc: "约 200 字", words: 200 },
+  { key: "medium", label: "中", desc: "约 500 字", words: 500 },
+  { key: "long", label: "长", desc: "约 1500 字", words: 1500 },
+];
+
 interface Message {
   role: "user" | "assistant";
   content: string;
   streaming?: boolean;
+  /** 标记 AI 消息类型，决定是否显示接受/拒绝/重试 按钮（仅 continue） */
+  kind?: "continue" | "outline" | "review";
+  /** continue 时的档位（用户选择） */
+  length?: ContinueLength;
 }
 
 const QUICK_ACTIONS = [
-  { key: "continue", label: "续写", desc: "基于本章续写约 800 字" },
+  { key: "continue", label: "续写", desc: "基于本章续写（可选短/中/长三档）" },
   { key: "outline", label: "大纲", desc: "生成后续 5 章大纲" },
   { key: "review", label: "审查", desc: "检查逻辑与设定冲突" },
 ] as const;
@@ -41,6 +63,7 @@ export default function AIPanel({
     return raw ? Number(raw) : null;
   });
   const [skill, setSkill] = useState<SkillCard | null>(null); // 挂接到下一条消息的技能卡
+  const [continuePickerOpen, setContinuePickerOpen] = useState(false); // 续写档位选择器
   const abortRef = useRef<AbortController | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -116,14 +139,19 @@ export default function AIPanel({
     });
   }
 
-  async function run(path: string, body: unknown, echo?: string) {
+  async function run(
+    path: string,
+    body: unknown,
+    echo?: string,
+    meta?: { kind?: Message["kind"]; length?: ContinueLength }
+  ) {
     if (busy) return;
     setBusy(true);
     abortRef.current = new AbortController();
     setMessages((prev) => [
       ...prev,
       ...(echo ? [{ role: "user" as const, content: echo }] : []),
-      { role: "assistant" as const, content: "", streaming: true },
+      { role: "assistant" as const, content: "", streaming: true, kind: meta?.kind, length: meta?.length },
     ]);
     try {
       const payload = { ...(body as Record<string, unknown>), config_id: configId ?? undefined };
@@ -201,15 +229,58 @@ export default function AIPanel({
             key={a.key}
             disabled={busy}
             title={a.desc}
-            onClick={() =>
-              void run(`/api/ai/action/${a.key}`, { novel_id: novelId, chapter_id: chapterId }, `【${a.label}】`)
-            }
+            onClick={() => {
+              if (a.key === "continue") {
+                // 弹档位选择（P3-2）
+                setContinuePickerOpen(true);
+              } else {
+                void run(
+                  `/api/ai/action/${a.key}`,
+                  { novel_id: novelId, chapter_id: chapterId },
+                  `【${a.label}】`,
+                  { kind: a.key as Message["kind"] }
+                );
+              }
+            }}
             className="rounded-md border border-border px-2 py-1.5 text-xs text-foreground transition-colors hover:border-primary hover:text-primary disabled:opacity-50"
           >
             {a.label}
           </button>
         ))}
       </div>
+
+      {/* 续写档位选择器（P3-2） */}
+      {continuePickerOpen && (
+        <div className="shrink-0 border-b border-border bg-muted/30 p-3">
+          <div className="mb-1.5 text-[11px] font-medium text-muted-foreground">
+            续写档位
+          </div>
+          <div className="grid grid-cols-3 gap-1.5">
+            {CONTINUE_OPTIONS.map((opt) => (
+              <button
+                key={opt.key}
+                onClick={() => {
+                  setContinuePickerOpen(false);
+                  void run(
+                    "/api/ai/action/continue",
+                    {
+                      novel_id: novelId,
+                      chapter_id: chapterId,
+                      target_words: opt.words,
+                    },
+                    `【续写·${opt.label}（${opt.desc}）】`,
+                    { kind: "continue", length: opt.key }
+                  );
+                }}
+                className="rounded-md border border-border bg-card px-2 py-1.5 text-xs transition-colors hover:border-primary hover:text-primary"
+              >
+                <div className="font-medium">{opt.label}</div>
+                <div className="text-[10px] text-muted-foreground">{opt.desc}</div>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
 
       {skills.length > 0 && (
         <div className="shrink-0 border-b border-border">
@@ -283,7 +354,51 @@ export default function AIPanel({
                   {m.content || (m.streaming ? "" : "")}
                 </div>
                 {m.role === "assistant" && !m.streaming && m.content && (
-                  <div className="mt-1 flex gap-1 opacity-0 transition-opacity group-hover:opacity-100">
+                  <div className="mt-1 flex flex-wrap items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
+                    {m.kind === "continue" && (
+                      <>
+                        <button
+                          className="flex items-center gap-1 rounded bg-primary/15 px-2 py-0.5 text-xs font-medium text-primary hover:bg-primary/25"
+                          onClick={() => {
+                            onInsert(m.content);
+                            toast.success("已接受并插入正文");
+                            setMessages((prev) => prev.filter((_, idx) => idx !== i));
+                          }}
+                          title="接受 → 插入到光标处"
+                        >
+                          <Check className="h-3 w-3" />
+                          接受
+                        </button>
+                        <button
+                          className="flex items-center gap-1 rounded px-1.5 py-0.5 text-xs text-muted-foreground hover:bg-muted"
+                          onClick={() => {
+                            setMessages((prev) => prev.filter((_, idx) => idx !== i));
+                          }}
+                          title="拒绝 → 移除此条 AI 回复"
+                        >
+                          <X className="h-3 w-3" />
+                          拒绝
+                        </button>
+                        <button
+                          className="flex items-center gap-1 rounded px-1.5 py-0.5 text-xs text-muted-foreground hover:bg-muted"
+                          onClick={() => {
+                            // 重试：移除当前条 + 用同档位再发请求
+                            setMessages((prev) => prev.filter((_, idx) => idx !== i));
+                            const opt = CONTINUE_OPTIONS.find((o) => o.key === (m.length ?? "medium")) ?? CONTINUE_OPTIONS[1];
+                            void run(
+                              "/api/ai/action/continue",
+                              { novel_id: novelId, chapter_id: chapterId, target_words: opt.words },
+                              `【续写·${opt.label}（${opt.desc}）·重试】`,
+                              { kind: "continue", length: opt.key }
+                            );
+                          }}
+                          title="用同档位重试"
+                        >
+                          <RefreshCcw className="h-3 w-3" />
+                          重试
+                        </button>
+                      </>
+                    )}
                     <button
                       className="flex items-center gap-1 rounded px-1.5 py-0.5 text-xs text-muted-foreground hover:bg-muted hover:text-primary"
                       onClick={() => onInsert(m.content)}
