@@ -36,6 +36,7 @@ import ChapterMetaEditor from "@/components/ChapterMetaEditor";
 import ShortcutCheatsheet from "@/components/ShortcutCheatsheet";
 import CommandPalette from "@/components/CommandPalette";
 import KnowledgeCabinet from "@/components/KnowledgeCabinet";
+import IdeaNotes from "@/components/IdeaNotes";
 import SnapshotPanel from "@/components/SnapshotPanel";
 import TiptapEditor, { type EditorHandle, type OutlineItem } from "@/components/TiptapEditor";
 import { useGlobalShortcuts } from "@/hooks/useGlobalShortcuts";
@@ -1543,6 +1544,9 @@ export default function Editor() {
 
         {/* 快捷键速查面板（? 触发） */}
         <ShortcutCheatsheet open={cheatsheetOpen} onOpenChange={setCheatsheetOpen} />
+
+        {/* 灵感便签（写作时随叫随到） */}
+        <IdeaNotes novelId={novelId} />
 
         {/* 命令面板（ctrl+k 触发） */}
         <CommandPalette
