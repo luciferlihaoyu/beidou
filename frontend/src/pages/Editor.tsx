@@ -33,6 +33,7 @@ import AppShell from "@/components/AppShell";
 import AIPanel from "@/components/AIPanel";
 import ChapterMetaEditor from "@/components/ChapterMetaEditor";
 import ShortcutCheatsheet from "@/components/ShortcutCheatsheet";
+import CommandPalette from "@/components/CommandPalette";
 import SnapshotPanel from "@/components/SnapshotPanel";
 import TiptapEditor, { type EditorHandle, type OutlineItem } from "@/components/TiptapEditor";
 import { useGlobalShortcuts } from "@/hooks/useGlobalShortcuts";
@@ -41,6 +42,7 @@ import {
   api,
   listChapters,
   updateChapter,
+  type AIConfig,
   type Chapter,
   type ChapterStatus,
   type DailyStat,
@@ -372,11 +374,18 @@ export default function Editor() {
   // 番茄钟
   const pomodoro = usePomodoro();
 
+  // 命令面板：state + AI 配置（命令面板要列出可切换的配置）
+  const [cmdOpen, setCmdOpen] = useState(false);
+  const [aiConfigs, setAiConfigs] = useState<AIConfig[]>([]);
+  useEffect(() => {
+    api.get<AIConfig[]>("/api/ai/configs").then(setAiConfigs).catch(() => setAiConfigs([]));
+  }, []);
+
   // 全局快捷键注册。allowInEditable 列出在编辑元素聚焦时仍可触发的（? 用于随时呼出速查）
   useGlobalShortcuts(
     {
       "?": () => setCheatsheetOpen(true),
-      "ctrl+k": () => setCheatsheetOpen(true), // 命令面板待做，先复用速查作为占位
+      "ctrl+k": () => setCmdOpen(true),
       "ctrl+s": (e) => {
         e.preventDefault();
         void flushSave();
@@ -389,6 +398,7 @@ export default function Editor() {
       escape: () => {
         // 优先关弹窗，再退沉浸
         if (cheatsheetOpen) setCheatsheetOpen(false);
+        else if (cmdOpen) setCmdOpen(false);
         else if (focus) setFocus(false);
       },
     },
@@ -1460,6 +1470,38 @@ export default function Editor() {
 
         {/* 快捷键速查面板（? 触发） */}
         <ShortcutCheatsheet open={cheatsheetOpen} onOpenChange={setCheatsheetOpen} />
+
+        {/* 命令面板（ctrl+k 触发） */}
+        <CommandPalette
+          open={cmdOpen}
+          onOpenChange={setCmdOpen}
+          novelId={novelId}
+          chapters={chapters}
+          aiConfigs={aiConfigs}
+          onJumpChapter={(id) => {
+            setActiveId(id);
+            setActiveContent(null);
+            // 触发加载（与点击章节列表同路径）
+            window.setTimeout(() => {
+              // Editor.tsx 没有显式 loadChapter(id)，但 activeId 变化会触发 effect 自动拉取
+            }, 0);
+          }}
+          onNewChapter={() => {
+            // 复用 ChapterMetaEditor 逻辑：通过 setChDialog 打开新建弹窗
+            setChDialog({ volumeId: null });
+          }}
+          onOpenSnapshot={() => setSnapshotOpen(true)}
+          onOpenSaveSnapshot={() => openSaveSnapshotDialog()}
+          onOpenAIPanel={() => setAiOpen(true)}
+          onSwitchAIConfig={(_id) => {
+            // 命令面板把选择写入 localStorage，AIPanel 会从 localStorage 读
+            // 这里由 CommandPalette 内部 toast 反馈
+            toast.info("AI 模型切换已通过 AIPanel 状态保留；面板打开即生效");
+          }}
+          onBackupNow={() => {
+            toast.info("请到「账号设置 → 集成 → 立即备份」执行");
+          }}
+        />
 
         {/* 专注模式浮动退出 */}
         {focus && (
