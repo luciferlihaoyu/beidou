@@ -11,6 +11,7 @@ import {
   Award,
   Check,
   ChevronRight,
+  Palette,
   Download,
   FileText,
   FolderInput,
@@ -42,6 +43,8 @@ import IdeaNotes from "@/components/IdeaNotes";
 import OutlineBoard from "@/components/OutlineBoard";
 import GoalsBadges from "@/components/GoalsBadges";
 import FullTextSearch from "@/components/FullTextSearch";
+import EditorThemeSettings from "@/components/EditorThemeSettings";
+import { type EditorTheme, loadTheme } from "@/lib/editorTheme";
 import SnapshotPanel from "@/components/SnapshotPanel";
 import TiptapEditor, { type EditorHandle, type OutlineItem } from "@/components/TiptapEditor";
 import { useGlobalShortcuts } from "@/hooks/useGlobalShortcuts";
@@ -404,6 +407,10 @@ export default function Editor() {
 
   // 全书搜索（FTS5 / Ctrl+Shift+F）
   const [ftsOpen, setFtsOpen] = useState(false);
+
+  // 写作区主题（横线 + 背景图）
+  const [theme, setTheme] = useState<EditorTheme>(() => loadTheme());
+  const [themeOpen, setThemeOpen] = useState(false);
 
   // 块引用数据：人物 / 设定 / 伏笔，供编辑器 chip 浮卡预览
   const [refData, setRefData] = useState<ReferenceData>({
@@ -1219,6 +1226,15 @@ export default function Editor() {
                 variant="ghost"
                 size="icon"
                 className="h-7 w-7"
+                title="写作区主题（横线 / 背景 / 上传图）"
+                onClick={() => setThemeOpen(true)}
+              >
+                <Palette className="h-4 w-4" />
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-7 w-7"
                 title="全书查找替换"
                 onClick={() => setSearchOpen(true)}
               >
@@ -1385,6 +1401,7 @@ export default function Editor() {
                       typewriter={typewriter}
                       novelId={novelId}
                       chapterId={activeId}
+                      theme={theme}
                       onReady={(h) => (editorRef.current = h)}
                     />
                 </div>
@@ -1627,6 +1644,9 @@ export default function Editor() {
             setActiveContent(null);
           }}
         />
+
+        {/* 写作区主题（横线 + 背景图） */}
+        <EditorThemeSettings open={themeOpen} onOpenChange={setThemeOpen} theme={theme} onChange={setTheme} />
 
         {/* 命令面板（ctrl+k 触发） */}
         <CommandPalette

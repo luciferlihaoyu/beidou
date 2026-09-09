@@ -5,6 +5,7 @@ import { Placeholder } from "@tiptap/extension-placeholder";
 import { CharacterCount } from "@tiptap/extension-character-count";
 import { Reference } from "@/extensions/Reference";
 import AIBubbleMenu from "@/components/editor/AIBubbleMenu";
+import { type EditorTheme, buildImageBackground, buildLineBackground, DEFAULT_THEME } from "@/lib/editorTheme";
 
 /** 章内标题大纲条目：pos 为文档绝对位置，供跳转与缩进展示 */
 export interface OutlineItem {
@@ -46,6 +47,7 @@ export default function TiptapEditor({
   typewriter = false,
   novelId,
   chapterId,
+  theme = DEFAULT_THEME,
 }: {
   content: string;
   placeholder?: string;
@@ -55,6 +57,7 @@ export default function TiptapEditor({
   typewriter?: boolean;
   novelId?: number;
   chapterId?: number | null;
+  theme?: EditorTheme;
 }) {
   // useEditor 的回调在创建时闭包捕获一次 props，经 ref 转发保证始终拿到最新值
   // （ref 写入放 effect 中同步，遵守渲染期不可触碰 ref 的约束）
@@ -168,13 +171,47 @@ export default function TiptapEditor({
   // 打字机基础（思源 getPadding 同款）：滚动容器垫半屏底部空白、内容区改用
   // min-h-full 让文档撑出滚动余量，使文末写入时光标行可稳定视口中部。
   // 全部走声明式 class/style，不命令式修改编辑器 DOM。
+  // 主题：背景图作为 ::before 伪元素（在文字下方）
+  // 文字容器本身 = 背景色 + 横线（lineType）
+  const lineBg = buildLineBackground(theme);
+  const imgBg = buildImageBackground(theme);
+  // 把横线和底色应用到「外层 scrollRef 容器」，背景图作为容器 ::before
+  // 但 Tiptap 的 ProseMirror content 是放在 EditorContent 内的；
+  // 给外层 div 加 inline style + ::before 注入
+  const wrapperStyle: React.CSSProperties = {
+    backgroundColor: theme.bgColor,
+    backgroundImage: lineBg === "none" ? undefined : lineBg,
+    backgroundAttachment: "local",
+    position: "relative",
+    ...(typewriter ? { paddingBottom: "50vh" } : {}),
+  };
+
+  // ::before 样式（背景图）：用唯一类名 + 注入 <style>
+  const beforeStyleId = "beidou-editor-bg-before";
+
   return (
-    <div
-      ref={scrollRef}
-      className="h-full overflow-y-auto"
-      style={typewriter ? { paddingBottom: "50vh" } : undefined}
-    >
-      <EditorContent editor={editor} className={typewriter ? "min-h-full" : "h-full"} />
+    <div ref={scrollRef} className="h-full overflow-y-auto" style={wrapperStyle}>
+      {imgBg && (
+        <style>{`
+          #${beforeStyleId}::before {
+            content: "";
+            position: absolute;
+            inset: 0;
+            background-image: ${imgBg};
+            opacity: ${theme.bgImageOpacity};
+            filter: blur(${theme.bgImageBlur}px);
+            pointer-events: none;
+            z-index: 0;
+          }
+        `}</style>
+      )}
+      <div
+        id={imgBg ? beforeStyleId : undefined}
+        className={typewriter ? "min-h-full" : "h-full"}
+        style={imgBg ? { position: "relative" } : undefined}
+      >
+        <EditorContent editor={editor} className="h-full" />
+      </div>
       {novelId && editor && <AIBubbleMenu editor={editor} novelId={novelId} chapterId={chapterId ?? null} />}
     </div>
   );
