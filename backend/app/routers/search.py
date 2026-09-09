@@ -1,4 +1,11 @@
-"""全书查找与替换：只处理正文文本节点，不动 HTML 标签与属性。"""
+"""全书查找与替换：只处理正文文本节点，不动 HTML 标签与属性。
+
+新增 /api/novels/{id}/search/fts（P3-1）：
+- 用 FTS5 虚拟表（chapter_fts）快速全文搜索
+- 返回带 <mark> 高亮的 snippet
+- 写入：chapters save 时调 search_fts.sync_chapter 同步
+- 首次启动：db._migrate 全量灌入存量章节
+"""
 
 import re
 
@@ -10,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..db import get_db
 from ..deps import count_words, get_owned_novel
 from ..models import Chapter, Novel, Volume
+from ..search_fts import search_fts
 from ..utils import chapter_display_title, order_chapters
 
 router = APIRouter(prefix="/api/novels/{novel_id}/search", tags=["search"])
@@ -85,4 +93,42 @@ async def replace_all(
             total += n
             affected += 1
     await db.commit()
+    # 替换后批量同步 FTS（重置全小说索引最快）
+    if affected > 0:
+        try:
+            from ..search_fts import rebuild_fts_for_novel
+
+            await rebuild_fts_for_novel(db, novel.id)
+        except Exception:  # noqa: BLE001
+            pass
     return {"ok": True, "replaced": total, "chapters_affected": affected}
+
+
+@router.get("/fts")
+async def search_fts_endpoint(
+    q: str = Query(min_length=1, max_length=100),
+    limit: int = Query(default=30, ge=1, le=100),
+    novel: Novel = Depends(get_owned_novel),
+    db: AsyncSession = Depends(get_db),
+):
+    """FTS5 全文搜索（P3-1）：返回带高亮 snippet 的命中章节。
+
+    排序：FTS5 bm25 排名（更相关的章节更靠前）。
+    短语查询：纯中文自动加双引号变为 phrase（避免单词命中）。
+    """
+    results = await search_fts(db, novel.id, q, limit=limit)
+    # 按 display 顺序补序号
+    chapters = await _ordered_chapters(novel, db)
+    index_by_id = {ch.id: i + 1 for i, ch in enumerate(chapters)}
+    out = []
+    for r in results:
+        num = index_by_id.get(r["chapter_id"])
+        out.append(
+            {
+                "chapter_id": r["chapter_id"],
+                "display_title": chapter_display_title(r["title"] or "", num or 0),
+                "count": r["count"],
+                "snippet": r["snippet"],
+            }
+        )
+    return {"query": q, "total": sum(r["count"] for r in out), "results": out}

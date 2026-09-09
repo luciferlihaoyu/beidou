@@ -178,6 +178,7 @@ async def update_chapter(
     db: AsyncSession = Depends(get_db),
 ):
     chapter = await _get_chapter(novel, chapter_id, db)
+    content_changed = False
     if data.title is not None:
         chapter.title = data.title.strip()
     if data.content is not None:
@@ -189,6 +190,7 @@ async def update_chapter(
             from .stats import record_writing
 
             await record_writing(db, novel.id, delta)
+        content_changed = True
     if "volume_id" in data.model_fields_set and data.volume_id != chapter.volume_id:
         await _check_volume(novel, data.volume_id, db)
         # 移到目标卷末尾
@@ -208,6 +210,14 @@ async def update_chapter(
         chapter.tags = json.dumps(data.tags, ensure_ascii=False)
     await db.commit()
     await db.refresh(chapter)
+    # 同步 FTS 索引（P3-1 全文搜索）：title / content 改了就 upsert
+    if content_changed or data.title is not None:
+        try:
+            from ..search_fts import sync_chapter
+
+            await sync_chapter(db, chapter.id)
+        except Exception:  # noqa: BLE001  FTS 失败不影响编辑
+            pass
     # 章节正文更新后挂接 auto 快照：节流 + hash 去重，副作用忽略（失败也不应影响编辑）
     if data.content is not None:
         from ..snapshot_service import create_snapshot
@@ -226,6 +236,13 @@ async def delete_chapter(
     chapter_id: int, novel: Novel = Depends(get_owned_novel), db: AsyncSession = Depends(get_db)
 ):
     chapter = await _get_chapter(novel, chapter_id, db)
+    # 删 FTS 行（必须在 commit 前；CASCADE 不会触发虚拟表）
+    try:
+        from ..search_fts import remove_chapter
+
+        await remove_chapter(db, chapter_id)
+    except Exception:  # noqa: BLE001
+        pass
     await db.delete(chapter)
     await db.commit()
     return {"ok": True}

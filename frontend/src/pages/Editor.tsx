@@ -41,6 +41,7 @@ import KnowledgeCabinet from "@/components/KnowledgeCabinet";
 import IdeaNotes from "@/components/IdeaNotes";
 import OutlineBoard from "@/components/OutlineBoard";
 import GoalsBadges from "@/components/GoalsBadges";
+import FullTextSearch from "@/components/FullTextSearch";
 import SnapshotPanel from "@/components/SnapshotPanel";
 import TiptapEditor, { type EditorHandle, type OutlineItem } from "@/components/TiptapEditor";
 import { useGlobalShortcuts } from "@/hooks/useGlobalShortcuts";
@@ -401,6 +402,9 @@ export default function Editor() {
   // 写作仪表盘（连击 + 徽章）
   const [goalsOpen, setGoalsOpen] = useState(false);
 
+  // 全书搜索（FTS5 / Ctrl+Shift+F）
+  const [ftsOpen, setFtsOpen] = useState(false);
+
   // 块引用数据：人物 / 设定 / 伏笔，供编辑器 chip 浮卡预览
   const [refData, setRefData] = useState<ReferenceData>({
     characters: [],
@@ -438,6 +442,10 @@ export default function Editor() {
         void flushSave();
       },
       "ctrl+shift+t": () => toggleTypewriter(),
+      "ctrl+shift+f": (e) => {
+        e.preventDefault();
+        setFtsOpen(true);
+      },
       f11: (e) => {
         e.preventDefault();
         setFocus((v) => !v);
@@ -449,7 +457,7 @@ export default function Editor() {
         else if (focus) setFocus(false);
       },
     },
-    { allowInEditable: ["?"] }
+    { allowInEditable: ["?", "ctrl+shift+f"] }
   );
 
   // ---------- 大纲 / 打字机 / 排版偏好 ----------
@@ -1202,6 +1210,15 @@ export default function Editor() {
                 variant="ghost"
                 size="icon"
                 className="h-7 w-7"
+                title="全书搜索（Ctrl+Shift+F / FTS5）"
+                onClick={() => setFtsOpen(true)}
+              >
+                <Search className="h-4 w-4" />
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-7 w-7"
                 title="全书查找替换"
                 onClick={() => setSearchOpen(true)}
               >
@@ -1597,6 +1614,18 @@ export default function Editor() {
           onOpenChange={setGoalsOpen}
           novelId={novelId}
           dailyGoal={novel?.daily_goal ?? null}
+        />
+
+        {/* 全书搜索（Ctrl+Shift+F / FTS5） */}
+        <FullTextSearch
+          open={ftsOpen}
+          onOpenChange={setFtsOpen}
+          novelId={novelId}
+          chapters={chapters}
+          onJumpChapter={(id) => {
+            setActiveId(id);
+            setActiveContent(null);
+          }}
         />
 
         {/* 命令面板（ctrl+k 触发） */}

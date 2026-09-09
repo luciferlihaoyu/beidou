@@ -66,6 +66,8 @@ async def _migrate():
     2. 剥离旧章节标题中的"第X章"前缀（序号改为系统按排序生成）
     3. novels 表补 daily_goal 列（每日码字目标）
     4. chapter_snapshots 章节快照/存稿点表（CREATE TABLE IF NOT EXISTS 幂等）
+    5. chapter_fts FTS5 虚拟表（P3-1 全文搜索）
+    6. 首次启动：把存量章节灌进 FTS（空表时全量；非空跳过）
     以上操作都是幂等的，每次启动执行。
     """
     from sqlalchemy import text
@@ -109,10 +111,14 @@ async def _migrate():
         await conn.execute(
             text("CREATE INDEX IF NOT EXISTS ix_snap_chapter_created ON chapter_snapshots (chapter_id, created_at)")
         )
+        # FTS5 全文搜索虚拟表（P3-1）
+        from .search_fts import ensure_fts
+
+        await ensure_fts(conn)
 
     from sqlalchemy import select
 
-    from .models import Chapter
+    from .models import Chapter, Novel
 
     async with SessionLocal() as session:
         chapters = (await session.execute(select(Chapter))).scalars().all()
@@ -124,3 +130,24 @@ async def _migrate():
                 changed = True
         if changed:
             await session.commit()
+
+    # FTS 首次全量导入（仅当 chapter_fts 为空时执行——后续章节写入走 sync_chapter 钩子）
+    async with SessionLocal() as session:
+        from .search_fts import rebuild_fts_for_novel
+
+        fts_count = (
+            await session.execute(text("SELECT COUNT(*) FROM chapter_fts"))
+        ).scalar_one()
+        if fts_count == 0:
+            novels = (await session.execute(select(Novel))).scalars().all()
+            for n in novels:
+                try:
+                    n_chapters = await rebuild_fts_for_novel(session, n.id)
+                    if n_chapters:
+                        import logging
+
+                        logging.getLogger("beidou.db").info(
+                            "FTS 初始化：novel_id=%s 导入 %s 章", n.id, n_chapters
+                        )
+                except Exception:  # noqa: BLE001  重建失败不影响启动
+                    pass
