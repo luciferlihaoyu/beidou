@@ -36,6 +36,7 @@ import ShortcutCheatsheet from "@/components/ShortcutCheatsheet";
 import SnapshotPanel from "@/components/SnapshotPanel";
 import TiptapEditor, { type EditorHandle, type OutlineItem } from "@/components/TiptapEditor";
 import { useGlobalShortcuts } from "@/hooks/useGlobalShortcuts";
+import { POMODORO_WRITE_MIN, usePomodoro } from "@/hooks/usePomodoro";
 import {
   api,
   listChapters,
@@ -367,6 +368,9 @@ export default function Editor() {
 
   // 快捷键：速查面板状态（? 打开 / Esc 关闭）
   const [cheatsheetOpen, setCheatsheetOpen] = useState(false);
+
+  // 番茄钟
+  const pomodoro = usePomodoro();
 
   // 全局快捷键注册。allowInEditable 列出在编辑元素聚焦时仍可触发的（? 用于随时呼出速查）
   useGlobalShortcuts(
@@ -1321,6 +1325,39 @@ export default function Editor() {
                   >
                     <AlignVerticalJustifyCenter className="h-3.5 w-3.5" />
                   </Button>
+                  {/* 番茄钟：状态栏常驻入口 */}
+                  <div className="flex items-center gap-1 tnum">
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className={`h-5 w-5 shrink-0 ${
+                        pomodoro.phase === "running"
+                          ? "text-red-500"
+                          : pomodoro.phase === "break"
+                            ? "text-green-500"
+                            : "text-muted-foreground"
+                      }`}
+                      title={
+                        pomodoro.phase === "idle"
+                          ? `开始番茄钟（${POMODORO_WRITE_MIN} 分钟写作）`
+                          : pomodoro.phase === "running"
+                            ? `写作中（点击停止）`
+                            : "休息中（点击停止）"
+                      }
+                      onClick={() => {
+                        if (pomodoro.phase === "idle") pomodoro.start();
+                        else pomodoro.stop();
+                      }}
+                    >
+                      <span className="text-sm leading-none">🍅</span>
+                    </Button>
+                    <span
+                      className="text-[11px] tabular-nums"
+                      title={`今日 ${pomodoro.todayCount} 个，累计 ${pomodoro.totalCount} 个`}
+                    >
+                      {pomodoro.phase === "idle" ? pomodoro.todayCount : pomodoro.remainingLabel}
+                    </span>
+                  </div>
                   <span className="min-w-0 truncate">{activeChapter?.display_title ?? ""}</span>
                 </span>
                 <span className="flex shrink-0 items-center gap-3 tnum">
