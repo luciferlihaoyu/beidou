@@ -18,6 +18,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import AppShell from "@/components/AppShell";
+import ChapterGenPanel from "@/components/ChapterGenPanel";
 import { aiFactoryApi, type AiBookSpec, type AiProject } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -288,42 +289,35 @@ export default function FactoryProject() {
           </div>
         )}
 
-        {/* ===== 阶段 4：生成（M2 占位，展示大纲预览） ===== */}
+        {/* ===== 阶段 4：生成（M2 章节生成面板 + 大纲预览） ===== */}
         {cur >= 3 && (
           <div className="space-y-4">
-            <div className="rounded-lg border border-primary/30 bg-primary/5 p-4 text-center">
-              <p className="text-sm font-medium text-primary">流水线就绪：{project.chapter_count} 章骨架已建好</p>
-              <p className="mt-1 text-xs text-muted-foreground">
-                逐章 AI 生成将在 M2 开放。现在可以打开书稿查看大纲，或人工接管写作。
-              </p>
-              {project.novel_id && (
-                <Button className="mt-3" size="sm" onClick={() => navigate(`/novel/${project.novel_id}`)}>
-                  <BookOpen className="mr-1 h-4 w-4" />
-                  打开书稿
-                </Button>
-              )}
-            </div>
+            <ChapterGenPanel project={project} onProjectChange={setProject} />
             {project.outline?.volumes && (
-              <div className="space-y-3">
-                <h3 className="text-sm font-medium">大纲预览</h3>
-                {project.outline.volumes.map((v, vi) => (
-                  <div key={vi} className="rounded-lg border border-border bg-card p-3">
-                    <div className="mb-1 text-sm font-medium">{v.title}</div>
-                    <p className="mb-2 text-xs text-muted-foreground">{v.summary}</p>
-                    <div className="space-y-1">
-                      {v.chapters.map((c, ci) => (
-                        <div key={ci} className="flex gap-2 text-xs">
-                          <span className="shrink-0 text-muted-foreground tnum">{ci + 1}.</span>
-                          <span className="shrink-0 font-medium">{c.title}</span>
-                          <span className="min-w-0 flex-1 truncate text-muted-foreground" title={c.outline}>
-                            {c.outline}
-                          </span>
-                        </div>
-                      ))}
+              <details className="rounded-lg border border-border bg-card">
+                <summary className="cursor-pointer px-4 py-2.5 text-sm font-medium hover:text-primary">
+                  大纲预览（{project.outline.volumes.length} 卷）
+                </summary>
+                <div className="space-y-3 border-t border-border p-3">
+                  {project.outline.volumes.map((v, vi) => (
+                    <div key={vi} className="rounded-lg border border-border p-3">
+                      <div className="mb-1 text-sm font-medium">{v.title}</div>
+                      <p className="mb-2 text-xs text-muted-foreground">{v.summary}</p>
+                      <div className="space-y-1">
+                        {v.chapters.map((c, ci) => (
+                          <div key={ci} className="flex gap-2 text-xs">
+                            <span className="shrink-0 text-muted-foreground tnum">{ci + 1}.</span>
+                            <span className="shrink-0 font-medium">{c.title}</span>
+                            <span className="min-w-0 flex-1 truncate text-muted-foreground" title={c.outline}>
+                              {c.outline}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
                     </div>
-                  </div>
-                ))}
-              </div>
+                  ))}
+                </div>
+              </details>
             )}
           </div>
         )}

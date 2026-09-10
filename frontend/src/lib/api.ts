@@ -430,3 +430,32 @@ export const aiFactoryApi = {
   setup: (id: number) => api.post<AiProject>(`/api/ai-factory/projects/${id}/setup`),
   outline: (id: number) => api.post<AiProject>(`/api/ai-factory/projects/${id}/outline`),
 };
+
+// ---------- AI 工厂 M2：逐章生成 ----------
+
+export interface AiChapterJob {
+  id: number;
+  chapter_id: number | null;
+  chapter_title: string;
+  status: string; // pending|writing|reviewing|needs_fix|done|failed
+  outline: string;
+  actual_words: number;
+  attempt: number;
+  review_issues: { type?: string; severity?: string; issue?: string; suggestion?: string }[] | null;
+  finished_at: string | null;
+}
+
+export const aiFactoryM2 = {
+  jobs: (projectId: number) => api.get<AiChapterJob[]>(`/api/ai-factory/projects/${projectId}/jobs`),
+  finalize: (projectId: number, jobId: number, contentText: string) =>
+    api.post<{ ok: boolean; word_count: number; state_updated: boolean }>(
+      `/api/ai-factory/projects/${projectId}/jobs/${jobId}/finalize`,
+      { content_text: contentText }
+    ),
+  review: (projectId: number, jobId: number) =>
+    api.post<{ issues: NonNullable<AiChapterJob["review_issues"]>; has_high: boolean }>(
+      `/api/ai-factory/projects/${projectId}/jobs/${jobId}/review`
+    ),
+  updateProject: (projectId: number, data: Record<string, unknown>) =>
+    api.put<AiProject>(`/api/ai-factory/projects/${projectId}`, data),
+};

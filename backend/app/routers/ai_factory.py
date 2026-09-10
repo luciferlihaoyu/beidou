@@ -1,12 +1,14 @@
 """AI 工厂：从立项到正文的自动化写作流水线（与人工写作并行的第二体系）。
 
-M1 范围：项目 CRUD + 立项（book_spec 八字段）+ 设定（角色卡/世界观入库）+ 大纲（卷章骨架）。
-M2 再做逐章生成 / 审校 / 状态文件更新。
+M1：项目 CRUD + 立项（book_spec 八字段）+ 设定（角色卡/世界观入库）+ 大纲（卷章骨架）。
+M2：逐章生成（SSE 流式，上下文预算制组装）+ 定稿（状态文件四分 AI 增量更新）+
+    一致性审校（可选按钮）+ 项目设置（auto_mode / 上下文窗口 / 模型路由）。
 
 设计要点（docs/AI_FACTORY.md v2）：
 - book_spec 八字段参考 GOAT：genre/time/place/theme/tone/pov/characters/premise
-- AI 调用全部非流式 + 要求 JSON 输出（结构化结果好解析）
-- 字数目标全可选，只注入 prompt 作软约束
+- 状态文件四分（AI_NovelGenerator 实证）：global_summary/character_state/plot_arcs + FTS 召回
+- 立项/设定/大纲用非流式 + JSON；正文生成用 SSE 流式（用户体验）
+- 字数目标全可选，只注入 prompt 作软约束（±20% 浮动，剧情完整优先，绝不截断）
 - 立项确认时才建 Novel（标题 [AI] 前缀，与人工书区分）
 """
 
@@ -486,3 +488,344 @@ async def outline_project(project_id: int, user: User = Depends(get_current_user
     await db.commit()
     novel = await db.get(Novel, p.novel_id)
     return _project_out(p, novel, total_chapters)
+
+
+# ==================== M2：逐章生成 / 定稿 / 审校 ====================
+
+from ..deps import count_words, get_owned_novel  # noqa: E402
+from ..utils import chapter_display_title, order_chapters, strip_html  # noqa: E402
+
+
+def _job_out(job: AiChapterJob, chapter: Chapter | None, number: int) -> dict:
+    return {
+        "id": job.id,
+        "chapter_id": job.chapter_id,
+        "chapter_title": chapter_display_title(chapter.title, number) if chapter else "（已删除）",
+        "status": job.status,
+        "outline": job.outline,
+        "actual_words": job.actual_words,
+        "attempt": job.attempt,
+        "review_issues": json.loads(job.review_issues) if job.review_issues else None,
+        "finished_at": job.finished_at.isoformat() if job.finished_at else None,
+    }
+
+
+@router.get("/projects/{project_id}/jobs")
+async def list_jobs(project_id: int, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    """章节任务列表（按显示顺序带章节号）。"""
+    p = await _get_project(project_id, user, db)
+    jobs = (
+        (await db.execute(select(AiChapterJob).where(AiChapterJob.project_id == p.id)))
+        .scalars()
+        .all()
+    )
+    if p.novel_id is None:
+        return []
+    chapters = (
+        (await db.execute(select(Chapter).where(Chapter.novel_id == p.novel_id))).scalars().all()
+    )
+    volumes = (
+        (await db.execute(select(Volume).where(Volume.novel_id == p.novel_id))).scalars().all()
+    )
+    ordered = order_chapters(chapters, volumes)
+    number_map = {c.id: i + 1 for i, c in enumerate(ordered)}
+    chapter_map = {c.id: c for c in chapters}
+    # 按章节显示顺序排
+    jobs.sort(key=lambda j: number_map.get(j.chapter_id or 0, 99999))
+    return [_job_out(j, chapter_map.get(j.chapter_id), number_map.get(j.chapter_id or 0, 0)) for j in jobs]
+
+
+async def _assemble_context(p: AiProject, novel: Novel, chapter: Chapter, job: AiChapterJob, db: AsyncSession) -> str:
+    """上下文预算制组装（§3.1）：立项 + 状态文件三件套 + 角色卡 + 最近 N 章 + 本章任务。"""
+    parts = [f"作品：《{novel.title}》"]
+    spec = json.loads(p.book_spec_json or "{}")
+    if spec:
+        brief = {k: spec.get(k) for k in ("genre", "time", "place", "theme", "tone", "pov", "premise") if spec.get(k)}
+        parts.append("立项设定：" + json.dumps(brief, ensure_ascii=False))
+    if p.style_notes:
+        parts.append(f"风格要求：{p.style_notes}")
+
+    # 角色卡（全量，≤10 个角色各 150 字）
+    chars = (
+        (await db.execute(select(Character).where(Character.novel_id == novel.id).limit(10)))
+        .scalars()
+        .all()
+    )
+    if chars:
+        parts.append("角色卡：" + "；".join(f"{c.name}（{c.role}）：{(c.description or '')[:150]}" for c in chars))
+
+    # 状态文件三件套（每章定稿后更新）
+    if p.global_summary:
+        parts.append(f"前情摘要：{p.global_summary}")
+    if p.character_state:
+        parts.append(f"角色当前状态：{p.character_state}")
+    if p.plot_arcs:
+        parts.append(f"伏笔台账：{p.plot_arcs}")
+
+    # 最近 N 章原文（默认 2 章，每章取末尾 2500 字——接最近的情节）
+    chapters = (
+        (await db.execute(select(Chapter).where(Chapter.novel_id == novel.id))).scalars().all()
+    )
+    volumes = (
+        (await db.execute(select(Volume).where(Volume.novel_id == novel.id))).scalars().all()
+    )
+    ordered = order_chapters(chapters, volumes)
+    idx = next((i for i, c in enumerate(ordered) if c.id == chapter.id), None)
+    if idx is not None and idx > 0:
+        n_recent = max(1, p.context_recent_chapters)
+        recent = [c for c in ordered[:idx] if strip_html(c.content).strip()][-n_recent:]
+        # 用户手动加选的章节（91Writing 模式）
+        try:
+            extra_ids = {int(x) for x in json.loads(p.context_extra_chapters or "[]")}
+        except (ValueError, TypeError):
+            extra_ids = set()
+        extra = [c for c in ordered[:idx] if c.id in extra_ids and c not in recent]
+        for c in extra + recent:
+            number = next((i + 1 for i, x in enumerate(ordered) if x.id == c.id), 0)
+            text = strip_html(c.content).strip()
+            parts.append(f"【{chapter_display_title(c.title, number)}】正文（节选结尾）：\n{text[-2500:]}")
+
+    # 本章任务
+    number = next((i + 1 for i, c in enumerate(ordered) if c.id == chapter.id), 0)
+    task = f"现在请写{chapter_display_title(chapter.title, number)}。"
+    if job.outline:
+        task += f"\n本章大纲：{job.outline}"
+    if p.target_chapter_words:
+        task += (
+            f"\n本章目标约 {p.target_chapter_words} 字（±20% 浮动，剧情完整优先，"
+            "绝不在情节中段强行收尾）。"
+        )
+    task += "\n直接输出正文（纯文本，段落之间空一行），不要输出章节标题、不要任何解释。"
+    parts.append(task)
+    return "\n\n".join(parts)
+
+
+def _text_to_html(text: str) -> str:
+    """AI 输出纯文本 → Tiptap HTML（空行分段，段内换行转 <br>）。"""
+    esc = lambda s: s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")  # noqa: E731
+    return "".join(
+        f"<p>{esc(p.strip()).replace(chr(10), '<br>')}</p>"
+        for p in re.split(r"\n{2,}", text)
+        if p.strip()
+    )
+
+
+@router.post("/projects/{project_id}/jobs/{job_id}/generate")
+async def generate_chapter(
+    project_id: int, job_id: int, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
+):
+    """SSE 流式生成一章正文。job → writing；内容由客户端收集后走 finalize 落库。"""
+    p = await _get_project(project_id, user, db)
+    if p.status != "writing":
+        raise HTTPException(400, f"当前状态 {p.status} 不能生成正文（请先完成大纲）")
+    if p.novel_id is None:
+        raise HTTPException(400, "项目未关联小说")
+    job = await db.get(AiChapterJob, job_id)
+    if job is None or job.project_id != p.id or job.chapter_id is None:
+        raise HTTPException(404, "章节任务不存在")
+    chapter = await db.get(Chapter, job.chapter_id)
+    if chapter is None:
+        raise HTTPException(404, "章节不存在")
+    novel = await db.get(Novel, p.novel_id)
+    assert novel is not None
+
+    config = await _pick_config(user, db, p.chapter_llm)
+    context = await _assemble_context(p, novel, chapter, job, db)
+
+    job.status = "writing"
+    job.attempt += 1
+    await db.commit()
+
+    from .ai import _stream_openai
+
+    system = (
+        _SYSTEM
+        + "你正在执行整章正文写作任务。要求：中文网文风格，段落短小（手机阅读友好），"
+        "对话生动，章末留钩子。严格遵守角色卡与状态文件的一致性。"
+    )
+    return await _stream_openai(config, [{"role": "system", "content": system}, {"role": "user", "content": context}])
+
+
+class FinalizeIn(BaseModel):
+    content_text: str = Field(min_length=20)  # 客户端收集的 AI 纯文本输出
+
+
+@router.post("/projects/{project_id}/jobs/{job_id}/finalize")
+async def finalize_chapter(
+    project_id: int,
+    job_id: int,
+    data: FinalizeIn,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """定稿：正文写入章节 + 更新状态文件四分（AI 增量总结）+ job done。
+
+    状态文件更新失败不阻塞定稿（正文已落库），返回里带 state_updated 标记。
+    """
+    p = await _get_project(project_id, user, db)
+    if p.novel_id is None:
+        raise HTTPException(400, "项目未关联小说")
+    job = await db.get(AiChapterJob, job_id)
+    if job is None or job.project_id != p.id or job.chapter_id is None:
+        raise HTTPException(404, "章节任务不存在")
+    chapter = await db.get(Chapter, job.chapter_id)
+    if chapter is None:
+        raise HTTPException(404, "章节不存在")
+
+    # 1. 正文落库（手写 HTML 转换 + 字数统计 + FTS 同步）
+    chapter.content = _text_to_html(data.content_text)
+    chapter.word_count = count_words(chapter.content)
+    if chapter.status == "draft":
+        chapter.status = "writing"
+    await db.commit()
+    try:
+        from ..search_fts import sync_chapter
+
+        await sync_chapter(db, chapter.id)
+    except Exception:  # noqa: BLE001
+        pass
+
+    # 2. AI 更新状态文件四分（global_summary / character_state / plot_arcs）
+    state_updated = False
+    try:
+        config = await _pick_config(user, db, p.summary_llm)
+        update_prompt = (
+            f"作品：《{(await db.get(Novel, p.novel_id)).title}》\n\n"
+            f"【现有前情摘要】\n{p.global_summary or '（空——这是第一章）'}\n\n"
+            f"【现有角色状态】\n{p.character_state or '（空）'}\n\n"
+            f"【现有伏笔台账】\n{p.plot_arcs or '（空）'}\n\n"
+            f"【刚完成的本章《{chapter.title or ''}》正文】\n{strip_html(chapter.content)[:4000]}\n\n"
+            "请增量更新三份状态文件，输出 JSON（只输出 JSON）：\n"
+            "{\n"
+            '  "global_summary": "融合本章后的全书摘要（≤1200 字，保留旧关键情节，补本章进展）",\n'
+            '  "character_state": [{"name": "角色名", "location": "所在", "goal": "当前目标", '
+            '"condition": "身体/情绪状态", "change": "本章变化"}],\n'
+            '  "plot_arcs": [{"title": "伏笔/情节弧", "status": "埋设中/推进中/已回收", '
+            '"note": "本章进展"}]\n'
+            "}\n"
+            "要求：只列活跃角色与未回收伏笔；已回收的伏笔保留一条标记已回收；"
+            "状态文件是给后续章节生成用的记忆，要精炼、结构化。"
+        )
+        raw = await _chat_text(config, _SYSTEM, update_prompt, max_tokens=3000)
+        state = _parse_json(raw)
+        if isinstance(state, dict):
+            if state.get("global_summary"):
+                p.global_summary = str(state["global_summary"])[:3000]
+            if isinstance(state.get("character_state"), list):
+                p.character_state = json.dumps(state["character_state"], ensure_ascii=False)[:4000]
+            if isinstance(state.get("plot_arcs"), list):
+                p.plot_arcs = json.dumps(state["plot_arcs"], ensure_ascii=False)[:4000]
+            state_updated = True
+    except Exception:  # noqa: BLE001  状态文件更新失败不阻塞定稿
+        pass
+
+    # 3. 本章摘要 + job 状态
+    try:
+        config = await _pick_config(user, db, p.summary_llm)
+        job.summary = (
+            await _chat_text(
+                config, _SYSTEM, f"把以下章节正文压缩成 150 字剧情摘要（只输出摘要）：\n{strip_html(chapter.content)[:4000]}", max_tokens=400
+            )
+        ).strip()[:500]
+    except Exception:  # noqa: BLE001
+        pass
+
+    from datetime import datetime, timezone
+
+    job.status = "done"
+    job.actual_words = chapter.word_count
+    job.finished_at = datetime.now(timezone.utc)
+    await db.commit()
+    return {"ok": True, "word_count": chapter.word_count, "state_updated": state_updated}
+
+
+@router.post("/projects/{project_id}/jobs/{job_id}/review")
+async def review_chapter(
+    project_id: int, job_id: int, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
+):
+    """一致性审校（可选按钮，AI_NovelGenerator 模式）：设定冲突/前文矛盾/角色状态/字数偏离。"""
+    p = await _get_project(project_id, user, db)
+    if p.novel_id is None:
+        raise HTTPException(400, "项目未关联小说")
+    job = await db.get(AiChapterJob, job_id)
+    if job is None or job.project_id != p.id or job.chapter_id is None:
+        raise HTTPException(404, "章节任务不存在")
+    chapter = await db.get(Chapter, job.chapter_id)
+    if chapter is None:
+        raise HTTPException(404, "章节不存在")
+    text = strip_html(chapter.content).strip()
+    if len(text) < 20:
+        raise HTTPException(400, "章节还没有正文，无法审校")
+
+    config = await _pick_config(user, db, p.review_llm)
+    novel = await db.get(Novel, p.novel_id)
+    spec = json.loads(p.book_spec_json or "{}")
+    chars = (
+        (await db.execute(select(Character).where(Character.novel_id == p.novel_id).limit(10)))
+        .scalars()
+        .all()
+    )
+    char_line = "；".join(f"{c.name}（{c.role}）：{(c.description or '')[:100]}" for c in chars)
+    word_note = ""
+    if p.target_chapter_words:
+        dev = abs(chapter.word_count - p.target_chapter_words) / p.target_chapter_words
+        if dev > 0.5:
+            word_note = f"（注意：本章 {chapter.word_count} 字，偏离目标 {p.target_chapter_words} 字超 50%）"
+
+    prompt = (
+        f"作品：《{novel.title}》\n立项：{json.dumps(spec, ensure_ascii=False)[:800]}\n"
+        f"角色卡：{char_line}\n"
+        + (f"前情摘要：{p.global_summary}\n" if p.global_summary else "")
+        + (f"角色状态：{p.character_state}\n" if p.character_state else "")
+        + (f"伏笔台账：{p.plot_arcs}\n" if p.plot_arcs else "")
+        + f"\n【待审校章节《{chapter.title or ''}》】{word_note}\n{text[:6000]}\n\n"
+        "请审校本章，检查：①与立项/角色卡冲突 ②与前情摘要矛盾 ③角色状态不一致 "
+        "④伏笔脱节 ⑤字数偏离（若标注了偏离）。\n"
+        '输出 JSON 数组（只输出 JSON）：[{"type": "冲突|矛盾|状态|伏笔|字数", '
+        '"severity": "high|low", "issue": "问题描述", "suggestion": "修改建议"}]\n'
+        "没有问题就输出空数组 []。"
+    )
+    raw = await _chat_text(config, _SYSTEM, prompt, max_tokens=3000)
+    try:
+        issues = _parse_json(raw)
+        if not isinstance(issues, list):
+            issues = []
+    except ValueError:
+        issues = []
+    job.review_issues = json.dumps(issues, ensure_ascii=False)
+    has_high = any(i.get("severity") == "high" for i in issues if isinstance(i, dict))
+    if has_high and job.status == "done":
+        job.status = "needs_fix"
+    await db.commit()
+    return {"issues": issues, "has_high": has_high}
+
+
+# ---------- 项目设置（auto_mode / 上下文窗口 / 模型路由）----------
+
+
+class ProjectSettingsIn(BaseModel):
+    auto_mode: bool | None = None
+    context_recent_chapters: int | None = Field(default=None, ge=1, le=10)
+    context_extra_chapters: list[int] | None = None
+    setup_llm: str | None = None
+    outline_llm: str | None = None
+    chapter_llm: str | None = None
+    summary_llm: str | None = None
+    review_llm: str | None = None
+    target_chapter_words: int | None = Field(default=None, ge=200, le=20000)
+
+
+@router.put("/projects/{project_id}")
+async def update_project(
+    project_id: int, data: ProjectSettingsIn, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
+):
+    """更新项目设置（全部可选，传什么改什么）。"""
+    p = await _get_project(project_id, user, db)
+    for field, value in data.model_dump(exclude_unset=True).items():
+        if field == "context_extra_chapters":
+            setattr(p, field, json.dumps(value or []))
+        else:
+            setattr(p, field, value)
+    await db.commit()
+    novel = await db.get(Novel, p.novel_id) if p.novel_id else None
+    return _project_out(p, novel)
