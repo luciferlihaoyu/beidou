@@ -14,6 +14,7 @@ import {
   ChevronRight,
   Cpu,
   Loader2,
+  Radar,
   RefreshCw,
   Sparkles,
 } from "lucide-react";
@@ -21,6 +22,7 @@ import { toast } from "sonner";
 import AppShell from "@/components/AppShell";
 import ChapterGenPanel from "@/components/ChapterGenPanel";
 import ModelRouteDialog from "@/components/ModelRouteDialog";
+import { aiFactoryM5 } from "@/lib/api";
 import { aiFactoryApi, type AiBookSpec, type AiProject } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -171,6 +173,78 @@ export default function FactoryProject() {
         {/* ===== 阶段 1：立项 ===== */}
         {project.status === "draft" && (
           <div className="space-y-4">
+            {/* 市场雷达：选题环节市场调研 */}
+            <div className="rounded-lg border border-border bg-card p-4">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <Radar className="h-4 w-4 text-primary" />
+                  <h3 className="text-sm font-medium">市场雷达</h3>
+                  <span className="text-xs text-muted-foreground">立项前先探一探市场风向</span>
+                </div>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-7 text-xs"
+                  disabled={busy !== null}
+                  onClick={() =>
+                    void run(
+                      "market",
+                      async () => {
+                        await aiFactoryM5.marketScan(projectId);
+                        return aiFactoryApi.get(projectId);
+                      },
+                      "市场调研完成，结论将注入立项草案"
+                    )
+                  }
+                >
+                  <Radar className={`mr-1 h-3 w-3 ${busy === "market" ? "animate-pulse" : ""}`} />
+                  {busy === "market" ? "调研中…" : project.market ? "重新调研" : "市场调研"}
+                </Button>
+              </div>
+              {project.market && (
+                <div className="mt-3 space-y-2 text-sm">
+                  {project.market.verdict && (
+                    <p className="rounded-md bg-primary/8 px-3 py-2 text-[13px] font-medium text-primary">
+                      📊 {project.market.verdict}
+                    </p>
+                  )}
+                  <div className="grid gap-2 sm:grid-cols-2">
+                    {[
+                      { label: "题材热度", value: project.market.genre_heat },
+                      { label: "读者画像", value: project.market.reader_profile },
+                      { label: "差异化建议", value: project.market.differentiation },
+                      { label: "更新建议", value: project.market.update_advice },
+                    ]
+                      .filter((x) => x.value)
+                      .map((x) => (
+                        <div key={x.label} className="rounded-md bg-muted/50 px-2.5 py-2">
+                          <p className="text-[11px] text-muted-foreground">{x.label}</p>
+                          <p className="mt-0.5 text-xs leading-relaxed">{x.value}</p>
+                        </div>
+                      ))}
+                  </div>
+                  {[
+                    { label: "🔥 流行元素", items: project.market.trending_elements },
+                    { label: "⚓ 有效钩子", items: project.market.hot_hooks },
+                    { label: "✨ 读者爽点", items: project.market.cool_point_trends },
+                  ].map(
+                    (g) =>
+                      g.items?.length ? (
+                        <div key={g.label} className="flex flex-wrap items-center gap-1.5">
+                          <span className="text-xs text-muted-foreground">{g.label}</span>
+                          {g.items.map((it, i) => (
+                            <span key={i} className="rounded-full border border-border px-2 py-0.5 text-[11px]">
+                              {it}
+                            </span>
+                          ))}
+                        </div>
+                      ) : null
+                  )}
+                  <p className="text-[11px] text-muted-foreground/70">调研结论会在生成立项草案时自动注入，影响选题方向</p>
+                </div>
+              )}
+            </div>
+
             {!project.book_spec ? (
               <div className="rounded-lg border border-dashed border-border py-10 text-center">
                 <Sparkles className="mx-auto mb-2 h-8 w-8 text-primary/40" />

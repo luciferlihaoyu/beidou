@@ -150,6 +150,9 @@ def _project_out(p: AiProject, novel: Novel | None = None, chapter_count: int = 
         "current_focus": p.current_focus,
         "particle_ledger": p.particle_ledger,
         "subplot_board": p.subplot_board,
+        "synopsis": json.loads(p.synopsis_json) if p.synopsis_json else None,
+        "market": json.loads(p.market_json) if p.market_json else None,
+        "cover_prompt": json.loads(p.cover_prompt) if p.cover_prompt else None,
         "chapter_count": chapter_count,
         "created_at": p.created_at.isoformat(),
         "updated_at": p.updated_at.isoformat(),
@@ -270,11 +273,27 @@ async def init_project(project_id: int, user: User = Depends(get_current_user), 
         targets.append(f"单章约 {p.target_chapter_words} 字")
     target_line = ("篇幅约束：" + "，".join(targets) + "。\n") if targets else ""
 
+    # 市场雷达报告（选题环节调研，存在则注入以提升立项质量）
+    market_line = ""
+    if p.market_json:
+        try:
+            mk = json.loads(p.market_json)
+            market_line = (
+                "\n市场调研结论（务必吸收进立项）：\n"
+                f"- 流行元素：{'、'.join(mk.get('trending_elements', [])[:5])}\n"
+                f"- 有效钩子：{'、'.join(mk.get('hot_hooks', [])[:3])}\n"
+                f"- 读者爽点：{'、'.join(mk.get('cool_point_trends', [])[:3])}\n"
+                f"- 差异化建议：{mk.get('differentiation', '')}\n"
+            )
+        except (ValueError, TypeError):
+            pass
+
     prompt = (
         f"用户的一句话创意：{p.seed_prompt}\n"
         + (f"类型偏好：{p.genre}\n" if p.genre else "")
         + (f"风格要求：{p.style_notes}\n" if p.style_notes else "")
         + target_line
+        + market_line
         + "\n请为这个创意做小说立项，输出 JSON（只输出 JSON）：\n"
         "{\n"
         '  "titles": ["书名候选1", "书名候选2", "书名候选3"],\n'

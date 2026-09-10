@@ -345,6 +345,10 @@ class AiProject(Base):
     current_focus: Mapped[str] = mapped_column(Text, default="")  # 当前阶段焦点：近几章重点/避免倾向
     # 真相文件扩展（M3，7 真相文件思想的北斗裁剪版）
     particle_ledger: Mapped[str] = mapped_column(Text, default="")  # 资源账本：金钱/物品/等级数值
+    # M5
+    synopsis_json: Mapped[str] = mapped_column(Text, default="")  # 多版本简介 {short,standard,promotion,douyin}
+    market_json: Mapped[str] = mapped_column(Text, default="")  # 市场调研报告（选题用）
+    cover_prompt: Mapped[str] = mapped_column(Text, default="")  # 封面绘图 prompt（中文描述+英文 prompt）
     subplot_board: Mapped[str] = mapped_column(Text, default="")  # 支线进度板：A/B/C 线状态
     created_at: Mapped[datetime] = mapped_column(default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(default=utcnow, onupdate=utcnow)

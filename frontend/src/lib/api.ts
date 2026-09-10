@@ -411,6 +411,9 @@ export interface AiProject {
   current_focus: string;
   particle_ledger: string;
   subplot_board: string;
+  synopsis: AiSynopsis | null;
+  market: AiMarketReport | null;
+  cover_prompt: AiCoverPrompt | null;
   chapter_count: number;
   created_at: string;
   updated_at: string;
@@ -620,3 +623,39 @@ export async function importNovel(
     }
   }
 }
+
+// ---------- AI 工厂 M5：简介 / 市场雷达 / 封面 ----------
+
+export interface AiSynopsis {
+  short?: string;
+  standard?: string;
+  promotion?: string;
+  douyin?: string;
+}
+
+export interface AiMarketReport {
+  genre_heat?: string;
+  trending_elements?: string[];
+  hot_hooks?: string[];
+  cool_point_trends?: string[];
+  reader_profile?: string;
+  update_advice?: string;
+  differentiation?: string;
+  verdict?: string;
+}
+
+export interface AiCoverPrompt {
+  concept?: string;
+  prompt_en?: string;
+  negative?: string;
+  tiangong_task?: { ref: string; status: string } | null;
+}
+
+export const aiFactoryM5 = {
+  synopsis: (projectId: number) =>
+    api.post<AiSynopsis>(`/api/ai-factory/projects/${projectId}/synopsis`),
+  marketScan: (projectId: number) =>
+    api.post<AiMarketReport>(`/api/ai-factory/projects/${projectId}/market-scan`),
+  coverPrompt: (projectId: number, style: string) =>
+    api.post<AiCoverPrompt>(`/api/ai-factory/projects/${projectId}/cover-prompt`, { style }),
+};

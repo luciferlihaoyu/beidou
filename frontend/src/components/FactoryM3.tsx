@@ -9,9 +9,11 @@ import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import {
   Bot,
+  Image as ImageIcon,
   Pause,
   Play,
   Sparkles,
+  Type,
   Wand2,
 } from "lucide-react";
 import {
@@ -21,6 +23,7 @@ import {
   type BatchEvent,
   type RetentionDashboard,
 } from "@/lib/api";
+import { CoverDialog, SynopsisDialog } from "@/components/FactoryM5";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -278,6 +281,8 @@ export function M3Toolbar({
   onJobsChanged: () => void;
 }) {
   const [batchOpen, setBatchOpen] = useState(false);
+  const [synopsisOpen, setSynopsisOpen] = useState(false);
+  const [coverOpen, setCoverOpen] = useState(false);
   const [intent, setIntent] = useState(project.author_intent ?? "");
   const [focus, setFocus] = useState(project.current_focus ?? "");
   const [editing, setEditing] = useState<"none" | "intent" | "focus">("none");
@@ -322,6 +327,14 @@ export function M3Toolbar({
         >
           <Sparkles className="mr-1 h-3.5 w-3.5" />
           当前焦点{project.current_focus ? " ✓" : ""}
+        </Button>
+        <Button variant="outline" size="sm" className="h-8" onClick={() => setSynopsisOpen(true)}>
+          <Type className="mr-1 h-3.5 w-3.5" />
+          简介{project.synopsis ? " ✓" : ""}
+        </Button>
+        <Button variant="outline" size="sm" className="h-8" onClick={() => setCoverOpen(true)}>
+          <ImageIcon className="mr-1 h-3.5 w-3.5" />
+          封面{project.cover_prompt?.prompt_en ? " ✓" : ""}
         </Button>
       </div>
 
@@ -378,6 +391,8 @@ export function M3Toolbar({
           onJobsChanged();
         }}
       />
+      <SynopsisDialog project={project} open={synopsisOpen} onOpenChange={setSynopsisOpen} onChange={onProjectChange} />
+      <CoverDialog project={project} open={coverOpen} onOpenChange={setCoverOpen} onChange={onProjectChange} />
     </div>
   );
 }
