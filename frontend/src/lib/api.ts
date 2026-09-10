@@ -562,3 +562,61 @@ export const aiConfigApi = {
   models: (configId: number) =>
     api.get<{ models: string[] }>(`/api/ai/configs/${configId}/models`),
 };
+
+// ---------- AI 工厂 M4：导入续写 ----------
+
+export type ImportEvent =
+  | { event: "split"; project_id: number; chapters: number; total_words: number }
+  | { event: "extract"; batch: number; total_batches: number }
+  | { event: "extract_warn"; batch: number; message: string }
+  | { event: "merge" }
+  | { event: "merge_warn"; message: string }
+  | { event: "done"; project_id: number; chapters: number; total_words: number; characters: number; worldview: number }
+  | { event: "error"; message: string };
+
+export async function importNovel(
+  data: { title: string; genre?: string; style_notes?: string; text: string; target_chapter_words?: number | null },
+  onEvent: (ev: ImportEvent) => void,
+  signal?: AbortSignal
+): Promise<void> {
+  const token = getToken();
+  const resp = await fetch("/api/ai-factory/projects/import", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: JSON.stringify(data),
+    signal,
+  });
+  if (!resp.ok || !resp.body) {
+    let message = `请求失败 (${resp.status})`;
+    try {
+      const d = await resp.json();
+      if (typeof d.detail === "string") message = d.detail;
+    } catch {
+      /* ignore */
+    }
+    throw new ApiError(resp.status, message);
+  }
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const events = buffer.split("\n\n");
+    buffer = events.pop() ?? "";
+    for (const event of events) {
+      const line = event.split("\n").find((l) => l.startsWith("data:"));
+      if (!line) continue;
+      try {
+        const payload = JSON.parse(line.slice(5).trim());
+        if (payload.event) onEvent(payload as ImportEvent);
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+}

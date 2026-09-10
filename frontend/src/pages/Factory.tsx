@@ -6,9 +6,10 @@
 
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router";
-import { Bot, Plus, Trash2 } from "lucide-react";
+import { Bot, FileUp, Plus, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import AppShell from "@/components/AppShell";
+import ImportDialog from "@/components/ImportDialog";
 import { aiFactoryApi, type AiProject, type AiProjectCreate } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import {
@@ -47,6 +48,7 @@ export default function Factory() {
   const [projects, setProjects] = useState<AiProject[]>([]);
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
+  const [importing, setImporting] = useState(false);
   const [form, setForm] = useState<AiProjectCreate>({ seed_prompt: "" });
   const [showTargets, setShowTargets] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -108,10 +110,16 @@ export default function Factory() {
         </span>
       }
       actions={
-        <Button size="sm" className="h-8" onClick={() => setCreating(true)}>
-          <Plus className="mr-1 h-4 w-4" />
-          新建项目
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button variant="outline" size="sm" className="h-8" onClick={() => setImporting(true)}>
+            <FileUp className="mr-1 h-4 w-4" />
+            导入续写
+          </Button>
+          <Button size="sm" className="h-8" onClick={() => setCreating(true)}>
+            <Plus className="mr-1 h-4 w-4" />
+            新建项目
+          </Button>
+        </div>
       }
     >
       <div className="mx-auto w-full max-w-4xl p-6">
@@ -271,6 +279,8 @@ export default function Factory() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <ImportDialog open={importing} onOpenChange={setImporting} />
     </AppShell>
   );
 }
