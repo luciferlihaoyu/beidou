@@ -4,8 +4,8 @@
 - 番茄钟的"计时"逻辑仍在前端（前端写 usePomodoro 状态机，避免 WebSocket 复杂度）
 - 完成时（phase=write 25min 到点）前端 POST /api/pomodoro/complete 写一行
 - 多端/移动端共享：今日番茄数、累计都从 DB 聚合
-- 跨日 reset 由后端按"用户本地时区当日"计算——
-  v1 简化：按"UTC+0 当日"算，留 v2 接 user.timezone
+- 跨日 reset：按北京时间（UTC+8）当日计算，与 stats.record_writing 口径一致
+  （A5 修复：原 UTC 当日导致北京时间 0:00-8:00 的番茄计入前一天）
 """
 
 from datetime import datetime, timedelta, timezone
@@ -21,6 +21,8 @@ from ..models import Novel, PomoLog, User
 
 router = APIRouter(prefix="/api/pomodoro", tags=["pomodoro"])
 
+_BEIJING = timezone(timedelta(hours=8))
+
 
 class CompleteIn(BaseModel):
     """上报一个完成的番茄。"""
@@ -33,14 +35,15 @@ class CompleteIn(BaseModel):
 class TodayOut(BaseModel):
     today: int
     total: int
-    date: str  # YYYY-MM-DD (UTC) — 前端按本地时区再过滤
+    date: str  # YYYY-MM-DD（北京时间当日）
 
 
-def _today_utc_range() -> tuple[datetime, datetime]:
-    """UTC 当日 [00:00, 24:00) 区间。"""
-    now = datetime.now(timezone.utc)
-    start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    return start, start + timedelta(days=1)
+def _today_beijing_range() -> tuple[datetime, datetime]:
+    """北京时间当日 [00:00, 24:00)，转回 UTC 用于 DB 比较。"""
+    now_bj = datetime.now(_BEIJING)
+    start_bj = now_bj.replace(hour=0, minute=0, second=0, microsecond=0)
+    end_bj = start_bj + timedelta(days=1)
+    return start_bj.astimezone(timezone.utc), end_bj.astimezone(timezone.utc)
 
 
 @router.post("/complete")
@@ -64,13 +67,13 @@ async def complete_pomo(
     )
     db.add(log)
     await db.commit()
-    today, _ = _today_utc_range()
+    today_start, _ = _today_beijing_range()
     today_count = (
         await db.execute(
             select(func.count(PomoLog.id)).where(
                 PomoLog.user_id == user.id,
                 PomoLog.phase == "write",
-                PomoLog.completed_at >= today,
+                PomoLog.completed_at >= today_start,
             )
         )
     ).scalar_one()
@@ -83,11 +86,11 @@ async def today_pomo(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """今日番茄数（按 UTC 当日，phase=write）+ 累计数（phase=write）。
+    """今日番茄数（按北京时间当日，phase=write）+ 累计数（phase=write）。
 
     累计数 = 用户所有 phase=write 记录数（不限日期）。
     """
-    today, _ = _today_utc_range()
+    today_start, _ = _today_beijing_range()
     if novel_id is not None:
         novel = await db.get(Novel, novel_id)
         if novel is None or novel.owner_id != user.id:
@@ -95,7 +98,7 @@ async def today_pomo(
     today_q = select(func.count(PomoLog.id)).where(
         PomoLog.user_id == user.id,
         PomoLog.phase == "write",
-        PomoLog.completed_at >= today,
+        PomoLog.completed_at >= today_start,
     )
     if novel_id is not None:
         today_q = today_q.where(PomoLog.novel_id == novel_id)
@@ -110,5 +113,5 @@ async def today_pomo(
     return TodayOut(
         today=today_count,
         total=total_count,
-        date=today.date().isoformat(),
+        date=datetime.now(_BEIJING).date().isoformat(),
     )

@@ -50,6 +50,8 @@ interface Props {
   volumes: Volume[];
   onJumpChapter: (id: number) => void;
   onNewChapter: () => void;
+  /** 拖拽改序成功后回调（父级刷新章节列表） */
+  onChanged?: () => void;
 }
 
 export default function OutlineBoard({
@@ -60,6 +62,7 @@ export default function OutlineBoard({
   volumes,
   onJumpChapter,
   onNewChapter,
+  onChanged,
 }: Props) {
   // 拖拽状态
   const [draggingId, setDraggingId] = useState<number | null>(null);
@@ -71,27 +74,45 @@ export default function OutlineBoard({
   // 按卷分组（无卷的章节归到"未分组"）
   const groups = groupByVolume(local, volumes);
 
-  async function persistOrder(next: Chapter[]) {
-    setLocal(next);
-    try {
-      // 推后端 reorder
-      await api.post(`/api/novels/${novelId}/chapters/reorder`, {
-        order: next.map((c, i) => ({ id: c.id, sort_order: i })),
-      });
-    } catch {
-      toast.error("重排保存失败");
-    }
+  /** 同卷重排：发 {volume_id, ordered_ids}（与后端 ReorderIn 对齐） */
+  async function persistGroupOrder(volumeId: number | null, orderedIds: number[]) {
+    await api.post(`/api/novels/${novelId}/chapters/reorder`, {
+      volume_id: volumeId,
+      ordered_ids: orderedIds,
+    });
   }
 
-  function moveChapter(id: number, targetId: number) {
+  async function moveChapter(id: number, targetId: number) {
     if (id === targetId) return;
+    const item = local.find((c) => c.id === id);
+    const target = local.find((c) => c.id === targetId);
+    if (!item || !target) return;
+    const sameVolume = item.volume_id === target.volume_id;
+
+    // 乐观更新本地：把 item 插到 target 前面（跨卷时同步改 volume_id 供显示）
     const next = [...local];
     const from = next.findIndex((c) => c.id === id);
+    next.splice(from, 1);
     const to = next.findIndex((c) => c.id === targetId);
-    if (from < 0 || to < 0) return;
-    const [item] = next.splice(from, 1);
-    next.splice(to, 0, item);
-    void persistOrder(next);
+    next.splice(to, 0, { ...item, volume_id: target.volume_id });
+    setLocal(next);
+
+    try {
+      if (!sameVolume) {
+        // 跨卷：先把章节挂到目标卷（排到末尾），再对目标卷重排到目标位置
+        await api.put(`/api/novels/${novelId}/chapters/${id}`, {
+          volume_id: target.volume_id,
+        });
+      }
+      // 目标卷按 next 数组的相对顺序重排
+      const targetGroup = next.filter((c) => c.volume_id === target.volume_id);
+      await persistGroupOrder(target.volume_id, targetGroup.map((c) => c.id));
+      onChanged?.();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "重排保存失败，已还原");
+      // A4 修复：失败回滚到父级原始顺序
+      setLocal(chapters);
+    }
   }
 
   return (

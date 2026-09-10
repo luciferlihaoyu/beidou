@@ -1636,6 +1636,7 @@ export default function Editor() {
             setActiveContent(null);
           }}
           onNewChapter={() => setChDialog({ volumeId: null })}
+          onChanged={() => void loadChapters()}
         />
 
         {/* 写作仪表盘（连击 + 徽章） */}

@@ -29,8 +29,9 @@ const LS_TODAY_KEY = "beidou:pomodoro:count";
 const LS_TOTAL_KEY = "beidou:pomodoro:total";
 
 function todayStr(): string {
-  const d = new Date();
-  return d.toISOString().slice(0, 10);
+  // A5 修复：用北京时间（UTC+8）切日，与后端 stats/pomodoro 口径一致。
+  // 原 toISOString() 是 UTC——北京时间 0:00-8:00 的番苏会被算到前一天。
+  return new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Shanghai" }).format(new Date());
 }
 
 function readLsToday(): number {
