@@ -218,6 +218,20 @@ export default function Editor() {
   // 写作排版偏好（字号 / 行距 / 页宽），持久化于 localStorage["beidou_typography"]
   const [typo, setTypo] = useState<Typography>(loadTypography);
 
+  // A1 本章字数目标（每小说一个，localStorage beidou:chapter-goal:{novelId}；0=未设）
+  const [chapterGoal, setChapterGoal] = useState<number>(0);
+  useEffect(() => {
+    setChapterGoal(Number(localStorage.getItem(`beidou:chapter-goal:${novelId}`) || "0"));
+  }, [novelId]);
+  const saveChapterGoal = useCallback(
+    (v: number) => {
+      setChapterGoal(v);
+      if (v > 0) localStorage.setItem(`beidou:chapter-goal:${novelId}`, String(v));
+      else localStorage.removeItem(`beidou:chapter-goal:${novelId}`);
+    },
+    [novelId]
+  );
+
   // 对话框
   const [chDialog, setChDialog] = useState<{ volumeId: number | null } | null>(null);
   const [chTitle, setChTitle] = useState("");
@@ -1487,7 +1501,58 @@ export default function Editor() {
                   <span className="min-w-0 truncate">{activeChapter?.display_title ?? ""}</span>
                 </span>
                 <span className="flex shrink-0 items-center gap-3 tnum">
-                  <span>本章 {liveWords.toLocaleString()} 字</span>
+                  {/* A1 本章字数目标：点击设置，达标变绿 */}
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <button
+                        className="flex items-center gap-1.5 rounded px-1 hover:bg-accent"
+                        title={chapterGoal > 0 ? "本章字数目标（点击修改）" : "点击设置本章字数目标"}
+                      >
+                        <span className={chapterGoal > 0 && liveWords >= chapterGoal ? "font-medium text-green-600 dark:text-green-400" : ""}>
+                          本章 {liveWords.toLocaleString()}
+                          {chapterGoal > 0 ? `/${chapterGoal.toLocaleString()}` : ""} 字
+                          {chapterGoal > 0 && liveWords >= chapterGoal ? " ✓" : ""}
+                        </span>
+                        {chapterGoal > 0 && (
+                          <span className="h-1.5 w-14 overflow-hidden rounded-full bg-muted">
+                            <span
+                              className={`block h-full rounded-full transition-all ${
+                                liveWords >= chapterGoal ? "bg-green-500" : "bg-primary"
+                              }`}
+                              style={{ width: `${Math.min(100, (liveWords / chapterGoal) * 100)}%` }}
+                            />
+                          </span>
+                        )}
+                      </button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="end" className="w-40">
+                      <DropdownMenuLabel className="px-2 py-1 text-[10px] font-normal text-muted-foreground">
+                        本章目标字数
+                      </DropdownMenuLabel>
+                      {([1000, 2000, 3000, 5000, 8000] as const).map((v) => (
+                        <DropdownMenuItem key={v} onClick={() => saveChapterGoal(v)}>
+                          <Check className={`size-3.5 ${chapterGoal === v ? "" : "opacity-0"}`} />
+                          {v.toLocaleString()} 字
+                        </DropdownMenuItem>
+                      ))}
+                      <DropdownMenuSeparator />
+                      <DropdownMenuItem
+                        onClick={() => {
+                          const input = window.prompt("自定义本章目标字数", String(chapterGoal || 3000));
+                          const v = Number(input);
+                          if (input !== null && Number.isFinite(v) && v > 0) saveChapterGoal(Math.floor(v));
+                        }}
+                      >
+                        自定义…
+                      </DropdownMenuItem>
+                      {chapterGoal > 0 && (
+                        <DropdownMenuItem onClick={() => saveChapterGoal(0)}>
+                          <X className="size-3.5" />
+                          清除目标
+                        </DropdownMenuItem>
+                      )}
+                    </DropdownMenuContent>
+                  </DropdownMenu>
                   {novel?.daily_goal ? (
                     <span className={todayWords >= novel.daily_goal ? "font-medium text-primary" : ""}>
                       今日 {todayWords.toLocaleString()}/{novel.daily_goal.toLocaleString()} 字
