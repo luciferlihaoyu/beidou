@@ -340,6 +340,12 @@ class AiProject(Base):
     context_recent_chapters: Mapped[int] = mapped_column(default=2)
     context_extra_chapters: Mapped[str] = mapped_column(Text, default="[]")  # chapter id JSON
     auto_mode: Mapped[bool] = mapped_column(default=False)  # 全自动（默认关，每章人工确认）
+    # 控制面（M3，借鉴 webnovel-master/inkos 的输入治理：意图先编译再写作）
+    author_intent: Mapped[str] = mapped_column(Text, default="")  # 长期作者意图：主题/风格定位/禁忌
+    current_focus: Mapped[str] = mapped_column(Text, default="")  # 当前阶段焦点：近几章重点/避免倾向
+    # 真相文件扩展（M3，7 真相文件思想的北斗裁剪版）
+    particle_ledger: Mapped[str] = mapped_column(Text, default="")  # 资源账本：金钱/物品/等级数值
+    subplot_board: Mapped[str] = mapped_column(Text, default="")  # 支线进度板：A/B/C 线状态
     created_at: Mapped[datetime] = mapped_column(default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(default=utcnow, onupdate=utcnow)
 
@@ -361,6 +367,8 @@ class AiChapterJob(Base):
     outline: Mapped[str] = mapped_column(Text, default="")  # 本章大纲快照
     summary: Mapped[str] = mapped_column(Text, default="")  # 本章 200 字摘要（汇入滚动摘要）
     review_issues: Mapped[str] = mapped_column(Text, default="")  # 审校 issues JSON
+    review_score: Mapped[int | None] = mapped_column(nullable=True)  # 28 维审校总分（M3）
+    retention_json: Mapped[str] = mapped_column(Text, default="")  # 追读力提取 JSON：hooks/cool_points（M3）
     actual_words: Mapped[int] = mapped_column(default=0)
     attempt: Mapped[int] = mapped_column(default=0)
     created_at: Mapped[datetime] = mapped_column(default=utcnow)

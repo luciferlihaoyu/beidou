@@ -16,7 +16,8 @@ import {
   Sparkles,
   X,
 } from "lucide-react";
-import { aiFactoryApi, aiFactoryM2, streamPost, type AiChapterJob, type AiProject } from "@/lib/api";
+import { aiFactoryApi, aiFactoryM2, aiFactoryM3, streamPost, type AiChapterJob, type AiProject } from "@/lib/api";
+import { M3Toolbar, RetentionPanel } from "@/components/FactoryM3";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -106,13 +107,13 @@ export default function ChapterGenPanel({
     }
   }
 
-  // ---------- 审校 ----------
-  async function runReview(job: AiChapterJob) {
+  // ---------- 增强审校（M3 28维：本地 AI 味 + LLM 结构化 + 追读力） ----------
+  async function runReviewFull(job: AiChapterJob) {
     setReviewBusy(true);
     try {
-      const r = await aiFactoryM2.review(project.id, job.id);
-      setReviewJob({ ...job, review_issues: r.issues });
-      if (r.issues.length === 0) toast.success("审校通过，未发现问题");
+      const r = await aiFactoryM3.reviewFull(project.id, job.id);
+      setReviewJob({ ...job, review_issues: r.issues, review_score: r.score });
+      if (r.issues.length === 0) toast.success(`审校通过（AI味 ${r.deai_score} 分）`);
       else if (r.has_high) toast.warning(`发现 ${r.issues.length} 个问题（含高危）`);
       loadJobs();
     } catch (e) {
@@ -135,6 +136,17 @@ export default function ChapterGenPanel({
 
   return (
     <div className="space-y-4">
+      {/* M3 工具条：批量连跑 + 控制面 */}
+      <M3Toolbar
+        project={project}
+        onProjectChange={onProjectChange}
+        onBatchFinished={() => {
+          // 刷新项目（状态文件变化）
+          aiFactoryApi.get(project.id).then(onProjectChange).catch(() => {});
+        }}
+        onJobsChanged={loadJobs}
+      />
+
       {/* 进度总览 */}
       <div className="rounded-lg border border-border bg-card p-4">
         <div className="mb-2 flex items-center justify-between">
@@ -211,11 +223,25 @@ export default function ChapterGenPanel({
                   size="sm"
                   className="h-7 px-2 text-xs"
                   disabled={reviewBusy}
-                  onClick={() => void runReview(j)}
+                  onClick={() => void runReviewFull(j)}
                 >
                   <ShieldCheck className="mr-1 h-3 w-3" />
                   审校
                 </Button>
+              )}
+              {j.review_score !== null && j.review_score !== undefined && (
+                <span
+                  className={`tnum text-xs font-medium ${
+                    j.review_score >= 85
+                      ? "text-green-600 dark:text-green-400"
+                      : j.review_score >= 70
+                        ? "text-amber-600 dark:text-amber-400"
+                        : "text-destructive"
+                  }`}
+                  title="审校总分（含 AI 味检测）"
+                >
+                  {j.review_score}
+                </span>
               )}
               {j.review_issues && j.review_issues.length > 0 && (
                 <button
@@ -232,6 +258,9 @@ export default function ChapterGenPanel({
           <p className="py-10 text-center text-sm text-muted-foreground">还没有章节任务（请先生成大纲）</p>
         )}
       </div>
+
+      {/* 追读力仪表盘（M3） */}
+      <RetentionPanel projectId={project.id} />
 
       {/* 流式生成弹窗 */}
       <Dialog open={genJob !== null} onOpenChange={(v) => !v && (abortRef.current?.abort(), setGenJob(null))}>

@@ -27,6 +27,13 @@ async def init_db():
         # 仅对存量表生效；新表会在 create_all 阶段拿到新列
         await _ensure_column(conn, "chapters", "status", "TEXT NOT NULL DEFAULT 'draft'")
         await _ensure_column(conn, "chapters", "tags", "TEXT NOT NULL DEFAULT '[]'")
+        # AI 工厂 M3：控制面 + 真相文件扩展 + 审校评分/追读力
+        await _ensure_column(conn, "ai_projects", "author_intent", "TEXT NOT NULL DEFAULT ''")
+        await _ensure_column(conn, "ai_projects", "current_focus", "TEXT NOT NULL DEFAULT ''")
+        await _ensure_column(conn, "ai_projects", "particle_ledger", "TEXT NOT NULL DEFAULT ''")
+        await _ensure_column(conn, "ai_projects", "subplot_board", "TEXT NOT NULL DEFAULT ''")
+        await _ensure_column(conn, "ai_chapter_jobs", "review_score", "INTEGER")
+        await _ensure_column(conn, "ai_chapter_jobs", "retention_json", "TEXT NOT NULL DEFAULT ''")
 
     await _migrate()
 

@@ -126,6 +126,10 @@ def _project_out(p: AiProject, novel: Novel | None = None, chapter_count: int = 
         "outline": json.loads(p.outline_json) if p.outline_json else None,
         "global_summary": p.global_summary,
         "auto_mode": p.auto_mode,
+        "author_intent": p.author_intent,
+        "current_focus": p.current_focus,
+        "particle_ledger": p.particle_ledger,
+        "subplot_board": p.subplot_board,
         "chapter_count": chapter_count,
         "created_at": p.created_at.isoformat(),
         "updated_at": p.updated_at.isoformat(),
@@ -805,6 +809,8 @@ async def review_chapter(
 
 class ProjectSettingsIn(BaseModel):
     auto_mode: bool | None = None
+    author_intent: str | None = Field(default=None, max_length=2000)
+    current_focus: str | None = Field(default=None, max_length=2000)
     context_recent_chapters: int | None = Field(default=None, ge=1, le=10)
     context_extra_chapters: list[int] | None = None
     setup_llm: str | None = None

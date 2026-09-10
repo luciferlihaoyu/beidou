@@ -402,6 +402,10 @@ export interface AiProject {
   outline: { volumes?: AiOutlineVolume[] } | null;
   global_summary: string;
   auto_mode: boolean;
+  author_intent: string;
+  current_focus: string;
+  particle_ledger: string;
+  subplot_board: string;
   chapter_count: number;
   created_at: string;
   updated_at: string;
@@ -442,6 +446,7 @@ export interface AiChapterJob {
   actual_words: number;
   attempt: number;
   review_issues: { type?: string; severity?: string; issue?: string; suggestion?: string }[] | null;
+  review_score: number | null;
   finished_at: string | null;
 }
 
@@ -458,4 +463,89 @@ export const aiFactoryM2 = {
     ),
   updateProject: (projectId: number, data: Record<string, unknown>) =>
     api.put<AiProject>(`/api/ai-factory/projects/${projectId}`, data),
+};
+
+// ---------- AI 工厂 M3：批量连跑 / 增强审校 / 追读力 ----------
+
+export interface RetentionDashboard {
+  chapters_done: number;
+  hooks: { job_id: number; type?: string; desc?: string }[];
+  cool_points: { job_id: number; type?: string; desc?: string }[];
+  hook_score: number;
+  cool_score: number;
+  retention_score: number;
+}
+
+export type BatchEvent =
+  | { event: "start"; total: number }
+  | { event: "chapter_start"; job_id: number; title: string; index: number; total: number }
+  | { event: "content"; job_id: number; text: string }
+  | { event: "deai"; job_id: number; score: number; rewritten?: boolean }
+  | { event: "rewrite"; job_id: number; score: number }
+  | { event: "chapter_done"; job_id: number; title: string; words: number; state_updated: boolean; done: number; total: number }
+  | { event: "error"; message: string; job_id?: number; title?: string }
+  | { event: "done"; completed: number; total: number };
+
+/** SSE 事件流（结构化事件版 streamPost，用于批量连跑） */
+export async function streamPostEvents(
+  path: string,
+  body: unknown,
+  onEvent: (ev: BatchEvent) => void,
+  signal?: AbortSignal
+): Promise<void> {
+  const token = getToken();
+  const resp = await fetch(path, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: JSON.stringify(body),
+    signal,
+  });
+  if (!resp.ok || !resp.body) {
+    let message = `请求失败 (${resp.status})`;
+    try {
+      const data = await resp.json();
+      if (typeof data.detail === "string") message = data.detail;
+    } catch {
+      /* ignore */
+    }
+    throw new ApiError(resp.status, message);
+  }
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const events = buffer.split("\n\n");
+    buffer = events.pop() ?? "";
+    for (const event of events) {
+      const line = event.split("\n").find((l) => l.startsWith("data:"));
+      if (!line) continue;
+      try {
+        const payload = JSON.parse(line.slice(5).trim());
+        if (payload.event) onEvent(payload as BatchEvent);
+      } catch {
+        /* ignore malformed line */
+      }
+    }
+  }
+}
+
+export const aiFactoryM3 = {
+  reviewFull: (projectId: number, jobId: number) =>
+    api.post<{
+      score: number | null;
+      issues: NonNullable<AiChapterJob["review_issues"]>;
+      has_high: boolean;
+      deai_score: number;
+      retention: { hooks?: { type?: string; desc?: string }[]; cool_points?: { type?: string; desc?: string }[] } | null;
+    }>(`/api/ai-factory/projects/${projectId}/jobs/${jobId}/review-full`),
+  retention: (projectId: number) =>
+    api.get<RetentionDashboard>(`/api/ai-factory/projects/${projectId}/retention`),
+  batchRun: (projectId: number, count: number, onEvent: (ev: BatchEvent) => void, signal?: AbortSignal) =>
+    streamPostEvents(`/api/ai-factory/projects/${projectId}/batch-run?count=${count}`, {}, onEvent, signal),
 };
