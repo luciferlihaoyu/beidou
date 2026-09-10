@@ -1,41 +1,73 @@
 # AI 工厂（AI Factory）· 自动化写作模块设计方案
 
-> 状态：方案设计（待批准开工）
+> 状态：方案设计 v2（调研已用真实仓库 README 精读补强）
 > 定位：与「人工写作」平行的第二体系——从立项到正文全流程 AI 驱动
-> 调研日期：2026-08（基于模型知识，外部搜索通道暂不可用，仓库链接需人工复核）
+> 调研日期：2026-09-10（DeepSeek 联网搜索已通，三个重点项目 README 逐一精读）
 
 ---
 
-## 0. 调研结论（真实项目）
+## 0. 调研结论（已验证的真实项目）
 
-### 0.1 直接对标的开源项目
+### 0.1 三个重点精读的开源项目
 
-| 项目 | 地址 | 真实性 | 借鉴点 |
-|---|---|---|---|
-| **gpt-author** | github.com/mattparlane/gpt-author | ✅ 真实（2023 HN 热榜） | **完整 pipeline 参考**：prompt → plot 梗概 → 逐章大纲 → 逐章正文 → SD 插图 → epub 打包。流程朴素但闭环，证明"单次编排跑通全书"可行 |
-| **Stanford STORM** | github.com/stanford-oval/storm | ✅ 真实（斯坦福 OVAL 实验室） | **最系统的长文自动生成方法**：perspective 调研 → 大纲树 → 逐节写作 → 引用校验。对应小说 = 设定调研 → 大纲树 → 逐章生成 → 一致性审校 |
-| **SillyTavern** | github.com/SillyTavern/SillyTavern | ✅ 真实 | **Lorebook / World Info 机制**：按关键词触发的设定注入 + token 预算管理 + 深度插入位置控制。直接对标我们的知识舱增强 |
-| **novelWriter** | github.com/vkbo/novelWriter | ✅ 真实 | 非 AI，纯小说写作软件。**章节-场景二级结构、字数目标系统**（它也有 project word target）值得对照 |
-| **AutoGen** | github.com/microsoft/autogen | ✅ 真实 | 多 agent 对话编排：author/critic/editor 三角模式 |
-| **CrewAI** | github.com/crewAIInc/crewAI | ✅ 真实 | 角色化 agent 团队 + task 串行编排，适合"主编/写手/审校"分工 |
-| **LangGraph** | github.com/langchain-ai/langgraph | ✅ 真实 | 状态图工作流，支持**人工断点（human-in-the-loop）**——我们"AI 生成 + 人工确认"模式的天然载体 |
+#### ① [YILING0013/AI_NovelGenerator](https://github.com/YILING0013/AI_NovelGenerator) —— 中文圈最活跃（雪花写作法）
 
-### 0.2 闭源产品（形态参考，不可借鉴代码）
+**四步流水线**（GUI 按钮即阶段）：
+1. **生成设定** → `Novel_setting.txt`（世界观/角色/触发点/伏笔）
+2. **生成目录** → `Novel_directory.txt`（章标题+短提示）
+3. **生成章节草稿** → 向量检索召回相关上下文保证连贯 → `outline_X.txt` + `chapter_X.txt`
+4. **定稿** → 同步更新 **4 个状态文件**：`global_summary.txt`（全局摘要）、`character_state.txt`（角色状态）、向量库、`plot_arcs.txt`（情节弧）
 
-| 产品 | 借鉴点 |
+**最值得我们抄的两个设计**：
+- **多模型任务路由**（`choose_configs`）：`architecture_llm`（架构）/ `chapter_outline_llm`（章纲）/ `prompt_draft_llm`（草稿）/ `final_chapter_llm`（正文）/ `consistency_review_llm`（审校）分别配不同模型——**便宜模型跑大纲和审校，贵模型只写正文**，成本优化核心手段
+- **状态文件四分**：全局摘要 / 角色状态 / 情节弧 / 向量库，每章定稿后全量更新——比单一滚动摘要更完整的长程一致性方案
+- 一致性审校是**可选按钮**而非强制步骤（用户自选何时跑）
+- dev-2 分支在试**雪花写作法 + 角色弧光理论 + 悬念三要素模型**（大纲方法论可作 v2 选项）
+
+#### ② [GOAT-AI-lab/GOAT-Storytelling-Agent](https://github.com/GOAT-AI-lab/GOAT-Storytelling-Agent) —— 场景级生成范式
+
+**流水线**（代码级 API，可逐阶段人工介入）：
+```
+init_book_spec(topic)           → Genre/Place/Time/Theme/Tone/POV/Characters/Premise 八字段
+→ enhance_book_spec             → 充实设定
+→ create_plot_chapters          → 三幕结构（Act 1/2/3）章节大纲
+→ enhance_plot_chapters         → 细化
+→ split_chapters_into_scenes    → 每章拆场景，场景九字段结构化：
+                                   Characters/Place/Time/Event/Conflict/
+                                   StoryValue/ValueCharge/Mood/Outcome
+→ write_a_scene(逐场景生成)      → 传入 previous_scene 衔接
+→ continue_a_scene              → 场景太长时断点续写
+```
+- **无人监督生成了 20 部中篇**（HF 数据集 `GOAT-AI/generated-novels`）——质量基线已验证
+- **核心启示**：章 → 场景的二次拆分让单次生成长度可控（每场景 ~800-1500 字），质量显著优于整章一把梭
+
+#### ③ [ponysb/91Writing](https://github.com/ponysb/91Writing) —— 中文网文工具链最全（Vue3 纯前端）
+
+**直接可抄的交互设计**：
+- **上下文手动选择**："AI 上下文连贯性可手动选择多章，默认自动关联前两章"——生成时用户可控关联范围
+- **续写字数滑块 200-5000 字**：实时流式输出可随时停止
+- **提示词库 + 变量系统**：分类管理（大纲/正文/润色/对话），动态变量替换（小说名/角色/世界观自动填充）
+- **Token 计费管理**：按模型、按功能的成本分析 + 预算限额
+- **章节三状态**：草稿(橙)/完成(绿)/发表(蓝)
+- **拆书分析模块**：导入 TXT/DOCX 逆向分析优秀作品（综合/结构/人物/语言/情节 5 维度）——可作我们 v3 的"风格学习"
+
+### 0.2 框架与闭源产品（形态参考）
+
+| 项目 | 借鉴点 |
 |---|---|
-| **Sudowrite** | Story Bible（角色/世界观知识库与正文联动）；Write/Describe/Expand/Rewrite 快捷动作（我们 BubbleMenu 已有雏形） |
-| **Novelcrafter** | Codex 系统 = 知识舱；按场景（scene）而非按章组织正文 |
-| **彩云小梦**（彩云科技） | 中文续写体验标杆：续写 N 条候选、世界观词条、风格选择 |
-| **Midreal** | 互动小说：分支选择 + 自动推进，"剧情走向选择"交互可参考 |
-| **蛙蛙写作** | 中文网文向：一键成书流程（书名→简介→大纲→正文） |
+| [mattparlane/gpt-author](https://github.com/mattparlane/gpt-author) | 最朴素的完整闭环：prompt→梗概→逐章大纲→逐章正文→打包，证明流水线可行 |
+| [stanford-oval/storm](https://github.com/stanford-oval/storm) | 调研→大纲树→逐节写作→校验的系统方法论 |
+| [SillyTavern](https://github.com/SillyTavern/SillyTavern) | Lorebook 关键词召回 + token 预算分配机制 |
+| Sudowrite / Novelcrafter / 彩云小梦 / Midreal | Story Bible、Codex、中文续写体验、互动分支 |
 
-### 0.3 调研对我们的 4 个核心启示
+### 0.3 调研后的 6 条设计结论
 
-1. **流水线闭环已被验证**（gpt-author / STORM）：不需要发明新架构，把"大纲→逐章→审校"接好即可。
-2. **长上下文是最大技术痛点**：100k+ 字小说远超单次上下文。解法共识 = **大纲分层注入 + 前情摘要滚动压缩**（Rolling Summary），SillyTavern 的 token 预算分配可直接抄。
-3. **人工断点必须有**：全自动一次跑完质量不可控。LangGraph 的 interrupt/approve 模式是行业标准。
-4. **多 agent 分工优于单 agent 长 prompt**：主编（结构）/ 写手（正文）/ 审校（一致性）三角色，AutoGen/CrewAI 范式。
+1. **流水线闭环已被多方验证**（gpt-author / GOAT / AI_NovelGenerator），架构不用发明，把"设定→目录→逐章→定稿"接好即可。
+2. **长程一致性的行业标准答案 = 状态文件四分**（全局摘要 + 角色状态 + 情节弧 + 召回），每章定稿后全量更新（AI_NovelGenerator 实证）。
+3. **场景级二次拆分显著提升质量**（GOAT 实证：章→场景九字段→逐场景写→超长续写）。v1 先整章生成，v2 引入场景拆分。
+4. **多模型任务路由是成本命门**：大纲/审校用便宜模型、正文用贵模型（choose_configs 直接可抄，天枢网关模型池足够）。
+5. **人工断点必须有但应可选**：一致性审校做成可选按钮，"全自动模式"做成显式开关（默认关）。
+6. **上下文范围用户可控**：默认"最近 2 章 + 状态文件"，允许手动加选任意章节（91Writing 模式）。
 
 ---
 
@@ -74,42 +106,67 @@
 
 ```
 [立项]  用户输入：一句话创意（必填）+ 字数目标（可选）+ 类型/风格偏好（可选）
-   │     AI 产出：书名候选 ×3、简介、类型标签、主角人设草案、世界观骨架
+   │     AI 产出（book_spec 八字段，参考 GOAT）：
+   │       类型 Genre / 时代 Time / 地点 Place / 主题 Theme / 基调 Tone /
+   │       视角 POV / 角色群 Characters / 核心梗概 Premise + 书名候选 ×3
    ▼     人工：选一个书名 / 重新生成 / 手动改
 [设定]  AI 产出：角色卡 ×N、世界观条目 ×M（写入现有 Character/WorldviewEntry 表）
    ▼     人工：逐条确认 / 删除 / 手动补充
 [大纲]  AI 产出：卷-章结构（Volume + Chapter 骨架，章 title + 剧情要点 outline）
    │     注：填了总字数/章数时，AI 按目标拆章；否则默认 3 卷 × 10 章
+   │     v2 选项：雪花写作法（一句话→段落→页纲）/ 三幕结构（GOAT 模式）
    ▼     人工：大纲树可编辑（复用现有大纲编辑器）
 [生成]  逐章生成（AiChapterJob）：
-   │     输入 = 本章大纲 + 前文滚动摘要 + 知识舱相关条目 + 字数目标（若有）
+   │     输入 = 本章大纲 + 状态文件（§3.1）+ 知识舱召回 + 字数目标（若有）
    │     输出 = 流式正文 → 写入 chapter.content（status=writing）
-   │     支持：重新生成 / 暂停 / 人工接管编辑
+   │     支持：重新生成 / 暂停 / 断点续写 / 人工接管编辑
+   │     v2：章内场景级拆分（GOAT 九字段场景卡），逐场景生成
    ▼
-[审校]  AI 审校员（独立调用，低温度）：
-   │     检查 = 与设定冲突 / 与前文矛盾 / 角色口癖一致 / 字数达标（若设目标）
+[审校]  AI 审校员（可选按钮，参考 AI_NovelGenerator；低温度调用）：
+   │     检查 = 与设定冲突 / 与前文矛盾 / 角色状态一致 / 字数达标（若设目标）
    │     产出 = issues 列表（定位到段落）
    ▼     人工：一键修复（AI 按 issues 改写）/ 忽略 / 手动改
-[完成]  章 status=done → 进度推进 → 下一章可生成；全书完成 → 走现有导出管线
+[定稿]  章 status=done → **同步更新四个状态文件**（§3.1）→ 进度推进
+        → 下一章可生成；全书完成 → 走现有导出管线
 ```
 
-### 3.1 长上下文策略（核心技术点）
+### 3.1 长上下文策略：状态文件四分（核心，AI_NovelGenerator 实证）
 
-每章生成时的上下文组装（预算制，仿 SillyTavern）：
+替代单一滚动摘要，每章**定稿时**由 AI 增量更新四份状态（存 AiProject 表 TEXT 字段）：
+
+| 状态文件 | 内容 | 更新时机 | 注入策略 |
+|---|---|---|---|
+| `global_summary` | 全书滚动摘要（≤1500 字，新旧融合压缩） | 每章定稿 | 每章生成必带 |
+| `character_state` | 角色状态表（每角色：位置/目标/伤势/关系变化/口癖） | 每章定稿 | 本章出场角色必带 |
+| `plot_arcs` | 伏笔/情节弧台账（埋设章/预期回收/状态） | 每章定稿 | 全量必带（短） |
+| 向量召回 | 复用现有 FTS5 + 知识舱关键词召回历史章节片段 | 实时 | 按本章大纲关键词 Top-K≤5 |
+
+每章生成时的上下文组装（预算制）：
 
 ```
-总预算（如 32k token）分配：
-├─ 系统指令 + 风格要求          ~1k
-├─ 全书梗概（立项产出，固定）     ~0.5k
-├─ 本卷大纲                     ~1k
-├─ 本章大纲 + 字数目标           ~0.5k
-├─ 知识舱命中条目（按本章大纲关键词召回，Top-K≤10） ~4k
-├─ 前文滚动摘要（每章完成后 AI 压缩成 ~200 字摘要，最近 5 章全文 + 更早只留摘要） ~8k
-└─ 生成空间                     剩余全部
+总预算（按模型上下文，如 64k token）分配：
+├─ 系统指令 + 风格要求           ~1k
+├─ book_spec（立项八字段，固定）   ~0.5k
+├─ 状态文件三件套                 ~3k（摘要1.5k+角色1k+伏笔0.5k）
+├─ 本卷大纲 + 本章大纲 + 字数目标  ~1.5k
+├─ 知识舱/FTS 召回片段            ~4k
+├─ 最近 N 章原文（默认 2 章，用户可手动加选任意章，91Writing 模式） ~12k
+└─ 生成空间                      剩余全部
 ```
 
-- 新增表 `AiChapterJob.summary`：每章完成后生成 200 字摘要，供后续章节注入
-- 摘要链 = Rolling Summary，解决 100k+ 字超长程一致性
+### 3.2 多模型任务路由（成本命门，抄 choose_configs）
+
+AI 工厂的每一步可独立配模型（默认全部用当前 AIConfig 的模型）：
+
+| 任务 | 建议模型档位 | 理由 |
+|---|---|---|
+| `setup_llm` 立项/设定 | 中档（deepseek-v4-flash） | 结构化产出，不需顶级文笔 |
+| `outline_llm` 大纲 | 中档 | 结构性强 |
+| `chapter_llm` 正文生成 | **高档**（deepseek-v4-pro / claude-sonnet-5） | 文笔决定质量 |
+| `summary_llm` 状态文件更新 | 低档（glm-5.3-flash 级） | 压缩任务 |
+| `review_llm` 一致性审校 | 低档~中档 | 检查任务 |
+
+立项向导里给高级用户暴露这组路由配置，普通用户用默认。天枢网关模型池已覆盖全部档位。
 
 ---
 
@@ -155,12 +212,23 @@ class AiProject(Base):
     id, user_id, novel_id          # novel_id → 现有 novels 表（生成物落这里）
     status: str                    # draft|setup|outline|writing|reviewing|done|failed
     seed_prompt: str               # 用户的一句话创意
+    book_spec_json: str | None     # 立项八字段（Genre/Time/Place/Theme/Tone/POV/Characters/Premise）
     genre: str | None              # 类型（可选）
     style_notes: str | None        # 风格偏好（可选）
     # 字数目标（§4，全部可选）
     target_total_words / target_volume_words / target_chapter_words
     target_volumes / target_chapters
     outline_json: str | None       # AI 产出的大纲快照（JSON）
+    # 状态文件四分（§3.1，每章定稿后 AI 增量更新）
+    global_summary: str = ""       # 全书滚动摘要
+    character_state: str = ""      # 角色状态表 JSON
+    plot_arcs: str = ""            # 伏笔/情节弧台账 JSON
+    # 多模型任务路由（§3.2，可选，NULL=用默认模型）
+    setup_llm / outline_llm / chapter_llm / summary_llm / review_llm: str | None
+    # 上下文控制
+    context_recent_chapters: int = 2          # 默认带最近 2 章原文
+    context_extra_chapters: str = "[]"        # 用户手动加选的章节 id JSON
+    auto_mode: bool = False                   # 全自动模式（默认关，每章需人工 approve）
     created_at, updated_at
 
 class AiChapterJob(Base):
@@ -168,7 +236,7 @@ class AiChapterJob(Base):
     id, project_id, chapter_id
     status: str                    # pending|writing|reviewing|needs_fix|done|failed
     outline: str                   # 本章大纲快照
-    summary: str | None            # 完成后生成的 200 字滚动摘要
+    summary: str | None            # 本章 200 字摘要（定稿时生成，汇入 global_summary）
     review_issues: str | None      # 审校 issues JSON
     actual_words: int              # 实际字数
     attempt: int                   # 重试次数
