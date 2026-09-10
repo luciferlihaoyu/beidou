@@ -44,6 +44,7 @@ import OutlineBoard from "@/components/OutlineBoard";
 import GoalsBadges from "@/components/GoalsBadges";
 import FullTextSearch from "@/components/FullTextSearch";
 import EditorThemeSettings from "@/components/EditorThemeSettings";
+import ExportDialog from "@/components/ExportDialog";
 import RecycleBinView, { type RestoredPayload } from "@/components/RecycleBin";
 import { type EditorTheme, loadTheme } from "@/lib/editorTheme";
 import SnapshotPanel from "@/components/SnapshotPanel";
@@ -429,6 +430,9 @@ export default function Editor() {
 
   // 废纸篓
   const [recycleOpen, setRecycleOpen] = useState(false);
+
+  // B4 自定义导出
+  const [exportDialogOpen, setExportDialogOpen] = useState(false);
 
   // 块引用数据：人物 / 设定 / 伏笔，供编辑器 chip 浮卡预览
   const [refData, setRefData] = useState<ReferenceData>({
@@ -1160,6 +1164,10 @@ export default function Editor() {
               <DropdownMenuItem onClick={() => exportNovel("txt")}>TXT 纯文本</DropdownMenuItem>
               <DropdownMenuItem onClick={() => exportNovel("md")}>Markdown · 简书/飞书/GitBook 通用</DropdownMenuItem>
               <DropdownMenuItem onClick={() => exportNovel("epub")}>EPUB 电子书</DropdownMenuItem>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem onClick={() => setExportDialogOpen(true)}>
+                自定义导出（按卷/选章）…
+              </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
           <Button
@@ -1726,6 +1734,16 @@ export default function Editor() {
 
         {/* 写作区主题（横线 + 背景图） */}
         <EditorThemeSettings open={themeOpen} onOpenChange={setThemeOpen} theme={theme} onChange={setTheme} />
+
+        {/* B4 自定义导出（按卷/选章） */}
+        <ExportDialog
+          open={exportDialogOpen}
+          onOpenChange={setExportDialogOpen}
+          novelId={novelId}
+          novelTitle={novel?.title ?? "novel"}
+          chapters={chapters}
+          volumes={volumes}
+        />
 
         {/* 废纸篓（P4-2） */}
         <RecycleBinView

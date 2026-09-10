@@ -182,15 +182,36 @@ FORMATS = {
 @router.get("")
 async def export_novel(
     format: str = Query(default="txt", pattern="^(txt|html|epub|md)$"),
+    volume_id: int | None = Query(default=None),
+    chapter_ids: str | None = Query(default=None, description="逗号分隔章节 id，传入则只导出这些章"),
     novel: Novel = Depends(get_owned_novel),
     db: AsyncSession = Depends(get_db),
 ):
     groups = await _structure(novel, db)
+    # B4 范围过滤：按卷 或 按选中章节（两者都给了先按章过滤）
+    if chapter_ids:
+        try:
+            wanted = {int(x) for x in chapter_ids.split(",") if x.strip()}
+        except ValueError:
+            raise HTTPException(400, "chapter_ids 格式错误")
+        groups = [
+            (vol, [(c, n) for c, n in chs if c.id in wanted])
+            for vol, chs in groups
+        ]
+        groups = [(vol, chs) for vol, chs in groups if chs]
+    elif volume_id is not None:
+        groups = [(vol, chs) for vol, chs in groups if vol is not None and vol.id == volume_id]
     if not groups:
-        raise HTTPException(400, "还没有可导出的章节")
+        raise HTTPException(400, "所选范围没有可导出的章节")
     media_type, builder, ext = FORMATS[format]
     data = builder(novel, groups)
-    filename = f"{novel.title}{ext}"
+    suffix = ""
+    if chapter_ids:
+        suffix = f"_选{sum(len(chs) for _, chs in groups)}章"
+    elif volume_id is not None:
+        vol_title = groups[0][0].title if groups and groups[0][0] else ""
+        suffix = f"_{vol_title}" if vol_title else ""
+    filename = f"{novel.title}{suffix}{ext}"
     from urllib.parse import quote
 
     headers = {"Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}"}
