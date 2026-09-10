@@ -17,6 +17,7 @@ import {
   FileText,
   FolderInput,
   FolderPlus,
+  Gauge,
   History,
   LibraryBig,
   ListTree,
@@ -46,6 +47,7 @@ import GoalsBadges from "@/components/GoalsBadges";
 import FullTextSearch from "@/components/FullTextSearch";
 import EditorThemeSettings from "@/components/EditorThemeSettings";
 import ExportDialog from "@/components/ExportDialog";
+import QualityRadar from "@/components/QualityRadar";
 import RecycleBinView, { type RestoredPayload } from "@/components/RecycleBin";
 import { type EditorTheme, loadTheme } from "@/lib/editorTheme";
 import SnapshotPanel from "@/components/SnapshotPanel";
@@ -94,8 +96,8 @@ import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 type SaveState = "saved" | "saving" | "dirty";
 
 /** 字数统计：去标签、去空白（与后端口径一致） */
-function countWords(html: string): number {
-  const text = html
+function stripHtml(html: string): string {
+  return html
     .replace(/<\/(p|h[1-4]|li|blockquote|div)>/gi, "\n")
     .replace(/<br\s*\/?>/gi, "\n")
     .replace(/<[^>]+>/g, "")
@@ -105,7 +107,10 @@ function countWords(html: string): number {
     .replace(/&gt;/g, ">")
     .replace(/&quot;/g, '"')
     .replace(/&#39;/g, "'");
-  return text.replace(/\s/g, "").length;
+}
+
+function countWords(html: string): number {
+  return stripHtml(html).replace(/\s/g, "").length;
 }
 
 function fmtDate(d: Date): string {
@@ -438,6 +443,10 @@ export default function Editor() {
   // B3 章节多选批量操作
   const [batchMode, setBatchMode] = useState(false);
   const [batchPicked, setBatchPicked] = useState<Set<number>>(new Set());
+
+  // B1 品质雷达
+  const [qualityOpen, setQualityOpen] = useState(false);
+  const [qualityText, setQualityText] = useState("");
   function toggleBatchPick(id: number) {
     setBatchPicked((prev) => {
       const next = new Set(prev);
@@ -1712,6 +1721,19 @@ export default function Editor() {
                     <span>今日 +{todayWords.toLocaleString()} 字</span>
                   )}
                   {speed !== null && <span>{speed.toLocaleString()} 字/时</span>}
+                  {/* B1 品质雷达 */}
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-5 w-5"
+                    title="品质雷达（句长/对话比/段落健康，本地分析）"
+                    onClick={() => {
+                      setQualityText(editorRef.current?.getText() ?? "");
+                      setQualityOpen(true);
+                    }}
+                  >
+                    <Gauge className="h-3.5 w-3.5" />
+                  </Button>
                   {/* 写作排版偏好：字号 / 行距 / 页宽 */}
                   <DropdownMenu>
                     <DropdownMenuTrigger asChild>
@@ -1885,6 +1907,14 @@ export default function Editor() {
           novelTitle={novel?.title ?? "novel"}
           chapters={chapters}
           volumes={volumes}
+        />
+
+        {/* B1 品质雷达 */}
+        <QualityRadar
+          open={qualityOpen}
+          onOpenChange={setQualityOpen}
+          text={qualityText}
+          chapterTitle={activeChapter?.display_title ?? ""}
         />
 
         {/* 废纸篓（P4-2） */}
