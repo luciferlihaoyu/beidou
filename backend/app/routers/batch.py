@@ -18,6 +18,7 @@ import json
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -389,4 +390,130 @@ async def retention_dashboard(
         "hook_score": hook_score,
         "cool_score": cool_score,
         "retention_score": retention_score,
+    }
+
+
+# ================= M6：修订闭环 + 局部重写 =================
+
+@router.post("/projects/{project_id}/jobs/{job_id}/revise")
+async def revise_chapter(project_id: int, job_id: int, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    """一键按审校意见修订（婉儿包 revise loop 的北斗化）：全文修订保剧情保字数。
+
+    前置：job 已有 review_issues（先跑 review-full）。
+    后置：正文落库 + FTS 同步 + 复检 AI 味（review_score 更新）+ 清问题置 done。
+    """
+    p = await _get_project(project_id, user, db)
+    job = await db.get(AiChapterJob, job_id)
+    if job is None or job.project_id != p.id or job.chapter_id is None:
+        raise HTTPException(404, "章节任务不存在")
+    chapter = await db.get(Chapter, job.chapter_id)
+    if chapter is None:
+        raise HTTPException(404, "章节不存在")
+    issues = json.loads(job.review_issues) if job.review_issues else []
+    if not issues:
+        raise HTTPException(400, "没有待修订的问题（请先运行审校）")
+
+    text = strip_html(chapter.content)
+    issue_lines = "\n".join(
+        f"- [{i.get('severity', 'medium')}] {i.get('type', '')}：{i.get('issue', '')}（建议：{i.get('suggestion', '')}）"
+        for i in issues[:20]
+    )
+    config = await _pick_config(user, db, p.chapter_llm)
+    prompt = (
+        f"以下是小说《{p.seed_prompt[:30]}》的一章正文，审校发现以下问题：\n{issue_lines}\n\n"
+        "请修订全文。要求：\n"
+        "1. 只修复上述问题，不改变剧情走向、人物设定和关键场景\n"
+        "2. 保持原篇幅（±15%）\n"
+        "3. 遵守以下反 AI 味写作规则：\n" + ANTI_LLM_RULES + "\n"
+        "4. 只输出修订后的正文全文，不要任何解释\n\n"
+        f"原文：\n{text[:12000]}"
+    )
+    raw = await _chat_text(config, _SYSTEM, prompt, max_tokens=8000)
+    revised = raw.strip()
+    if len(revised) < len(text) * 0.3:
+        raise HTTPException(400, "AI 修订结果过短（疑似截断），未保存，请重试")
+
+    chapter.content = _text_to_html(revised)
+    chapter.word_count = count_words(chapter.content)
+    # 复检 AI 味
+    report = detect(revised)
+    job.review_score = report["score"]
+    job.review_issues = None  # 已按意见修订，清空待办
+    job.status = "done"
+    job.actual_words = chapter.word_count
+    await db.commit()
+    try:
+        from ..search_fts import sync_chapter
+
+        await sync_chapter(db, chapter.id)
+        await db.commit()
+    except Exception:  # noqa: BLE001
+        pass
+    return {
+        "word_count": chapter.word_count,
+        "deai_score": report["score"],
+        "fixed_issues": len(issues),
+    }
+
+
+class RewritePartialIn(BaseModel):
+    excerpt: str = Field(min_length=10, max_length=3000)  # 要重写的原文摘段
+    instruction: str = Field(default="", max_length=500)
+
+
+@router.post("/projects/{project_id}/jobs/{job_id}/rewrite-partial")
+async def rewrite_partial(
+    project_id: int,
+    job_id: int,
+    data: RewritePartialIn,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """局部重写：只改指定的摘段，其余原样保留。"""
+    p = await _get_project(project_id, user, db)
+    job = await db.get(AiChapterJob, job_id)
+    if job is None or job.project_id != p.id or job.chapter_id is None:
+        raise HTTPException(404, "章节任务不存在")
+    chapter = await db.get(Chapter, job.chapter_id)
+    if chapter is None:
+        raise HTTPException(404, "章节不存在")
+
+    text = strip_html(chapter.content)
+    excerpt = data.excerpt.strip()
+    pos = text.find(excerpt)
+    if pos < 0:
+        raise HTTPException(400, "在正文中找不到该摘段（请从正文原样复制，含标点）")
+
+    context_before = text[max(0, pos - 200) : pos]
+    context_after = text[pos + len(excerpt) : pos + len(excerpt) + 200]
+    config = await _pick_config(user, db, p.chapter_llm)
+    prompt = (
+        "以下是小说某章的一个段落，请按要求重写它。\n"
+        f"前文（供衔接，不要输出）：…{context_before}\n"
+        f"【待重写段落】\n{excerpt}\n"
+        f"后文（供衔接，不要输出）：{context_after}…\n\n"
+        f"重写要求：{data.instruction or '提升表达质量，去除 AI 腔，增强画面感'}\n"
+        "只输出重写后的段落文本（长度可与原文不同，但须与前后文自然衔接）。"
+    )
+    raw = await _chat_text(config, _SYSTEM, prompt, max_tokens=3000)
+    new_excerpt = raw.strip()
+    if not new_excerpt:
+        raise HTTPException(400, "AI 返回为空，请重试")
+
+    new_text = text[:pos] + new_excerpt + text[pos + len(excerpt) :]
+    chapter.content = _text_to_html(new_text)
+    chapter.word_count = count_words(chapter.content)
+    job.actual_words = chapter.word_count
+    await db.commit()
+    try:
+        from ..search_fts import sync_chapter
+
+        await sync_chapter(db, chapter.id)
+        await db.commit()
+    except Exception:  # noqa: BLE001
+        pass
+    return {
+        "word_count": chapter.word_count,
+        "new_excerpt": new_excerpt,
+        "deai_score": detect(new_excerpt)["score"],
     }

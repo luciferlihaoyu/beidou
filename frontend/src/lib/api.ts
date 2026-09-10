@@ -659,3 +659,18 @@ export const aiFactoryM5 = {
   coverPrompt: (projectId: number, style: string) =>
     api.post<AiCoverPrompt>(`/api/ai-factory/projects/${projectId}/cover-prompt`, { style }),
 };
+
+// ---------- AI 工厂 M6：修订闭环 + 局部重写 ----------
+export const aiFactoryM6 = {
+  /** 一键按审校意见修订全文 */
+  revise: (projectId: number, jobId: number) =>
+    api.post<{ word_count: number; deai_score: number; fixed_issues: number }>(
+      `/api/ai-factory/projects/${projectId}/jobs/${jobId}/revise`
+    ),
+  /** 局部重写摘段 */
+  rewritePartial: (projectId: number, jobId: number, excerpt: string, instruction: string) =>
+    api.post<{ word_count: number; new_excerpt: string; deai_score: number }>(
+      `/api/ai-factory/projects/${projectId}/jobs/${jobId}/rewrite-partial`,
+      { excerpt, instruction }
+    ),
+};

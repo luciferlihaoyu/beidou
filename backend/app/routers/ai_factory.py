@@ -653,9 +653,17 @@ def _text_to_html(text: str) -> str:
     )
 
 
+class GenerateIn(BaseModel):
+    instruction: str = Field(default="", max_length=500)  # 重写指示（整章重生成时注入）
+
+
 @router.post("/projects/{project_id}/jobs/{job_id}/generate")
 async def generate_chapter(
-    project_id: int, job_id: int, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
+    project_id: int,
+    job_id: int,
+    data: GenerateIn | None = None,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ):
     """SSE 流式生成一章正文。job → writing；内容由客户端收集后走 finalize 落库。"""
     p = await _get_project(project_id, user, db)
@@ -674,6 +682,8 @@ async def generate_chapter(
 
     config = await _pick_config(user, db, p.chapter_llm)
     context = await _assemble_context(p, novel, chapter, job, db)
+    if data and data.instruction.strip():
+        context += f"\n\n【作者重写指示（最高优先级，务必遵守）】\n{data.instruction.strip()}"
 
     job.status = "writing"
     job.attempt += 1

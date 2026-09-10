@@ -15,8 +15,9 @@ import {
   ShieldCheck,
   Sparkles,
   X,
+  Wand2,
 } from "lucide-react";
-import { aiFactoryApi, aiFactoryM2, aiFactoryM3, streamPost, type AiChapterJob, type AiProject } from "@/lib/api";
+import { aiFactoryApi, aiFactoryM2, aiFactoryM3, aiFactoryM6, streamPost, type AiChapterJob, type AiProject } from "@/lib/api";
 import { M3Toolbar, RetentionPanel } from "@/components/FactoryM3";
 import { Button } from "@/components/ui/button";
 import {
@@ -27,6 +28,7 @@ import {
   DialogDescription,
 } from "@/components/ui/dialog";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { Textarea } from "@/components/ui/textarea";
 
 const JOB_STATUS: Record<string, { label: string; icon: React.ReactNode }> = {
   pending: { label: "待生成", icon: <Circle className="h-3.5 w-3.5 text-muted-foreground" /> },
@@ -50,6 +52,8 @@ export default function ChapterGenPanel({
   const [finalizing, setFinalizing] = useState(false);
   const [reviewJob, setReviewJob] = useState<AiChapterJob | null>(null);
   const [reviewBusy, setReviewBusy] = useState(false);
+  const [rewriteJob, setRewriteJob] = useState<AiChapterJob | null>(null);
+  const [revising, setRevising] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -62,7 +66,7 @@ export default function ChapterGenPanel({
   const totalWords = jobs.reduce((s, j) => s + j.actual_words, 0);
 
   // ---------- 流式生成 ----------
-  function startGenerate(job: AiChapterJob) {
+  function startGenerate(job: AiChapterJob, instruction = "") {
     abortRef.current?.abort();
     const ctrl = new AbortController();
     abortRef.current = ctrl;
@@ -71,7 +75,7 @@ export default function ChapterGenPanel({
     setGenBusy(true);
     streamPost(
       `/api/ai-factory/projects/${project.id}/jobs/${job.id}/generate`,
-      {},
+      { instruction },
       (chunk) => {
         setGenOutput((prev) => prev + chunk);
         requestAnimationFrame(() => {
@@ -120,6 +124,21 @@ export default function ChapterGenPanel({
       toast.error(e instanceof Error ? e.message : "审校失败");
     } finally {
       setReviewBusy(false);
+    }
+  }
+
+  // ---------- 一键修订（M6：按审校意见修全文） ----------
+  async function runRevise(job: AiChapterJob) {
+    setRevising(true);
+    try {
+      const r = await aiFactoryM6.revise(project.id, job.id);
+      toast.success(`已修订 ${r.fixed_issues} 个问题（${r.word_count.toLocaleString()} 字 · AI味复检 ${r.deai_score} 分）`);
+      setReviewJob(null);
+      loadJobs();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "修订失败");
+    } finally {
+      setRevising(false);
     }
   }
 
@@ -203,7 +222,10 @@ export default function ChapterGenPanel({
                 variant="ghost"
                 size="sm"
                 className="h-7 px-2 text-xs"
-                onClick={() => startGenerate(j)}
+                onClick={() => {
+                  if (j.status === "done" || j.status === "needs_fix") setRewriteJob(j);
+                  else startGenerate(j);
+                }}
               >
                 {j.status === "done" || j.status === "needs_fix" ? (
                   <>
@@ -342,8 +364,162 @@ export default function ChapterGenPanel({
           ) : (
             <p className="py-6 text-center text-sm text-muted-foreground">未发现问题 ✅</p>
           )}
+          {reviewJob?.review_issues?.length ? (
+            <div className="flex items-center justify-between border-t border-border pt-3">
+              <p className="text-[11px] text-muted-foreground">修订会按以上意见改全文，保剧情保篇幅</p>
+              <Button size="sm" disabled={revising} onClick={() => reviewJob && void runRevise(reviewJob)}>
+                {revising ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : <Wand2 className="mr-1 h-3.5 w-3.5" />}
+                一键修订
+              </Button>
+            </div>
+          ) : null}
         </DialogContent>
       </Dialog>
+
+      {/* 重写对话框（整章带指示 / 局部摘段） */}
+      <RewriteDialog
+        project={project}
+        job={rewriteJob}
+        onClose={() => setRewriteJob(null)}
+        onFullRewrite={(instruction) => {
+          const j = rewriteJob;
+          setRewriteJob(null);
+          if (j) startGenerate(j, instruction);
+        }}
+        onPartialDone={() => {
+          setRewriteJob(null);
+          loadJobs();
+        }}
+      />
     </div>
+  );
+}
+
+/** 重写对话框（M6）：整章重写（带作者指示）或局部摘段重写 */
+function RewriteDialog({
+  project,
+  job,
+  onClose,
+  onFullRewrite,
+  onPartialDone,
+}: {
+  project: AiProject;
+  job: AiChapterJob | null;
+  onClose: () => void;
+  onFullRewrite: (instruction: string) => void;
+  onPartialDone: () => void;
+}) {
+  const [scope, setScope] = useState<"full" | "partial">("full");
+  const [instruction, setInstruction] = useState("");
+  const [excerpt, setExcerpt] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [newExcerpt, setNewExcerpt] = useState<string | null>(null);
+
+  useEffect(() => {
+    // 换章节时重置
+    setScope("full");
+    setInstruction("");
+    setExcerpt("");
+    setNewExcerpt(null);
+  }, [job?.id]);
+
+  async function submitPartial() {
+    if (!job) return;
+    setBusy(true);
+    try {
+      const r = await aiFactoryM6.rewritePartial(project.id, job.id, excerpt, instruction);
+      setNewExcerpt(r.new_excerpt);
+      toast.success(`局部重写完成（全文现 ${r.word_count.toLocaleString()} 字）`);
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "局部重写失败");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Dialog open={job !== null} onOpenChange={(v) => !v && onClose()}>
+      <DialogContent className="flex max-h-[85vh] flex-col sm:max-w-lg">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <RefreshCw className="h-4 w-4" />
+            重写 · {job?.chapter_title}
+          </DialogTitle>
+          <DialogDescription>整章推翻重来，或只改某一段。</DialogDescription>
+        </DialogHeader>
+
+        <div className="space-y-3">
+          <div className="flex gap-2">
+            {(
+              [
+                { k: "full", label: "整章重写" },
+                { k: "partial", label: "局部重写" },
+              ] as const
+            ).map((o) => (
+              <button
+                key={o.k}
+                onClick={() => setScope(o.k)}
+                className={`rounded-md border px-3 py-1.5 text-xs transition-colors ${
+                  scope === o.k
+                    ? "border-primary bg-primary/10 text-primary"
+                    : "border-border text-muted-foreground hover:border-primary/40"
+                }`}
+              >
+                {o.label}
+              </button>
+            ))}
+          </div>
+
+          {scope === "partial" && (
+            <div>
+              <label className="text-xs text-muted-foreground">从正文原样复制要改的一段（含标点，≥10 字）</label>
+              <Textarea
+                className="mt-1 min-h-20 text-sm"
+                value={excerpt}
+                onChange={(e) => setExcerpt(e.target.value)}
+                placeholder="粘贴正文中要重写的原段…"
+              />
+            </div>
+          )}
+
+          <div>
+            <label className="text-xs text-muted-foreground">
+              {scope === "full" ? "重写指示（可选，如：加重感情戏、换个开局钩子）" : "这段要怎么改（可选）"}
+            </label>
+            <Textarea
+              className="mt-1 min-h-16 text-sm"
+              value={instruction}
+              onChange={(e) => setInstruction(e.target.value)}
+              placeholder={scope === "full" ? "不填则按大纲重新生成" : "如：把这段打斗写得更紧张，加入环境细节"}
+            />
+          </div>
+
+          {newExcerpt && (
+            <div className="rounded-md border border-green-500/30 bg-green-500/5 p-3">
+              <p className="mb-1 text-xs font-medium text-green-600 dark:text-green-400">重写后（已落库）</p>
+              <p className="whitespace-pre-wrap text-sm leading-relaxed">{newExcerpt}</p>
+            </div>
+          )}
+        </div>
+
+        <div className="flex justify-end gap-2 border-t border-border pt-3">
+          {scope === "full" ? (
+            <Button size="sm" onClick={() => onFullRewrite(instruction)}>
+              <Sparkles className="mr-1 h-3.5 w-3.5" />
+              开始整章重写
+            </Button>
+          ) : newExcerpt ? (
+            <Button size="sm" onClick={onPartialDone}>
+              完成
+            </Button>
+          ) : (
+            <Button size="sm" disabled={busy || excerpt.trim().length < 10} onClick={() => void submitPartial()}>
+              {busy ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : <Wand2 className="mr-1 h-3.5 w-3.5" />}
+              重写这一段
+            </Button>
+          )}
+        </div>
+      </DialogContent>
+    </Dialog>
   );
 }
