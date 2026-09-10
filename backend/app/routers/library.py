@@ -199,6 +199,13 @@ async def create_item(data: ItemIn, user: User = Depends(get_current_user), db: 
     db.add(item)
     await db.commit()
     await db.refresh(item)
+    # B2 FTS 同步
+    try:
+        from ..search_fts import sync_library_item
+
+        await sync_library_item(db, item.id)
+    except Exception:  # noqa: BLE001
+        pass
     return _item_out(item)
 
 
@@ -216,6 +223,13 @@ async def update_item(
         setattr(item, key, value)
     await db.commit()
     await db.refresh(item)
+    # B2 FTS 同步
+    try:
+        from ..search_fts import sync_library_item
+
+        await sync_library_item(db, item.id)
+    except Exception:  # noqa: BLE001
+        pass
     return _item_out(item)
 
 
@@ -227,7 +241,51 @@ async def delete_item(item_id: int, user: User = Depends(get_current_user), db: 
     await _check_scope(item.novel_id, user, db)
     await db.delete(item)
     await db.commit()
+    # B2 FTS 同步（删索引行）
+    try:
+        from ..search_fts import remove_library_item
+
+        await remove_library_item(db, item_id)
+    except Exception:  # noqa: BLE001
+        pass
     return {"ok": True}
+
+
+# ---------- B2 全文搜索（FTS5）----------
+
+
+@router.get("/search")
+async def search_items(
+    q: str = Query(default="", max_length=100),
+    novel_id: int | None = Query(default=None),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """资料库全文搜索：FTS5 + snippet 高亮，按相关度排序。
+
+    novel_id 给了 → 搜「公共库 + 该书专属」；没给 → 搜全部。
+    响应 = ItemOut + snippet（<mark> 高亮命中词）。
+    """
+    if not q.strip():
+        return []
+    await _check_scope(novel_id, user, db)
+    from ..search_fts import search_library_fts
+
+    hits = await search_library_fts(db, q, novel_id=novel_id)
+    if not hits:
+        return []
+    ids = [h["id"] for h in hits]
+    items = (await db.execute(select(LibraryItem).where(LibraryItem.id.in_(ids)))).scalars().all()
+    by_id = {i.id: i for i in items}
+    out = []
+    for h in hits:
+        it = by_id.get(h["id"])
+        if it is None:
+            continue  # FTS 与主表不一致（极端情况），跳过
+        d = _item_out(it)
+        d["snippet"] = h["snippet"]
+        out.append(d)
+    return out
 
 
 # ---------- 文件上传 ----------
@@ -308,6 +366,14 @@ async def upload_files(
     await db.commit()
     for item in created:
         await db.refresh(item)
+    # B2 FTS 同步（批量导入的每个条目）
+    try:
+        from ..search_fts import sync_library_item
+
+        for item in created:
+            await sync_library_item(db, item.id)
+    except Exception:  # noqa: BLE001
+        pass
     return {"ok": True, "count": len(created), "items": [_item_out(i) for i in created]}
 
 

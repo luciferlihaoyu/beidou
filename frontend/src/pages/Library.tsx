@@ -100,11 +100,17 @@ export default function Library({ novelId }: { novelId?: number }) {
   const loadItems = useCallback(() => {
     const params = new URLSearchParams();
     if (novelId) params.set("novel_id", String(novelId));
-    if (!q.trim()) {
-      if (selectedFolder === "unfiled") params.set("unfiled", "true");
-      else if (selectedFolder !== "all") params.set("folder_id", String(selectedFolder));
+    if (q.trim()) {
+      // B2 搜索走 FTS5 全文接口（高亮 + 相关度排序），不再走 LIKE
+      params.set("q", q.trim());
+      api
+        .get<LibraryItem[]>(`/api/library/search?${params}`)
+        .then(setItems)
+        .catch((e) => toast.error(e.message));
+      return;
     }
-    if (q.trim()) params.set("q", q.trim());
+    if (selectedFolder === "unfiled") params.set("unfiled", "true");
+    else if (selectedFolder !== "all") params.set("folder_id", String(selectedFolder));
     const qs = params.toString();
     api
       .get<LibraryItem[]>(`/api/library/items${qs ? "?" + qs : ""}`)
@@ -538,9 +544,17 @@ export default function Library({ novelId }: { novelId?: number }) {
                   }`}
                 >
                   <div className="truncate text-sm font-medium">{item.title}</div>
-                  <div className="mt-0.5 line-clamp-1 text-xs text-muted-foreground">
-                    {item.summary || item.content.slice(0, 40) || "（空）"}
-                  </div>
+                  {item.snippet ? (
+                    /* B2 FTS 命中摘要：snippet 来自服务端 snippet()，只含 <mark> 标签 */
+                    <div
+                      className="mt-0.5 line-clamp-2 text-xs text-muted-foreground [&_mark]:bg-primary/20 [&_mark]:text-primary"
+                      dangerouslySetInnerHTML={{ __html: item.snippet }}
+                    />
+                  ) : (
+                    <div className="mt-0.5 line-clamp-1 text-xs text-muted-foreground">
+                      {item.summary || item.content.slice(0, 40) || "（空）"}
+                    </div>
+                  )}
                   {item.tags && (
                     <div className="mt-1 flex flex-wrap gap-1">
                       {item.tags.split(",").filter(Boolean).slice(0, 3).map((t) => (

@@ -29,6 +29,16 @@ CREATE VIRTUAL TABLE IF NOT EXISTS chapter_fts USING fts5(
 )
 """
 
+# B2 资料库 FTS：rowid 用 library_items.id；scope=novel_id（公共库记 -1）
+_LIBRARY_FTS_DDL = """
+CREATE VIRTUAL TABLE IF NOT EXISTS library_items_fts USING fts5(
+    scope UNINDEXED,
+    title,
+    body,
+    tokenize = 'unicode61 remove_diacritics 2'
+)
+"""
+
 
 def _strip_for_fts(content: str) -> str:
     """把 Tiptap HTML 转换成纯文本供 FTS 索引（保留段落换行）。"""
@@ -38,6 +48,7 @@ def _strip_for_fts(content: str) -> str:
 async def ensure_fts(conn: AsyncConnection) -> None:
     """创建 FTS5 虚拟表（幂等）。"""
     await conn.execute(text(_FTS_DDL))
+    await conn.execute(text(_LIBRARY_FTS_DDL))
 
 
 async def rebuild_fts_for_novel(db: AsyncSession, novel_id: int) -> int:
@@ -179,6 +190,120 @@ async def search_fts(
                 "title": row[1] or "",
                 "snippet": row[2] or "",
                 "count": count,
+            }
+        )
+    return out
+
+
+# ---------- B2 资料库 FTS ----------
+
+_PUBLIC_SCOPE = -1  # library_items.novel_id 为 NULL 时在 FTS 里记 -1
+
+
+async def sync_library_item(db: AsyncSession, item_id: int) -> None:
+    """单个资料条目写后调用：upsert 到 FTS。"""
+    from .models import LibraryItem
+
+    item = await db.get(LibraryItem, item_id)
+    if item is None:
+        return
+    body = " ".join(
+        part for part in [item.content or "", item.tags or "", item.summary or ""] if part
+    ).strip()
+    title = (item.title or "").strip()
+    scope = item.novel_id if item.novel_id is not None else _PUBLIC_SCOPE
+    await db.execute(
+        text("DELETE FROM library_items_fts WHERE rowid = :rid"), {"rid": item_id}
+    )
+    if body or title:
+        await db.execute(
+            text(
+                "INSERT INTO library_items_fts(rowid, scope, title, body) "
+                "VALUES (:rid, :scope, :title, :body)"
+            ),
+            {"rid": item_id, "scope": scope, "title": title, "body": body},
+        )
+    await db.commit()
+
+
+async def remove_library_item(db: AsyncSession, item_id: int) -> None:
+    await db.execute(
+        text("DELETE FROM library_items_fts WHERE rowid = :rid"), {"rid": item_id}
+    )
+    await db.commit()
+
+
+async def rebuild_fts_for_library(db: AsyncSession) -> int:
+    """全量重建资料库 FTS（首次启动/修复用）。返回导入条目数。"""
+    from .models import LibraryItem
+
+    await db.execute(text("DELETE FROM library_items_fts"))
+    items = (await db.execute(text("SELECT id FROM library_items"))).fetchall()
+    for (iid,) in items:
+        await sync_library_item(db, int(iid))
+    return len(items)
+
+
+def _match_expr(q: str) -> str:
+    """中文/标点 → phrase query；含 ASCII 字母数字 → 原样。"""
+    has_ascii = any(c.isascii() and c.isalnum() for c in q)
+    if has_ascii:
+        return q
+    return '"' + q.replace('"', '""') + '"'
+
+
+async def search_library_fts(
+    db: AsyncSession, query: str, novel_id: int | None = None, limit: int = 30
+) -> list[dict]:
+    """资料库全文搜索。
+
+    novel_id 给了 → 搜「公共库 + 该书专属」；没给 → 搜全部。
+    返回 [{id, title, snippet, novel_id, folder_id, tags}]。
+    """
+    q = (query or "").strip()
+    if not q:
+        return []
+    match = _match_expr(q)
+    scope_cond = ""
+    params: dict = {"q": match, "lim": limit}
+    if novel_id is not None:
+        scope_cond = "AND (scope = :nid OR scope = :pub)"
+        params["nid"] = novel_id
+        params["pub"] = _PUBLIC_SCOPE
+    rows = (
+        await db.execute(
+            text(
+                "SELECT rowid AS id, title, "
+                "  snippet(library_items_fts, 2, '<mark>', '</mark>', '…', 16) AS snippet "
+                "FROM library_items_fts "
+                f"WHERE library_items_fts MATCH :q {scope_cond} "
+                "ORDER BY rank LIMIT :lim"
+            ),
+            params,
+        )
+    ).fetchall()
+    if not rows:
+        return []
+    from .models import LibraryItem
+
+    ids = [int(r[0]) for r in rows]
+    items = (await db.execute(select(LibraryItem).where(LibraryItem.id.in_(ids)))).scalars().all()
+    meta = {i.id: i for i in items}
+    out: list[dict] = []
+    for row in rows:
+        iid = int(row[0])
+        it = meta.get(iid)
+        if it is None:
+            continue  # FTS 与主表不一致（极端情况），跳过
+        out.append(
+            {
+                "id": iid,
+                "title": row[1] or "",
+                "snippet": row[2] or "",
+                "novel_id": it.novel_id,
+                "folder_id": it.folder_id,
+                "tags": it.tags or "",
+                "source": it.source,
             }
         )
     return out

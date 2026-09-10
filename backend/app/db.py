@@ -151,3 +151,22 @@ async def _migrate():
                         )
                 except Exception:  # noqa: BLE001  重建失败不影响启动
                     pass
+
+    # B2 资料库 FTS 首次全量导入（仅当 library_items_fts 为空且有条目时）
+    async with SessionLocal() as session:
+        from .search_fts import rebuild_fts_for_library
+
+        try:
+            lib_fts_count = (
+                await session.execute(text("SELECT COUNT(*) FROM library_items_fts"))
+            ).scalar_one()
+            if lib_fts_count == 0:
+                n_items = await rebuild_fts_for_library(session)
+                if n_items:
+                    import logging
+
+                    logging.getLogger("beidou.db").info(
+                        "资料库 FTS 初始化：导入 %s 条目", n_items
+                    )
+        except Exception:  # noqa: BLE001  重建失败不影响启动
+            pass

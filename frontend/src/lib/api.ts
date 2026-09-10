@@ -255,6 +255,8 @@ export interface LibraryItem {
   source: string;
   created_at: string;
   updated_at: string;
+  /** B2 全文搜索命中摘要（含 <mark> 高亮），仅 /api/library/search 返回 */
+  snippet?: string;
 }
 
 export interface OrganizeSuggestion {
