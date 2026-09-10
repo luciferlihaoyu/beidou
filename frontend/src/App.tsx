@@ -8,6 +8,8 @@ import Editor from "@/pages/Editor";
 import NovelSettings from "@/pages/NovelSettings";
 import Account from "@/pages/Account";
 import Library from "@/pages/Library";
+import Factory from "@/pages/Factory";
+import FactoryProject from "@/pages/FactoryProject";
 
 function NovelLibrary() {
   const { id } = useParams();
@@ -83,6 +85,22 @@ export default function App() {
           element={
             <RequireAuth>
               <Account />
+            </RequireAuth>
+          }
+        />
+        <Route
+          path="/factory"
+          element={
+            <RequireAuth>
+              <Factory />
+            </RequireAuth>
+          }
+        />
+        <Route
+          path="/factory/:id"
+          element={
+            <RequireAuth>
+              <FactoryProject />
             </RequireAuth>
           }
         />

@@ -1,5 +1,5 @@
 import { Link, useNavigate } from "react-router";
-import { Check, ChevronLeft, Library, LibraryBig, LogOut, Monitor, Moon, Settings2, Sun } from "lucide-react";
+import { Bot, Check, ChevronLeft, Library, LibraryBig, LogOut, Monitor, Moon, Settings2, Sun } from "lucide-react";
 import { useState } from "react";
 import BeidouMark from "@/components/BeidouMark";
 import { Button } from "@/components/ui/button";
@@ -72,6 +72,10 @@ export default function AppShell({
             <DropdownMenuItem onClick={() => navigate("/library")}>
               <LibraryBig className="mr-2 h-4 w-4" />
               资料库
+            </DropdownMenuItem>
+            <DropdownMenuItem onClick={() => navigate("/factory")}>
+              <Bot className="mr-2 h-4 w-4" />
+              AI 工厂
             </DropdownMenuItem>
             <DropdownMenuItem onClick={() => navigate("/account")}>
               <Settings2 className="mr-2 h-4 w-4" />
