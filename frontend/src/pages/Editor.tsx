@@ -10,6 +10,7 @@ import {
   CalendarDays,
   Award,
   Check,
+  CheckSquare,
   ChevronRight,
   Palette,
   Download,
@@ -433,6 +434,40 @@ export default function Editor() {
 
   // B4 自定义导出
   const [exportDialogOpen, setExportDialogOpen] = useState(false);
+
+  // B3 章节多选批量操作
+  const [batchMode, setBatchMode] = useState(false);
+  const [batchPicked, setBatchPicked] = useState<Set<number>>(new Set());
+  function toggleBatchPick(id: number) {
+    setBatchPicked((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+  async function runBatch(action: "delete" | "move" | "status", extra?: { volume_id?: number | null; status?: string }) {
+    if (batchPicked.size === 0) return;
+    if (action === "delete" && !window.confirm(`批量删除 ${batchPicked.size} 章？会进废纸篓，30 天内可恢复。`)) return;
+    try {
+      await api.post(`/api/novels/${novelId}/chapters/batch`, {
+        action,
+        chapter_ids: Array.from(batchPicked),
+        ...extra,
+      });
+      toast.success(`已处理 ${batchPicked.size} 章`);
+      setBatchPicked(new Set());
+      setBatchMode(false);
+      await Promise.all([loadChapters(), loadVolumes()]);
+      // 如果删掉了当前章节，跳到第一章
+      if (action === "delete" && activeId !== null && batchPicked.has(activeId)) {
+        const list = await api.get<Chapter[]>(`/api/novels/${novelId}/chapters`);
+        setActiveId(list[0]?.id ?? null);
+      }
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "批量操作失败");
+    }
+  }
 
   // 块引用数据：人物 / 设定 / 伏笔，供编辑器 chip 浮卡预览
   const [refData, setRefData] = useState<ReferenceData>({
@@ -920,26 +955,44 @@ export default function Editor() {
 
   function renderChapterRow(chapter: Chapter, group: Chapter[]) {
     const index = group.findIndex((c) => c.id === chapter.id);
+    const picked = batchPicked.has(chapter.id);
     return (
       <li key={chapter.id} className="group relative">
         <button
           onClick={() => {
+            // B3 多选模式：点击=切换选中，不打开章节
+            if (batchMode) {
+              toggleBatchPick(chapter.id);
+              return;
+            }
             if (chapter.id !== activeId) {
               void flushSave();
               setActiveId(chapter.id);
             }
           }}
           className={`flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm transition-colors ${
-            chapter.id === activeId
-              ? "bg-accent text-accent-foreground"
-              : "text-foreground hover:bg-muted"
+            batchMode && picked
+              ? "bg-primary/10 text-primary"
+              : chapter.id === activeId && !batchMode
+                ? "bg-accent text-accent-foreground"
+                : "text-foreground hover:bg-muted"
           }`}
         >
-          <FileText
-            className={`h-3.5 w-3.5 shrink-0 ${
-              chapter.id === activeId ? "text-primary" : "text-muted-foreground/50"
-            }`}
-          />
+          {batchMode ? (
+            <span
+              className={`flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded border ${
+                picked ? "border-primary bg-primary text-primary-foreground" : "border-muted-foreground/40"
+              }`}
+            >
+              {picked && <Check className="h-2.5 w-2.5" />}
+            </span>
+          ) : (
+            <FileText
+              className={`h-3.5 w-3.5 shrink-0 ${
+                chapter.id === activeId ? "text-primary" : "text-muted-foreground/50"
+              }`}
+            />
+          )}
           <span
             aria-label={`状态：${chapter.status}`}
             className={`inline-block h-1.5 w-1.5 shrink-0 rounded-full ${
@@ -979,6 +1032,7 @@ export default function Editor() {
               chapter.word_count > 0 ? chapter.word_count : ""
             )}
           </span>
+          {!batchMode && (
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <span
@@ -1037,6 +1091,7 @@ export default function Editor() {
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
+          )}
         </button>
       </li>
     );
@@ -1291,6 +1346,18 @@ export default function Editor() {
                 variant="ghost"
                 size="icon"
                 className="h-7 w-7"
+                title="多选批量操作（删除/移卷/改状态）"
+                onClick={() => {
+                  setBatchMode((v) => !v);
+                  setBatchPicked(new Set());
+                }}
+              >
+                <CheckSquare className={`h-4 w-4 ${batchMode ? "text-primary" : ""}`} />
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-7 w-7"
                 title="新建章节"
                 onClick={() => {
                   setChDialog({ volumeId: activeChapter?.volume_id ?? volumes[0]?.id ?? null });
@@ -1349,8 +1416,82 @@ export default function Editor() {
               </div>
             )}
           </ScrollArea>
-          {/* 当前章节元信息：紧贴切换器下方，受控编辑 status / tags */}
-          {activeChapter && (
+          {/* B3 多选操作栏：多选模式时替代章节元信息区 */}
+          {batchMode ? (
+            <div className="border-t border-border bg-card px-2.5 py-2">
+              <div className="mb-1.5 flex items-center justify-between text-[11px] text-muted-foreground">
+                <span>
+                  已选 <span className="font-medium text-primary">{batchPicked.size}</span> 章
+                </span>
+                <button
+                  className="text-primary hover:underline"
+                  onClick={() =>
+                    setBatchPicked(
+                      batchPicked.size === chapters.length ? new Set() : new Set(chapters.map((c) => c.id))
+                    )
+                  }
+                >
+                  {batchPicked.size === chapters.length ? "清空" : "全选"}
+                </button>
+              </div>
+              <div className="flex flex-wrap items-center gap-1">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-6 px-2 text-[11px]"
+                  disabled={batchPicked.size === 0}
+                  onClick={() => void runBatch("delete")}
+                >
+                  <Trash2 className="mr-1 h-3 w-3" />
+                  删除
+                </Button>
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <Button variant="outline" size="sm" className="h-6 px-2 text-[11px]" disabled={batchPicked.size === 0}>
+                      <FolderInput className="mr-1 h-3 w-3" />
+                      移到卷
+                    </Button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="start">
+                    {volumes.map((v) => (
+                      <DropdownMenuItem key={v.id} onClick={() => void runBatch("move", { volume_id: v.id })}>
+                        {v.title}
+                      </DropdownMenuItem>
+                    ))}
+                    {volumes.length > 0 && <DropdownMenuSeparator />}
+                    <DropdownMenuItem onClick={() => void runBatch("move", { volume_id: null })}>
+                      未分卷
+                    </DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <Button variant="outline" size="sm" className="h-6 px-2 text-[11px]" disabled={batchPicked.size === 0}>
+                      改状态
+                    </Button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="start">
+                    <DropdownMenuItem onClick={() => void runBatch("status", { status: "draft" })}>草稿</DropdownMenuItem>
+                    <DropdownMenuItem onClick={() => void runBatch("status", { status: "writing" })}>写作中</DropdownMenuItem>
+                    <DropdownMenuItem onClick={() => void runBatch("status", { status: "done" })}>已完成</DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="ml-auto h-6 px-2 text-[11px]"
+                  onClick={() => {
+                    setBatchMode(false);
+                    setBatchPicked(new Set());
+                  }}
+                >
+                  退出多选
+                </Button>
+              </div>
+            </div>
+          ) : (
+          /* 当前章节元信息：紧贴切换器下方，受控编辑 status / tags */
+          activeChapter && (
             <div className="border-t border-border bg-card px-2.5 py-2">
               <div className="mb-1.5 truncate text-[11px] font-medium text-muted-foreground">
                 {activeChapter.display_title}
@@ -1362,6 +1503,7 @@ export default function Editor() {
                 onTagsChange={(t) => void changeChapterTags(activeChapter.id, t)}
               />
             </div>
+          )
           )}
         </aside>
 

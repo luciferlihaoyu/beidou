@@ -8,7 +8,7 @@ import json
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import get_db
@@ -279,12 +279,8 @@ async def update_chapter(
     return _out(chapter, number)
 
 
-@router.delete("/{chapter_id}")
-async def delete_chapter(
-    chapter_id: int, novel: Novel = Depends(get_owned_novel), db: AsyncSession = Depends(get_db)
-):
-    chapter = await _get_chapter(novel, chapter_id, db)
-    # P4-2 废纸篓：先存档再删
+async def _delete_one_chapter(db: AsyncSession, novel: Novel, chapter: Chapter) -> None:
+    """删除单章的完整流程：废纸篓归档 → FTS 清理 → 删行（供单个/批量删除复用）。"""
     try:
         from ..routers.recycle import archive_to_recycle
 
@@ -310,12 +306,80 @@ async def delete_chapter(
     try:
         from ..search_fts import remove_chapter
 
-        await remove_chapter(db, chapter_id)
+        await remove_chapter(db, chapter.id)
     except Exception:  # noqa: BLE001
         pass
     await db.delete(chapter)
+
+
+@router.delete("/{chapter_id}")
+async def delete_chapter(
+    chapter_id: int, novel: Novel = Depends(get_owned_novel), db: AsyncSession = Depends(get_db)
+):
+    chapter = await _get_chapter(novel, chapter_id, db)
+    await _delete_one_chapter(db, novel, chapter)
     await db.commit()
     return {"ok": True}
+
+
+# ---------- B3 章节批量操作 ----------
+
+
+class BatchIn(BaseModel):
+    action: str = Field(pattern=r"^(delete|move|status)$")
+    chapter_ids: list[int] = Field(min_length=1, max_length=200)
+    volume_id: int | None = None  # action=move：目标卷（None=未分卷）
+    status: str | None = Field(default=None, pattern=r"^(draft|writing|done)$")
+
+
+@router.post("/batch")
+async def batch_chapters(
+    data: BatchIn, novel: Novel = Depends(get_owned_novel), db: AsyncSession = Depends(get_db)
+):
+    """批量删除 / 移动到卷 / 改状态。删除走与单删一致的废纸篓归档。"""
+    chapters = (
+        await db.execute(
+            select(Chapter).where(Chapter.novel_id == novel.id, Chapter.id.in_(data.chapter_ids))
+        )
+    ).scalars().all()
+    if len(chapters) != len(set(data.chapter_ids)):
+        raise HTTPException(400, "部分章节不存在")
+
+    if data.action == "delete":
+        for c in chapters:
+            await _delete_one_chapter(db, novel, c)
+    elif data.action == "move":
+        if data.volume_id is not None:
+            volume = await db.get(Volume, data.volume_id)
+            if volume is None or volume.novel_id != novel.id:
+                raise HTTPException(400, "目标卷不存在")
+            max_sort = (
+                await db.execute(
+                    select(func.max(Chapter.sort_order)).where(
+                        Chapter.novel_id == novel.id, Chapter.volume_id == data.volume_id
+                    )
+                )
+            ).scalar_one()
+            base = (max_sort or 0) + 1
+        else:
+            max_sort = (
+                await db.execute(
+                    select(func.max(Chapter.sort_order)).where(
+                        Chapter.novel_id == novel.id, Chapter.volume_id.is_(None)
+                    )
+                )
+            ).scalar_one()
+            base = (max_sort or 0) + 1
+        # 按当前 sort_order 顺序追加到目标卷末尾
+        for i, c in enumerate(sorted(chapters, key=lambda x: x.sort_order)):
+            c.volume_id = data.volume_id
+            c.sort_order = base + i
+    else:  # status
+        assert data.status is not None
+        for c in chapters:
+            c.status = data.status
+    await db.commit()
+    return {"ok": True, "affected": len(chapters)}
 
 
 async def _get_novel_owner(db: AsyncSession, novel_id: int) -> "User":
