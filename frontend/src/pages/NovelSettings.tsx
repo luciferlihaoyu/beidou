@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useState } from "react";
 import { useParams } from "react-router";
-import { GitBranch, Landmark, MoreHorizontal, PenLine, Plus, Trash2, Users } from "lucide-react";
+import { GitBranch, Landmark, MoreHorizontal, PenLine, Plus, Share2, Trash2, Users } from "lucide-react";
 import { toast } from "sonner";
 import AppShell from "@/components/AppShell";
+import RelationGraph from "@/components/RelationGraph";
 import {
   api,
   type Character,
@@ -529,6 +530,10 @@ export default function NovelSettings() {
                 <Users className="mr-1.5 h-3.5 w-3.5" />
                 角色
               </TabsTrigger>
+              <TabsTrigger value="relations">
+                <Share2 className="mr-1.5 h-3.5 w-3.5" />
+                关系图
+              </TabsTrigger>
               <TabsTrigger value="worldview">
                 <Landmark className="mr-1.5 h-3.5 w-3.5" />
                 世界观
@@ -540,6 +545,7 @@ export default function NovelSettings() {
             </TabsList>
             <TabsContent value="outline"><OutlineTab novelId={novelId} /></TabsContent>
             <TabsContent value="characters"><CharactersTab novelId={novelId} /></TabsContent>
+            <TabsContent value="relations"><RelationGraph novelId={novelId} /></TabsContent>
             <TabsContent value="worldview"><WorldviewTab novelId={novelId} /></TabsContent>
             <TabsContent value="foreshadowing"><ForeshadowingTab novelId={novelId} /></TabsContent>
           </Tabs>

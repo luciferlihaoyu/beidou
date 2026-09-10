@@ -196,6 +196,18 @@ export interface Character {
   relations: string;
 }
 
+/** 人物关系（C 级：人物关系图）。from_name/to_name 为后端联表带出的角色名 */
+export interface CharacterRelation {
+  id: number;
+  from_character_id: number;
+  to_character_id: number;
+  from_name: string;
+  to_name: string;
+  relation: string;
+  description: string;
+  source: string; // manual / ai
+}
+
 export interface WorldviewEntry {
   id: number;
   category: string;
@@ -347,3 +359,74 @@ export function updateChapter(
 ): Promise<Chapter> {
   return api.put<Chapter>(`/api/novels/${novelId}/chapters/${chapterId}`, data);
 }
+
+// ---------- AI 工厂（M1） ----------
+
+export interface AiBookSpec {
+  titles?: string[];
+  genre?: string;
+  time?: string;
+  place?: string;
+  theme?: string;
+  tone?: string;
+  pov?: string;
+  characters?: { name: string; role: string; brief: string }[];
+  premise?: string;
+}
+
+export interface AiOutlineChapter {
+  title: string;
+  outline: string;
+}
+
+export interface AiOutlineVolume {
+  title: string;
+  summary: string;
+  chapters: AiOutlineChapter[];
+}
+
+export interface AiProject {
+  id: number;
+  novel_id: number | null;
+  novel_title: string | null;
+  status: string; // draft|setup|outline|writing|reviewing|done|failed
+  seed_prompt: string;
+  book_spec: AiBookSpec | null;
+  genre: string;
+  style_notes: string;
+  target_total_words: number | null;
+  target_volume_words: number | null;
+  target_chapter_words: number | null;
+  target_volumes: number | null;
+  target_chapters: number | null;
+  outline: { volumes?: AiOutlineVolume[] } | null;
+  global_summary: string;
+  auto_mode: boolean;
+  chapter_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AiProjectCreate {
+  seed_prompt: string;
+  genre?: string;
+  style_notes?: string;
+  target_total_words?: number | null;
+  target_volumes?: number | null;
+  target_chapters?: number | null;
+  target_volume_words?: number | null;
+  target_chapter_words?: number | null;
+}
+
+export const aiFactoryApi = {
+  list: () => api.get<AiProject[]>("/api/ai-factory/projects"),
+  get: (id: number) => api.get<AiProject>(`/api/ai-factory/projects/${id}`),
+  create: (data: AiProjectCreate) => api.post<AiProject>("/api/ai-factory/projects", data),
+  remove: (id: number, deleteNovel = false) =>
+    api.delete<{ ok: boolean }>(`/api/ai-factory/projects/${id}${deleteNovel ? "?delete_novel=true" : ""}`),
+  init: (id: number) => api.post<AiProject>(`/api/ai-factory/projects/${id}/init`),
+  confirmBookSpec: (id: number, title: string, bookSpec: AiBookSpec) =>
+    api.put<AiProject>(`/api/ai-factory/projects/${id}/book-spec`, { title, book_spec: bookSpec }),
+  setup: (id: number) => api.post<AiProject>(`/api/ai-factory/projects/${id}/setup`),
+  outline: (id: number) => api.post<AiProject>(`/api/ai-factory/projects/${id}/outline`),
+};

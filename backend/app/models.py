@@ -294,3 +294,98 @@ class ChapterSnapshot(Base):
     label: Mapped[str] = mapped_column(String(100), default="")  # manual 存稿点名
     trigger: Mapped[str] = mapped_column(String(16))  # auto / manual / pre_rollback
     created_at: Mapped[datetime] = mapped_column(default=utcnow, index=True)
+
+
+class AiProject(Base):
+    """AI 工厂项目：从立项到正文的自动化写作流水线（与人工写作并行的第二体系）。
+
+    状态机：draft → setup → outline → writing → reviewing → done（failed 可回退）
+    生成物落到关联的 Novel（标题带 [AI] 前缀），章节进现有 chapters 表。
+
+    长程一致性 = 状态文件四分（AI_NovelGenerator 实证）：
+    global_summary（滚动摘要）/ character_state（角色状态表 JSON）/
+    plot_arcs（伏笔台账 JSON）/ 另加 FTS 向量召回——每章定稿后 AI 增量更新前三件。
+    """
+
+    __tablename__ = "ai_projects"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    novel_id: Mapped[int | None] = mapped_column(
+        ForeignKey("novels.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    status: Mapped[str] = mapped_column(String(20), default="draft")
+    seed_prompt: Mapped[str] = mapped_column(Text)  # 用户一句话创意
+    book_spec_json: Mapped[str] = mapped_column(Text, default="")  # 立项八字段 JSON
+    genre: Mapped[str] = mapped_column(String(50), default="")
+    style_notes: Mapped[str] = mapped_column(Text, default="")
+    # 字数目标（全部可选，软约束：prompt 注入 + 进度展示，绝不硬截断）
+    target_total_words: Mapped[int | None] = mapped_column(nullable=True)
+    target_volume_words: Mapped[int | None] = mapped_column(nullable=True)
+    target_chapter_words: Mapped[int | None] = mapped_column(nullable=True)
+    target_volumes: Mapped[int | None] = mapped_column(nullable=True)
+    target_chapters: Mapped[int | None] = mapped_column(nullable=True)
+    outline_json: Mapped[str] = mapped_column(Text, default="")  # AI 大纲快照
+    # 状态文件四分
+    global_summary: Mapped[str] = mapped_column(Text, default="")
+    character_state: Mapped[str] = mapped_column(Text, default="")  # JSON
+    plot_arcs: Mapped[str] = mapped_column(Text, default="")  # JSON
+    # 多模型任务路由（None = 用默认 AIConfig；格式为 AIConfig.id 的字符串）
+    setup_llm: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    outline_llm: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    chapter_llm: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    summary_llm: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    review_llm: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    # 上下文控制
+    context_recent_chapters: Mapped[int] = mapped_column(default=2)
+    context_extra_chapters: Mapped[str] = mapped_column(Text, default="[]")  # chapter id JSON
+    auto_mode: Mapped[bool] = mapped_column(default=False)  # 全自动（默认关，每章人工确认）
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(default=utcnow, onupdate=utcnow)
+
+
+class AiChapterJob(Base):
+    """AI 工厂单章任务：生成/审校/定稿的状态与产物快照。"""
+
+    __tablename__ = "ai_chapter_jobs"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    project_id: Mapped[int] = mapped_column(
+        ForeignKey("ai_projects.id", ondelete="CASCADE"), index=True
+    )
+    chapter_id: Mapped[int | None] = mapped_column(
+        ForeignKey("chapters.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    status: Mapped[str] = mapped_column(String(20), default="pending")
+    # pending|writing|reviewing|needs_fix|done|failed
+    outline: Mapped[str] = mapped_column(Text, default="")  # 本章大纲快照
+    summary: Mapped[str] = mapped_column(Text, default="")  # 本章 200 字摘要（汇入滚动摘要）
+    review_issues: Mapped[str] = mapped_column(Text, default="")  # 审校 issues JSON
+    actual_words: Mapped[int] = mapped_column(default=0)
+    attempt: Mapped[int] = mapped_column(default=0)
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)
+    finished_at: Mapped[datetime | None] = mapped_column(nullable=True)
+
+
+class CharacterRelation(Base):
+    """人物关系（C 级：人物关系图）。
+
+    - 一条记录表示 from_character → to_character 的一条有向关系
+    - relation：关系名（如"师徒"/"仇敌"/"兄妹"）；description：补充说明
+    - source：manual（手动添加） / ai（AI 从正文+角色卡抽取）
+    """
+
+    __tablename__ = "character_relations"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    novel_id: Mapped[int] = mapped_column(ForeignKey("novels.id", ondelete="CASCADE"), index=True)
+    from_character_id: Mapped[int] = mapped_column(
+        ForeignKey("characters.id", ondelete="CASCADE"), index=True
+    )
+    to_character_id: Mapped[int] = mapped_column(
+        ForeignKey("characters.id", ondelete="CASCADE"), index=True
+    )
+    relation: Mapped[str] = mapped_column(String(50))
+    description: Mapped[str] = mapped_column(String(300), default="")
+    source: Mapped[str] = mapped_column(String(10), default="manual")  # manual / ai
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)
