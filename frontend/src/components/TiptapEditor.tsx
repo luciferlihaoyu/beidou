@@ -5,7 +5,7 @@ import { Placeholder } from "@tiptap/extension-placeholder";
 import { CharacterCount } from "@tiptap/extension-character-count";
 import { Reference } from "@/extensions/Reference";
 import AIBubbleMenu from "@/components/editor/AIBubbleMenu";
-import { type EditorTheme, buildImageBackground, buildLineBackground, DEFAULT_THEME } from "@/lib/editorTheme";
+import { type EditorTheme, buildImageBackground, buildLineBackground, DEFAULT_THEME, textColorForBg } from "@/lib/editorTheme";
 
 /** 章内标题大纲条目：pos 为文档绝对位置，供跳转与缩进展示 */
 export interface OutlineItem {
@@ -196,6 +196,8 @@ export default function TiptapEditor({
     backgroundImage: lineBg === "none" ? undefined : lineBg,
     backgroundAttachment: "local",
     position: "relative",
+    // A3：按背景亮度自动选正文颜色，避免「暗色模式 + 亮主题背景 = 浅字白底」
+    color: textColorForBg(theme.bgColor),
     ...(typewriter ? { paddingBottom: "50vh" } : {}),
   };
 

@@ -1,15 +1,18 @@
 import { Link, useNavigate } from "react-router";
-import { ChevronLeft, Library, LibraryBig, LogOut, Settings2 } from "lucide-react";
+import { Check, ChevronLeft, Library, LibraryBig, LogOut, Monitor, Moon, Settings2, Sun } from "lucide-react";
+import { useState } from "react";
 import BeidouMark from "@/components/BeidouMark";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuLabel,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { useAuth } from "@/store/auth";
+import { loadThemeMode, setThemeMode, type ThemeMode } from "@/lib/themeMode";
 
 /** 紧凑 48px 顶栏 + 全屏主舞台 */
 export default function AppShell({
@@ -27,6 +30,12 @@ export default function AppShell({
 }) {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
+  // A3 亮暗主题（light/dark/system）
+  const [mode, setMode] = useState<ThemeMode>(() => loadThemeMode());
+  const applyMode = (m: ThemeMode) => {
+    setMode(m);
+    setThemeMode(m);
+  };
 
   return (
     <div className="flex h-screen flex-col bg-background">
@@ -67,6 +76,25 @@ export default function AppShell({
             <DropdownMenuItem onClick={() => navigate("/account")}>
               <Settings2 className="mr-2 h-4 w-4" />
               账号设置
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <DropdownMenuLabel className="px-2 py-1 text-[10px] font-normal text-muted-foreground">
+              外观
+            </DropdownMenuLabel>
+            <DropdownMenuItem onClick={() => applyMode("light")}>
+              <Sun className="mr-2 h-4 w-4" />
+              亮色
+              <Check className={`ml-auto h-3.5 w-3.5 ${mode === "light" ? "" : "opacity-0"}`} />
+            </DropdownMenuItem>
+            <DropdownMenuItem onClick={() => applyMode("dark")}>
+              <Moon className="mr-2 h-4 w-4" />
+              暗色
+              <Check className={`ml-auto h-3.5 w-3.5 ${mode === "dark" ? "" : "opacity-0"}`} />
+            </DropdownMenuItem>
+            <DropdownMenuItem onClick={() => applyMode("system")}>
+              <Monitor className="mr-2 h-4 w-4" />
+              跟随系统
+              <Check className={`ml-auto h-3.5 w-3.5 ${mode === "system" ? "" : "opacity-0"}`} />
             </DropdownMenuItem>
             <DropdownMenuSeparator />
             <DropdownMenuItem

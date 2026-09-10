@@ -35,6 +35,37 @@
     --sidebar-border: 0 0% 91%;
     --sidebar-ring: 223 100% 50%;
   }
+
+  /* A3 暗色模式：电光蓝调亮，纸面底改深蓝黑 */
+  .dark {
+    --background: 224 20% 8%;
+    --foreground: 220 15% 92%;
+    --card: 224 18% 11%;
+    --card-foreground: 220 15% 92%;
+    --popover: 224 18% 11%;
+    --popover-foreground: 220 15% 92%;
+    --primary: 223 100% 62%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 223 20% 18%;
+    --secondary-foreground: 223 30% 85%;
+    --muted: 223 15% 16%;
+    --muted-foreground: 222 10% 62%;
+    --accent: 223 40% 22%;
+    --accent-foreground: 223 100% 75%;
+    --destructive: 350 72% 55%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 223 15% 20%;
+    --input: 223 15% 24%;
+    --ring: 223 100% 62%;
+    --sidebar-background: 224 18% 10%;
+    --sidebar-foreground: 220 15% 92%;
+    --sidebar-primary: 223 100% 62%;
+    --sidebar-primary-foreground: 0 0% 100%;
+    --sidebar-accent: 223 20% 18%;
+    --sidebar-accent-foreground: 223 30% 85%;
+    --sidebar-border: 223 15% 18%;
+    --sidebar-ring: 223 100% 62%;
+  }
 }
 
 @layer base {
@@ -69,7 +100,9 @@
   /* 字号 / 行距走 CSS 变量，供写作排版偏好注入（回退值与原硬编码一致） */
   font-size: var(--bd-font-size, 1.0625rem);
   line-height: var(--bd-line-height, 2.05);
-  color: hsl(220 9% 15.3%);
+  /* A3：颜色继承容器（TiptapEditor 按主题背景亮度注入 textColorForBg），
+     避免暗色模式/夜读主题下「亮底浅字」不可读 */
+  color: inherit;
   outline: none;
   min-height: 100%;
 }

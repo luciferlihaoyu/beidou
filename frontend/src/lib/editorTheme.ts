@@ -123,3 +123,17 @@ export const FIT_LABELS: Record<BgImageFit, string> = {
   contain: "完整",
   tile: "平铺",
 };
+
+/** 由背景色亮度推导正文文字颜色（A3：暗色模式下避免「亮背景+浅字」不可读）。
+ * 亮背景 → 深灰字；暗背景 → 浅灰字。YIQ 亮度公式粗判。
+ */
+export function textColorForBg(bgHex: string): string {
+  const m = /^#?([0-9a-f]{6})$/i.exec(bgHex.trim());
+  if (!m) return "inherit";
+  const n = parseInt(m[1], 16);
+  const r = (n >> 16) & 0xff;
+  const g = (n >> 8) & 0xff;
+  const b = n & 0xff;
+  const yiq = (r * 299 + g * 587 + b * 114) / 1000;
+  return yiq >= 140 ? "#24272a" : "#e8eaed";
+}
