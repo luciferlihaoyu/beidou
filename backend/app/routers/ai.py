@@ -61,6 +61,34 @@ async def list_configs(user: User = Depends(get_current_user), db: AsyncSession 
     return [_to_out(c) for c in result.scalars().all()]
 
 
+@router.get("/configs/{config_id}/models")
+async def list_config_models(config_id: int, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    """从配置指向的端点拉模型清单（天枢/DeepSeek/任意 OpenAI 兼容端点的 GET /models）。
+
+    用于 AI 工厂五路路由的手动模型切换。端点不可达时返回空列表而非报错，
+    前端据此降级为「只能手填模型名」。
+    """
+    config = await db.get(AIConfig, config_id)
+    if config is None or config.user_id != user.id:
+        raise HTTPException(404, "配置不存在")
+    if not config.api_key:
+        raise HTTPException(400, "该配置还没有填写 API Key")
+    url = _normalize_base(config.base_url) + "/models"
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(20.0, connect=8.0)) as client:
+            resp = await client.get(url, headers={"Authorization": f"Bearer {config.api_key}"})
+    except httpx.HTTPError:
+        return {"models": []}
+    if resp.status_code != 200:
+        return {"models": []}
+    try:
+        data = resp.json()
+        models = sorted({m["id"] for m in data.get("data", []) if isinstance(m, dict) and m.get("id")})
+        return {"models": models}
+    except (ValueError, AttributeError):
+        return {"models": []}
+
+
 @router.post("/configs", response_model=AIConfigOut)
 async def create_config(data: AIConfigIn, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     if data.is_default:

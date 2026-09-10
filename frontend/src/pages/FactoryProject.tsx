@@ -12,6 +12,7 @@ import {
   Bot,
   Check,
   ChevronRight,
+  Cpu,
   Loader2,
   RefreshCw,
   Sparkles,
@@ -19,6 +20,7 @@ import {
 import { toast } from "sonner";
 import AppShell from "@/components/AppShell";
 import ChapterGenPanel from "@/components/ChapterGenPanel";
+import ModelRouteDialog from "@/components/ModelRouteDialog";
 import { aiFactoryApi, type AiBookSpec, type AiProject } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -42,6 +44,7 @@ export default function FactoryProject() {
   const navigate = useNavigate();
   const [project, setProject] = useState<AiProject | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  const [routeOpen, setRouteOpen] = useState(false);
   // 立项编辑态
   const [spec, setSpec] = useState<AiBookSpec | null>(null);
   const [title, setTitle] = useState("");
@@ -113,12 +116,18 @@ export default function FactoryProject() {
         </span>
       }
       actions={
-        project.novel_id ? (
-          <Button variant="outline" size="sm" className="h-8" onClick={() => navigate(`/novel/${project.novel_id}`)}>
-            <BookOpen className="mr-1 h-4 w-4" />
-            打开书稿
+        <div className="flex items-center gap-2">
+          <Button variant="outline" size="sm" className="h-8" onClick={() => setRouteOpen(true)}>
+            <Cpu className="mr-1 h-4 w-4" />
+            模型路由
           </Button>
-        ) : undefined
+          {project.novel_id && (
+            <Button variant="outline" size="sm" className="h-8" onClick={() => navigate(`/novel/${project.novel_id}`)}>
+              <BookOpen className="mr-1 h-4 w-4" />
+              打开书稿
+            </Button>
+          )}
+        </div>
       }
     >
       <div className="mx-auto w-full max-w-3xl p-6">
@@ -329,6 +338,13 @@ export default function FactoryProject() {
           </Button>
         </div>
       </div>
+
+      <ModelRouteDialog
+        project={project}
+        open={routeOpen}
+        onOpenChange={setRouteOpen}
+        onSaved={setProject}
+      />
     </AppShell>
   );
 }

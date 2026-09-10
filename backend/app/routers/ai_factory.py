@@ -41,15 +41,35 @@ def _normalize_base(base_url: str) -> str:
 
 
 async def _pick_config(user: User, db: AsyncSession, route_field: str | None) -> AIConfig:
-    """按任务路由取模型配置：route_field 存 AIConfig.id 字符串，None → 默认配置。"""
+    """按任务路由取模型配置。
+
+    route_field 格式：
+    - None / ""        → 默认配置
+    - "3"              → AIConfig id=3（用配置的默认模型）
+    - "3@deepseek-v4"  → AIConfig id=3 但模型覆盖为 deepseek-v4
+      （模型名来自 GET /api/ai/configs/{id}/models 拉到的端点清单）
+
+    注意：覆盖模型时必须构造游离 AIConfig 副本——直接改 db.get 出来的托管
+    实例会被后续 db.commit() 写回数据库（脏数据事故）。
+    """
     if route_field:
+        cfg_id_str, _, model_override = route_field.partition("@")
         try:
-            cfg_id = int(route_field)
+            cfg_id = int(cfg_id_str)
         except ValueError:
             cfg_id = None
         if cfg_id is not None:
             config = await db.get(AIConfig, cfg_id)
             if config is not None and config.user_id == user.id and config.api_key:
+                if model_override:
+                    return AIConfig(
+                        user_id=config.user_id,
+                        name=config.name,
+                        base_url=config.base_url,
+                        api_key=config.api_key,
+                        model=model_override[:100],
+                        is_default=False,
+                    )
                 return config
     return await get_ai_config(user, db)
 

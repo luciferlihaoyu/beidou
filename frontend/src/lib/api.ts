@@ -402,6 +402,11 @@ export interface AiProject {
   outline: { volumes?: AiOutlineVolume[] } | null;
   global_summary: string;
   auto_mode: boolean;
+  setup_llm: string | null;
+  outline_llm: string | null;
+  chapter_llm: string | null;
+  summary_llm: string | null;
+  review_llm: string | null;
   author_intent: string;
   current_focus: string;
   particle_ledger: string;
@@ -548,4 +553,12 @@ export const aiFactoryM3 = {
     api.get<RetentionDashboard>(`/api/ai-factory/projects/${projectId}/retention`),
   batchRun: (projectId: number, count: number, onEvent: (ev: BatchEvent) => void, signal?: AbortSignal) =>
     streamPostEvents(`/api/ai-factory/projects/${projectId}/batch-run?count=${count}`, {}, onEvent, signal),
+};
+
+// ---------- AI 配置模型清单（供 AI 工厂路由手动切换） ----------
+export const aiConfigApi = {
+  list: () => api.get<AIConfig[]>("/api/ai/configs"),
+  /** 从配置指向的端点（天枢等 OpenAI 兼容端点）拉 /models 清单 */
+  models: (configId: number) =>
+    api.get<{ models: string[] }>(`/api/ai/configs/${configId}/models`),
 };
