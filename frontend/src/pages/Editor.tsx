@@ -47,6 +47,7 @@ import GoalsBadges from "@/components/GoalsBadges";
 import FullTextSearch from "@/components/FullTextSearch";
 import EditorThemeSettings from "@/components/EditorThemeSettings";
 import ExportDialog from "@/components/ExportDialog";
+import PolishDialog from "@/components/PolishDialog";
 import QualityRadar from "@/components/QualityRadar";
 import RecycleBinView, { type RestoredPayload } from "@/components/RecycleBin";
 import { type EditorTheme, loadTheme } from "@/lib/editorTheme";
@@ -58,6 +59,7 @@ import { ReferenceDataProvider, type ReferenceData } from "@/contexts/ReferenceD
 import {
   api,
   listChapters,
+  streamPost,
   updateChapter,
   type AIConfig,
   type Character,
@@ -447,6 +449,10 @@ export default function Editor() {
   // B1 品质雷达
   const [qualityOpen, setQualityOpen] = useState(false);
   const [qualityText, setQualityText] = useState("");
+
+  // B5 AI 润色（单章 dialog / 批量串行）
+  const [polishChapter, setPolishChapter] = useState<Chapter | null>(null);
+  const [batchPolishing, setBatchPolishing] = useState(false);
   function toggleBatchPick(id: number) {
     setBatchPicked((prev) => {
       const next = new Set(prev);
@@ -476,6 +482,63 @@ export default function Editor() {
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "批量操作失败");
     }
+  }
+
+  // B5 批量润色：逐章串行流式生成 + 自动写回（原文走服务端 auto 快照兜底）
+  async function runBatchPolish() {
+    if (batchPicked.size === 0 || batchPolishing) return;
+    const targets = chapters.filter((c) => batchPicked.has(c.id) && c.word_count >= 20);
+    if (targets.length === 0) {
+      toast.error("选中章节都太短，无需润色");
+      return;
+    }
+    if (
+      !window.confirm(
+        `将对 ${targets.length} 章逐章 AI 润色并直接替换正文（每章原文自动快照可恢复）。\n` +
+          `约消耗 ${Math.round((targets.reduce((s, c) => s + c.word_count, 0) * 2) / 1000)}k tokens，确定继续？`
+      )
+    )
+      return;
+    setBatchPolishing(true);
+    let done = 0;
+    let failed = 0;
+    for (const c of targets) {
+      try {
+        let output = "";
+        await streamPost("/api/ai/action/polish", { novel_id: novelId, chapter_id: c.id }, (chunk) => {
+          output += chunk;
+        });
+        if (!output.trim()) throw new Error("空输出");
+        const html = output
+          .split(/\n{2,}/)
+          .map((p) => p.trim())
+          .filter(Boolean)
+          .map((p) => `<p>${p.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/\n/g, "<br>")}</p>`)
+          .join("");
+        await api.put(`/api/novels/${novelId}/chapters/${c.id}`, { content: html });
+        done++;
+        toast.success(`润色 ${done}/${targets.length}：${c.display_title}`);
+      } catch {
+        failed++;
+        toast.error(`润色失败：${c.display_title}`);
+      }
+    }
+    setBatchPolishing(false);
+    setBatchPicked(new Set());
+    setBatchMode(false);
+    await loadChapters();
+    // 当前章被润色过则刷新编辑器内容
+    if (activeId !== null && targets.some((c) => c.id === activeId)) {
+      const fresh = await api.get<Chapter>(`/api/novels/${novelId}/chapters/${activeId}`);
+      setActiveContent(fresh.content ?? null);
+    }
+    toast.success(`批量润色完成：成功 ${done}，失败 ${failed}`);
+  }
+
+  // B5 单章润色应用后：刷新列表 + 当前章内容
+  async function handlePolishApplied(chapterId: number, newHtml: string) {
+    await loadChapters();
+    if (chapterId === activeId) setActiveContent(newHtml);
   }
 
   // 块引用数据：人物 / 设定 / 伏笔，供编辑器 chip 浮卡预览
@@ -1061,6 +1124,10 @@ export default function Editor() {
                 <PenLine className="mr-2 h-4 w-4" />
                 重命名
               </DropdownMenuItem>
+              <DropdownMenuItem onClick={() => setPolishChapter(chapter)}>
+                <Sparkles className="mr-2 h-4 w-4" />
+                AI 润色本章
+              </DropdownMenuItem>
               <DropdownMenuItem disabled={index === 0} onClick={() => moveChapter(chapter, -1)}>
                 <ArrowUp className="mr-2 h-4 w-4" />
                 上移
@@ -1485,6 +1552,20 @@ export default function Editor() {
                     <DropdownMenuItem onClick={() => void runBatch("status", { status: "done" })}>已完成</DropdownMenuItem>
                   </DropdownMenuContent>
                 </DropdownMenu>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-6 px-2 text-[11px]"
+                  disabled={batchPicked.size === 0 || batchPolishing}
+                  onClick={() => void runBatchPolish()}
+                >
+                  {batchPolishing ? (
+                    <Loader2 className="mr-1 h-3 w-3 animate-spin" />
+                  ) : (
+                    <Sparkles className="mr-1 h-3 w-3" />
+                  )}
+                  {batchPolishing ? "润色中…" : "AI 润色"}
+                </Button>
                 <Button
                   variant="ghost"
                   size="sm"
@@ -1915,6 +1996,15 @@ export default function Editor() {
           onOpenChange={setQualityOpen}
           text={qualityText}
           chapterTitle={activeChapter?.display_title ?? ""}
+        />
+
+        {/* B5 AI 单章润色 */}
+        <PolishDialog
+          open={polishChapter !== null}
+          onOpenChange={(v) => !v && setPolishChapter(null)}
+          novelId={novelId}
+          chapter={polishChapter}
+          onApplied={(id, html) => void handlePolishApplied(id, html)}
         />
 
         {/* 废纸篓（P4-2） */}

@@ -393,6 +393,8 @@ ACTION_PROMPTS = {
     "continue": "请基于以上设定与当前章节内容，直接续写约 800 字的正文。只输出正文，不要解释。",
     "outline": "请基于以上设定，为后续剧情设计 5 个章节的大纲建议，每章一行，格式「章节名：剧情要点」。",
     "review": "请审查当前章节内容，指出其中可能存在的逻辑矛盾、设定冲突或与未回收伏笔的脱节，按条列出并给出修改建议。",
+    # B5 整章润色：输出改写全文（前端流式接收后可一键替换，原文走快照兜底）
+    "polish": "请润色以上章节全文：优化语句流畅度、修正标点与明显语病、增强画面感，但严格保持情节走向、人物对话含义与段落顺序不变，不要增删情节。直接输出润色后的完整正文（纯文本，段落之间空一行），不要输出标题、解释或任何额外内容。",
 }
 
 
@@ -404,7 +406,24 @@ async def quick_action(
         raise HTTPException(404, "不支持的操作")
     novel = await get_owned_novel(data.novel_id, user, db)
     config = await get_ai_config(user, db, data.config_id)
-    context = await _novel_context(novel, db, data.chapter_id)
+    # B5 润色：注入章节全文（而非 _novel_context 的末尾 3000 字节选）
+    if action == "polish":
+        if not data.chapter_id:
+            raise HTTPException(400, "润色需要指定章节")
+        chapter = await db.get(Chapter, data.chapter_id)
+        if chapter is None or chapter.novel_id != novel.id:
+            raise HTTPException(404, "章节不存在")
+        full_text = strip_html(chapter.content).strip()
+        if len(full_text) < 20:
+            raise HTTPException(400, "章节内容太短，无需润色")
+        if len(full_text) > 15000:
+            raise HTTPException(400, "章节超 15000 字，请分段润色（BubbleMenu 选中段落用 AI 改写）")
+        context = (
+            f"作品：《{novel.title}》\n\n"
+            f"待润色章节《{chapter.title or '未命名'}》全文：\n{full_text}"
+        )
+    else:
+        context = await _novel_context(novel, db, data.chapter_id)
     prompt = ACTION_PROMPTS[action]
     # 续写：用户可指定字数（短 200 / 中 500 / 长 1500）
     if action == "continue" and data.target_words:
