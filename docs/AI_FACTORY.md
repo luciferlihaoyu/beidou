@@ -315,3 +315,76 @@ M1-M4 合计约 **9-13 天**。
 | 成本失控（30 章 × 多阶段调用） | 项目级预算字段（v2）；v1 先在 UI 显示累计 token 消耗 |
 | 生成质量不可控 | 人工断点：每章必须 approve 才推进（可关，设置里加"全自动模式"开关，默认关） |
 | 与人工写作互相污染 | AI 项目创建独立的 Novel 记录（title 前缀「[AI]」），人工书架里可见可编辑但标记来源 |
+
+---
+
+# 实现记录（v3 · 2026-09-10）
+
+> 本文档上半部分为设计方案；以下为实际交付的实现状态（M1-M7）。
+> 设计部分灵感来源：AI_NovelGenerator / GOAT-Storytelling-Agent / webnovel-master（美智子作品，上官婉儿分享，源自 inkos）。
+
+## 架构
+
+```
+frontend/src/pages/Factory.tsx            项目列表（新建/导入续写）
+frontend/src/pages/FactoryProject.tsx     向导页（市场雷达→立项→设定→大纲→写作）
+frontend/src/components/ChapterGenPanel.tsx  章节任务面板（生成/审校/修订/重写）
+frontend/src/components/FactoryM3.tsx     批量连跑弹窗 + 追读力仪表盘 + 控制面工具条
+frontend/src/components/FactoryM5.tsx     简介弹窗 + 封面弹窗
+frontend/src/components/ModelRouteDialog.tsx  五路模型路由
+frontend/src/components/ImportDialog.tsx  导入续写
+
+backend/app/routers/ai_factory.py   M1/M2 核心（立项/设定/大纲/逐章生成/定稿/审校）
+                                    + 共享：_update_state_files（伏笔章龄戳记）
+                                    + _sync_relations_from_chapter（关系图联动）
+backend/app/routers/batch.py        M3 批量连跑/增强审校/追读力 + M6 修订闭环
+                                    + M7 伏笔提醒端点/lint 端点 + 质量门禁
+backend/app/routers/ai_extras.py    M5 简介/市场雷达/封面 prompt+天宫通道
+backend/app/routers/ai_import.py    M4 导入续写（分章+逆向真相文件）
+backend/app/anti_llm.py             去 AI 味检测引擎（确定性，100 分制）
+backend/app/textlint.py             文字规范检测（错别字/敏感词/重复词/标点）
+```
+
+## 数据模型关键列
+
+- `AiProject`：status 状态机（draft→setup→outline→writing）；五路路由
+  （setup/outline/chapter/summary/review_llm，值格式 `""`/`"id"`/`"id@model"`）；
+  字数目标三选（全可选软约束）；状态文件五分（global_summary/character_state/
+  plot_arcs[含 planted_chapter 章龄戳]/particle_ledger/subplot_board）；
+  author_intent/current_focus 控制面；synopsis_json/market_json/cover_prompt
+- `AiChapterJob`：status（pending/writing/done/needs_fix/failed）；
+  review_score/review_issues/retention_json/summary/attempt
+
+## 质量闭环（写→审→改）
+
+1. 写：源头注入 ANTI_LLM_RULES + 超期伏笔提醒（自动注入生成 context）
+2. 审：review-full = LLM 结构化审校 + anti_llm AI 味检测 + textlint 文字规范
+3. 改：revise 一键按意见修订全文 / rewrite-partial 局部重写 / generate(instruction) 整章重写
+
+## 批量连跑守护
+
+- 生成失败 → 硬停（不跳章）
+- AI 味 <70 → 自动去味改写（保剧情保字数）
+- 质量门禁：最终成稿 AI 味 <60 记 strike，连续 2 章 → 自动暂停（`paused` 事件）
+
+## 伏笔章龄追踪
+
+定稿时 `_stamp_plot_arcs` 给每条伏笔记 planted_chapter（标题匹配旧台账继承）；
+`_hook_alerts`：≥8 章未推进黄灯 / ≥15 章红灯；超期伏笔自动注入后续章节生成 prompt。
+
+## 人物关系联动
+
+定稿后 `_sync_relations_from_chapter` 从本章增量抽取关系 → CharacterRelation（source="ai"），
+角色名必须匹配现有角色卡，(from,to,relation) 去重，失败不阻塞定稿。
+
+## 外部通道
+
+- 模型清单：`GET /api/ai/configs/{id}/models`（任意 OpenAI 兼容端点，天枢/DeepSeek 通用）
+- 封面天宫通道：env `TIANGONG_BASE_URL` + `TIANGONG_SERVICE_KEY`(+`_ID`) 配置后自动提交
+  `cover-generate` 任务（经天宫 beidou-external-router，tRPC + service key 认证）
+- AList 自动备份：integrations 配置开启后，后台循环每 30 分钟检查、每日一次备份整库 zip
+
+## 测试
+
+`backend/tests/test_ai_factory_pure.py`：16 个纯函数单测
+（anti_llm/textlint/分章/JSON 解析/伏笔戳记/章龄/路由格式），单文件 <1s。
