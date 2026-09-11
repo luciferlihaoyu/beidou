@@ -42,6 +42,7 @@ class IntegrationIn(BaseModel):
     alist_root: str = Field(default="", max_length=200)  # 留空 = 直接用该 AList 账户的基本路径作为根目录
     xuanji_url: str = Field(default="", max_length=300)
     xuanji_api_key: str = Field(default="", max_length=300)  # 留空 = 不修改
+    auto_backup_enabled: bool = False
 
 
 @router.get("")
@@ -54,6 +55,8 @@ async def get_integration(user: User = Depends(get_current_user), db: AsyncSessi
         "has_alist_password": bool(config.alist_password),
         "xuanji_url": config.xuanji_url,
         "has_xuanji_key": bool(config.xuanji_api_key),
+        "auto_backup_enabled": config.auto_backup_enabled,
+        "last_backup_at": config.last_backup_at,
     }
 
 
@@ -64,6 +67,7 @@ async def save_integration(data: IntegrationIn, user: User = Depends(get_current
     config.alist_username = data.alist_username.strip()
     config.alist_root = ("/" + data.alist_root.strip().strip("/")) if data.alist_root.strip() else "/"
     config.xuanji_url = data.xuanji_url.strip()
+    config.auto_backup_enabled = data.auto_backup_enabled
     if data.alist_password:
         config.alist_password = data.alist_password
     if data.xuanji_api_key:
@@ -138,10 +142,8 @@ def _sqlite_path() -> str:
     return url[len(prefix):] if url.startswith(prefix) else ""
 
 
-@router.post("/alist/backup")
-async def backup_to_alist(user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
-    """把 SQLite 数据库打包为 zip 上传到 AList 的 {root}/backup/ 目录。"""
-    config = await _get_config(user, db)
+async def _do_backup(config: IntegrationConfig) -> dict:
+    """备份核心：SQLite 打包 zip 上传 AList（供手动端点与自动后台任务共用）。"""
     client = _alist_client(config)
     db_path = _sqlite_path()
     if not db_path:
@@ -168,6 +170,44 @@ async def backup_to_alist(user: User = Depends(get_current_user), db: AsyncSessi
     except AlistError as exc:
         raise HTTPException(400, str(exc))
     return {"ok": True, "path": remote, "size": len(data)}
+
+
+@router.post("/alist/backup")
+async def backup_to_alist(user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    """把 SQLite 数据库打包为 zip 上传到 AList 的 {root}/backup/ 目录。"""
+    config = await _get_config(user, db)
+    result = await _do_backup(config)
+    config.last_backup_at = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    await db.commit()
+    return result
+
+
+async def auto_backup_tick() -> int:
+    """后台定时任务一跳：给开启自动备份且今日未备份的用户执行备份。返回执行数。"""
+    from sqlalchemy import select as _select
+
+    from ..db import SessionLocal
+    from ..models import IntegrationConfig as IC
+
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    async with SessionLocal() as db:
+        rows = (
+            (await db.execute(_select(IC).where(IC.auto_backup_enabled.is_(True))))
+            .scalars()
+            .all()
+        )
+        n = 0
+        for config in rows:
+            if not config.alist_url or config.last_backup_at == today:
+                continue
+            try:
+                await _do_backup(config)
+                config.last_backup_at = today
+                await db.commit()
+                n += 1
+            except Exception:  # noqa: BLE001  单个用户备份失败不影响其他人
+                await db.rollback()
+        return n
 
 
 @router.get("/alist/backups")

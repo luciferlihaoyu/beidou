@@ -63,6 +63,7 @@ export default function Account() {
     alist_root: "/beidou",
     xuanji_url: "",
     xuanji_api_key: "",
+    auto_backup_enabled: false,
   });
   const [integSaving, setIntegSaving] = useState(false);
   const [alistTesting, setAlistTesting] = useState(false);
@@ -86,6 +87,7 @@ export default function Account() {
           alist_root: s.alist_root,
           xuanji_url: s.xuanji_url,
           xuanji_api_key: "",
+          auto_backup_enabled: s.auto_backup_enabled ?? false,
         });
       })
       .catch(() => {});
@@ -462,6 +464,18 @@ export default function Account() {
                     三个子目录 backup / uploads / covers 都会建到这里
                   </p>
                 </div>
+                <label className="flex items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    className="accent-primary"
+                    checked={integForm.auto_backup_enabled}
+                    onChange={(e) => setIntegForm({ ...integForm, auto_backup_enabled: e.target.checked })}
+                  />
+                  每日自动备份到 AList
+                  {integ?.last_backup_at && (
+                    <span className="text-xs text-muted-foreground">（最近备份：{integ.last_backup_at}）</span>
+                  )}
+                </label>
                 <div className="flex gap-2 pt-1">
                   <Button variant="outline" size="sm" onClick={() => void testAlist()} disabled={alistTesting}>
                     {alistTesting ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : <Plug className="mr-1 h-3.5 w-3.5" />}

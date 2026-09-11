@@ -11,10 +11,28 @@ from .db import engine, init_db
 from .routers import ai, ai_extras, ai_factory, ai_import, auth, batch, chapters, export, integrations, library, novels, pomodoro, recycle, relations, search, sso, skills, snapshots, stats, volumes, settings as settings_router
 
 
+async def _auto_backup_loop():
+    """每 30 分钟检查一次：给开启自动备份且今日未备份的用户备份到 AList。"""
+    import asyncio
+
+    from .routers.integrations import auto_backup_tick
+
+    while True:
+        try:
+            await auto_backup_tick()
+        except Exception:  # noqa: BLE001  后台任务绝不炸掉主进程
+            pass
+        await asyncio.sleep(30 * 60)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    import asyncio
+
     await init_db()
+    backup_task = asyncio.create_task(_auto_backup_loop())
     yield
+    backup_task.cancel()
 
 
 app = FastAPI(title="北斗 · AI 网文创作平台", lifespan=lifespan)

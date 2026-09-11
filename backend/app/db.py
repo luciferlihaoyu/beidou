@@ -34,6 +34,8 @@ async def init_db():
         await _ensure_column(conn, "ai_projects", "subplot_board", "TEXT NOT NULL DEFAULT ''")
         await _ensure_column(conn, "ai_chapter_jobs", "review_score", "INTEGER")
         await _ensure_column(conn, "ai_chapter_jobs", "retention_json", "TEXT NOT NULL DEFAULT ''")
+        await _ensure_column(conn, "integration_configs", "auto_backup_enabled", "BOOLEAN NOT NULL DEFAULT 0")
+        await _ensure_column(conn, "integration_configs", "last_backup_at", "TEXT NOT NULL DEFAULT ''")
         # AI 工厂 M5：简介/市场雷达/封面
         await _ensure_column(conn, "ai_projects", "synopsis_json", "TEXT NOT NULL DEFAULT ''")
         await _ensure_column(conn, "ai_projects", "market_json", "TEXT NOT NULL DEFAULT ''")

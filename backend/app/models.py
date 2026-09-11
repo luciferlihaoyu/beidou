@@ -266,6 +266,8 @@ class IntegrationConfig(Base):
     alist_root: Mapped[str] = mapped_column(String(200), default="/beidou")
     xuanji_url: Mapped[str] = mapped_column(String(300), default="")
     xuanji_api_key: Mapped[str] = mapped_column(String(300), default="")
+    auto_backup_enabled: Mapped[bool] = mapped_column(default=False)  # 每日自动备份到 AList
+    last_backup_at: Mapped[str] = mapped_column(String(20), default="")  # ISO 日期串，判重
     updated_at: Mapped[datetime] = mapped_column(default=utcnow, onupdate=utcnow)
 
 
