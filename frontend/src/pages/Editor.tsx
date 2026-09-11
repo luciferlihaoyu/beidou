@@ -271,6 +271,16 @@ export default function Editor() {
   const [replacing, setReplacing] = useState(false);
   const [reloadTick, setReloadTick] = useState(0); // 替换后强制重载编辑器
 
+  // 章内搜索替换（浮动条，Ctrl/Cmd+F 打开）
+  const [inSearchOpen, setInSearchOpen] = useState(false);
+  const [inSearchQ, setInSearchQ] = useState("");
+  const [inSearchReplace, setInSearchReplace] = useState("");
+  const [inSearchIdx, setInSearchIdx] = useState(-1); // 当前命中序号；-1 = 未定位
+  const [inSearchTotal, setInSearchTotal] = useState(0);
+
+  // 大章节拆分
+  const [splitting, setSplitting] = useState(false);
+
   // 章节快照（面板 + 手动存稿点 Dialog）
   const [snapshotOpen, setSnapshotOpen] = useState(false);
   const [saveSnapshotOpen, setSaveSnapshotOpen] = useState(false);
@@ -577,6 +587,14 @@ export default function Editor() {
         e.preventDefault();
         void flushSave();
       },
+      "ctrl+f": (e) => {
+        e.preventDefault();
+        openInSearch();
+      },
+      "meta+f": (e) => {
+        e.preventDefault();
+        openInSearch();
+      },
       "ctrl+shift+t": () => toggleTypewriter(),
       "ctrl+shift+f": (e) => {
         e.preventDefault();
@@ -588,12 +606,13 @@ export default function Editor() {
       },
       escape: () => {
         // 优先关弹窗，再退沉浸
-        if (cheatsheetOpen) setCheatsheetOpen(false);
+        if (inSearchOpen) closeInSearch();
+        else if (cheatsheetOpen) setCheatsheetOpen(false);
         else if (cmdOpen) setCmdOpen(false);
         else if (focus) setFocus(false);
       },
     },
-    { allowInEditable: ["?", "ctrl+shift+f"] }
+    { allowInEditable: ["?", "ctrl+shift+f", "ctrl+f", "meta+f"] }
   );
 
   // ---------- 大纲 / 打字机 / 排版偏好 ----------
@@ -976,6 +995,162 @@ export default function Editor() {
       toast.error(err instanceof Error ? err.message : "替换失败");
     } finally {
       setReplacing(false);
+    }
+  }
+
+  // ---------- 章内搜索替换（浮动条） ----------
+
+  // 切章时收起浮动条并清空命中状态（旧章位置在新章无意义）
+  useEffect(() => {
+    setInSearchOpen(false);
+    setInSearchIdx(-1);
+    setInSearchTotal(0);
+  }, [activeId]);
+
+  /** 收集当前章内所有命中位置：遍历 text 节点，大小写不敏感（中文场景够用） */
+  function collectInChapterMatches(q: string): { from: number; to: number }[] {
+    const editor = editorRef.current?.getEditor();
+    if (!editor || editor.isDestroyed || !q) return [];
+    const lower = q.toLowerCase();
+    const matches: { from: number; to: number }[] = [];
+    editor.state.doc.descendants((node, pos) => {
+      if (!node.isText || !node.text) return;
+      const text = node.text.toLowerCase();
+      let i = text.indexOf(lower);
+      while (i !== -1) {
+        matches.push({ from: pos + i, to: pos + i + q.length });
+        i = text.indexOf(lower, i + q.length);
+      }
+    });
+    return matches;
+  }
+
+  /** 跳转到第 idx 个命中：选中该段文本（即高亮）并滚动到可见区域 */
+  function jumpToInSearchMatch(matches: { from: number; to: number }[], idx: number) {
+    const editor = editorRef.current?.getEditor();
+    if (!editor || editor.isDestroyed || matches.length === 0) return;
+    const m = matches[idx];
+    editor.chain().focus().setTextSelection({ from: m.from, to: m.to }).scrollIntoView().run();
+  }
+
+  /** 以上一个命中后的位置为锚，找下一个/上一个命中（越界回绕） */
+  function inSearchFind(dir: 1 | -1, anchor?: number) {
+    const editor = editorRef.current?.getEditor();
+    const q = inSearchQ;
+    if (!editor || editor.isDestroyed || !q) return;
+    const matches = collectInChapterMatches(q);
+    setInSearchTotal(matches.length);
+    if (matches.length === 0) {
+      setInSearchIdx(-1);
+      return;
+    }
+    const sel = editor.state.selection;
+    const fromPos = anchor ?? (dir === 1 ? sel.head : sel.from);
+    let idx: number;
+    if (dir === 1) {
+      idx = matches.findIndex((m) => m.from >= fromPos);
+      if (idx === -1) idx = 0; // 回绕到开头
+    } else {
+      idx = -1;
+      for (let i = matches.length - 1; i >= 0; i--) {
+        if (matches[i].to <= fromPos) {
+          idx = i;
+          break;
+        }
+      }
+      if (idx === -1) idx = matches.length - 1; // 回绕到末尾
+    }
+    setInSearchIdx(idx);
+    jumpToInSearchMatch(matches, idx);
+  }
+
+  /** 替换当前命中：选区不在命中上时先定位到下一个命中（再点一次才替换） */
+  function inSearchReplaceCurrent() {
+    const editor = editorRef.current?.getEditor();
+    const q = inSearchQ;
+    if (!editor || editor.isDestroyed || !q) return;
+    const matches = collectInChapterMatches(q);
+    setInSearchTotal(matches.length);
+    if (matches.length === 0) {
+      setInSearchIdx(-1);
+      return;
+    }
+    const sel = editor.state.selection;
+    const hit = matches.findIndex((m) => m.from === sel.from && m.to === sel.to);
+    if (hit === -1) {
+      inSearchFind(1);
+      return;
+    }
+    const m = matches[hit];
+    // tr.insertText 按纯文本插入并保留原位 marks（insertContentAt 会把替换词当 HTML 解析）
+    editor.view.dispatch(editor.state.tr.insertText(inSearchReplace, m.from, m.to));
+    editor.chain().focus().run();
+    // 替换后从插入点之后继续找下一个命中，避免替换词本身仍命中时原地打转
+    inSearchFind(1, m.from + inSearchReplace.length);
+  }
+
+  /** 全部替换：一次 transaction，从后往前替换避免位置偏移 */
+  function inSearchReplaceAll() {
+    const editor = editorRef.current?.getEditor();
+    const q = inSearchQ;
+    if (!editor || editor.isDestroyed || !q) return;
+    const matches = collectInChapterMatches(q);
+    if (matches.length === 0) {
+      setInSearchTotal(0);
+      setInSearchIdx(-1);
+      return;
+    }
+    const tr = editor.state.tr;
+    for (let i = matches.length - 1; i >= 0; i--) {
+      tr.insertText(inSearchReplace, matches[i].from, matches[i].to);
+    }
+    editor.view.dispatch(tr);
+    toast.success(`已替换 ${matches.length} 处`);
+    setInSearchTotal(0);
+    setInSearchIdx(-1);
+  }
+
+  function openInSearch() {
+    if (activeId === null) return;
+    setInSearchOpen(true);
+  }
+
+  /** 收起浮动条并把焦点还给编辑器 */
+  function closeInSearch() {
+    setInSearchOpen(false);
+    setInSearchIdx(-1);
+    setInSearchTotal(0);
+    editorRef.current?.getEditor()?.chain().focus().run();
+  }
+
+  // ---------- 大章节拆分 ----------
+
+  /** 在光标处拆分：光标前纯文本字符数 → 后端按段落边界切成两章 */
+  async function splitAtCursor() {
+    const editor = editorRef.current?.getEditor();
+    if (activeId === null || !editor || editor.isDestroyed) return;
+    const cursorPos = editor.state.selection.head;
+    const splitAt = editor.state.doc.textBetween(0, cursorPos, "\n").length;
+    setSplitting(true);
+    try {
+      await flushSave(); // 先落盘，后端基于最新正文拆分
+      await api.post<{ original: Chapter; created: Chapter }>(
+        `/api/novels/${novelId}/chapters/${activeId}/split`,
+        { split_at_char: splitAt }
+      );
+      toast.success("已在光标处拆分为两章");
+      await Promise.all([loadChapters(), loadVolumes()]);
+      // 当前章只剩前半，重载编辑器内容
+      const c = await api.get<Chapter>(`/api/novels/${novelId}/chapters/${activeId}`);
+      setActiveContent(c.content ?? "");
+      setLiveWords(c.word_count);
+      prevWords.current = c.word_count;
+      pendingHtml.current = null;
+      setReloadTick((t) => t + 1); // 强制重挂载编辑器以显示新内容
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "拆分失败");
+    } finally {
+      setSplitting(false);
     }
   }
 
@@ -1645,7 +1820,7 @@ export default function Editor() {
         {/* 写作区 */}
         <div
           ref={writingAreaRef}
-          className="flex min-w-0 flex-1 flex-col bg-background"
+          className="relative flex min-w-0 flex-1 flex-col bg-background"
           style={
             {
               "--bd-font-size": FONT_SIZE_VAR[typo.fontSize],
@@ -1656,6 +1831,112 @@ export default function Editor() {
           {activeId !== null && activeContent !== null ? (
             <ReferenceDataProvider value={refData}>
               <>
+                {/* 大章节温和提示条：超 2 万字建议在光标处拆分（非阻塞） */}
+                {liveWords > 20000 && (
+                  <div className="flex shrink-0 items-center gap-2 border-b border-amber-200 bg-amber-50 px-4 py-1.5 text-xs text-amber-800 dark:border-amber-900/60 dark:bg-amber-950/40 dark:text-amber-200">
+                    <span className="min-w-0 truncate">
+                      本章已超 2 万字，长章节可能编辑卡顿，建议在光标处拆分
+                    </span>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="ml-auto h-6 shrink-0 border-amber-300 px-2 text-[11px] dark:border-amber-800"
+                      disabled={splitting}
+                      onClick={() => void splitAtCursor()}
+                    >
+                      {splitting ? <Loader2 className="mr-1 h-3 w-3 animate-spin" /> : null}
+                      在光标处拆分
+                    </Button>
+                  </div>
+                )}
+                {/* 章内搜索替换浮动条（Ctrl/Cmd+F） */}
+                {inSearchOpen && (
+                  <div className="absolute left-1/2 top-2 z-20 flex -translate-x-1/2 items-center gap-1.5 rounded-lg border border-border bg-card px-2.5 py-1.5 shadow-lg">
+                    <Input
+                      value={inSearchQ}
+                      onChange={(e) => {
+                        setInSearchQ(e.target.value);
+                        setInSearchIdx(-1);
+                        setInSearchTotal(collectInChapterMatches(e.target.value).length);
+                      }}
+                      placeholder="搜索本章内容"
+                      className="h-7 w-44 text-xs"
+                      autoFocus
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") {
+                          e.preventDefault();
+                          inSearchFind(e.shiftKey ? -1 : 1);
+                        } else if (e.key === "Escape") {
+                          closeInSearch();
+                        }
+                      }}
+                    />
+                    <Input
+                      value={inSearchReplace}
+                      onChange={(e) => setInSearchReplace(e.target.value)}
+                      placeholder="替换为"
+                      className="h-7 w-36 text-xs"
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") {
+                          e.preventDefault();
+                          inSearchReplaceCurrent();
+                        } else if (e.key === "Escape") {
+                          closeInSearch();
+                        }
+                      }}
+                    />
+                    <span className="w-12 shrink-0 text-center text-[11px] text-muted-foreground tnum">
+                      {inSearchTotal > 0 ? `${inSearchIdx >= 0 ? inSearchIdx + 1 : 0}/${inSearchTotal}` : "0/0"}
+                    </span>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-7 w-7"
+                      title="上一个（Shift+Enter）"
+                      disabled={!inSearchQ}
+                      onClick={() => inSearchFind(-1)}
+                    >
+                      <ArrowUp className="h-3.5 w-3.5" />
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-7 w-7"
+                      title="下一个（Enter）"
+                      disabled={!inSearchQ}
+                      onClick={() => inSearchFind(1)}
+                    >
+                      <ArrowDown className="h-3.5 w-3.5" />
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="h-7 px-2 text-[11px]"
+                      disabled={!inSearchQ || inSearchTotal === 0}
+                      onClick={() => inSearchReplaceCurrent()}
+                    >
+                      替换
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="h-7 px-2 text-[11px]"
+                      disabled={!inSearchQ || inSearchTotal === 0}
+                      onClick={() => inSearchReplaceAll()}
+                    >
+                      全部替换
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-7 w-7"
+                      title="关闭（Esc）"
+                      onClick={closeInSearch}
+                    >
+                      <X className="h-3.5 w-3.5" />
+                    </Button>
+                  </div>
+                )}
                 <div className="min-h-0 flex-1 overflow-hidden">
                   <div
                     className={`mx-auto h-full ${WIDTH_CLASS[typo.width]} overflow-hidden bg-card shadow-[0_1px_20px_rgba(0,0,0,0.03)]`}
@@ -1802,6 +2083,16 @@ export default function Editor() {
                     <span>今日 +{todayWords.toLocaleString()} 字</span>
                   )}
                   {speed !== null && <span>{speed.toLocaleString()} 字/时</span>}
+                  {/* 章内搜索替换（浮动条，Ctrl/Cmd+F） */}
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className={`h-5 w-5 ${inSearchOpen ? "text-primary" : ""}`}
+                    title="章内搜索替换（Ctrl/Cmd+F）"
+                    onClick={() => (inSearchOpen ? closeInSearch() : openInSearch())}
+                  >
+                    <Search className="h-3.5 w-3.5" />
+                  </Button>
                   {/* B1 品质雷达 */}
                   <Button
                     variant="ghost"

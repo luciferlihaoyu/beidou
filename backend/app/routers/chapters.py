@@ -322,6 +322,95 @@ async def delete_chapter(
     return {"ok": True}
 
 
+# ---------- 大章节拆分 ----------
+
+
+class SplitIn(BaseModel):
+    split_at_char: int = Field(ge=0)  # 光标前的纯文本字符数（前端 textBetween 口径）
+
+
+@router.post("/{chapter_id}/split")
+async def split_chapter(
+    chapter_id: int,
+    data: SplitIn,
+    novel: Novel = Depends(get_owned_novel),
+    db: AsyncSession = Depends(get_db),
+):
+    """把章节在指定纯文本位置拆成两章。
+
+    content 是 HTML：先用 split_into_paragraphs 切段，再用 strip_html 逐段累计
+    纯文本长度定位 split_at_char 落在哪一段，从该段落切开（光标所在段归入下半章）。
+    新章排在原章之后（同卷后续章节 sort_order +1），两章重算 word_count 并同步 FTS。
+    """
+    from ..utils import split_into_paragraphs, strip_html
+
+    chapter = await _get_chapter(novel, chapter_id, db)
+    paras = split_into_paragraphs(chapter.content or "")
+    if len(paras) < 2:
+        raise HTTPException(400, "章节段落太少，无法拆分")
+    if not 0 < data.split_at_char < len(strip_html(chapter.content or "")):
+        raise HTTPException(400, "拆分位置超出正文范围")
+
+    # 段落间补 1 个换行符，与前端 textBetween(0, pos, "\n") 的纯文本口径对齐
+    idx = len(paras) - 1
+    pos = 0
+    for i, p in enumerate(paras):
+        para_len = len(strip_html(p))
+        if data.split_at_char <= pos + para_len:
+            idx = i
+            break
+        pos += para_len + 1
+    # 保证前后各至少一段
+    idx = max(1, min(idx, len(paras) - 1))
+    front_html = "".join(paras[:idx])
+    back_html = "".join(paras[idx:])
+
+    chapter.content = front_html
+    chapter.word_count = count_words(front_html)
+
+    # 后半存为新章：插到原章之后（同卷后续章节 sort_order +1）
+    cond = (
+        Chapter.volume_id.is_(None)
+        if chapter.volume_id is None
+        else Chapter.volume_id == chapter.volume_id
+    )
+    siblings = (
+        await db.execute(
+            select(Chapter).where(
+                Chapter.novel_id == novel.id, cond, Chapter.sort_order > chapter.sort_order
+            )
+        )
+    ).scalars().all()
+    for sib in siblings:
+        sib.sort_order += 1
+    # title 只存自定义名：原标题 + （下），超长截断到字段上限
+    new_title = (f"{chapter.title}（下）" if chapter.title.strip() else "（下）")[:200]
+    new_chapter = Chapter(
+        novel_id=novel.id,
+        volume_id=chapter.volume_id,
+        title=new_title,
+        content=back_html,
+        sort_order=chapter.sort_order + 1,
+        word_count=count_words(back_html),
+    )
+    db.add(new_chapter)
+    await db.commit()
+    await db.refresh(chapter)
+    await db.refresh(new_chapter)
+    # FTS 同步两章（失败不影响拆分结果）
+    try:
+        from ..search_fts import sync_chapter
+
+        await sync_chapter(db, chapter.id)
+        await sync_chapter(db, new_chapter.id)
+    except Exception:  # noqa: BLE001
+        pass
+    pairs = await _ordered_with_numbers(novel, db)
+    num_old = next(n for c, n in pairs if c.id == chapter.id)
+    num_new = next(n for c, n in pairs if c.id == new_chapter.id)
+    return {"original": _out(chapter, num_old), "created": _out(new_chapter, num_new)}
+
+
 # ---------- B3 章节批量操作 ----------
 
 

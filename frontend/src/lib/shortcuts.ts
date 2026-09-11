@@ -85,7 +85,7 @@ export const SHORTCUTS: ShortcutEntry[] = [
   { key: "ctrl+shift+r", label: "AI 改写", desc: "改写当前选中文本（需打开 AI 面板）", section: "AI" },
 
   { key: "ctrl+k", label: "命令面板", desc: "搜索 / 跳转 / 动作（仿 Notion/Slack）", section: "导航" },
-  { key: "ctrl+f", label: "章节内查找", desc: "浏览器原生查找（编辑器内）", section: "导航" },
+  { key: "ctrl+f", label: "章内查找替换", desc: "打开章内搜索替换浮动条（编辑器内）", section: "导航" },
   { key: "ctrl+shift+f", label: "全文搜索", desc: "打开资料库全文搜索（人物/设定/章/资料卡）", section: "导航" },
   { key: "ctrl+g", label: "跳到章节", desc: "弹章节跳转", section: "导航" },
 

@@ -22,6 +22,8 @@ export interface EditorHandle {
   jumpToHeading: (pos: number) => void;
   /** 插入块引用：人物 / 设定 / 伏笔，渲染为带色 chip + 浮卡预览 */
   insertReference: (kind: "char" | "setting" | "foreshadow", target: string) => void;
+  /** 取底层 Tiptap Editor 实例（章内搜索替换 / 光标拆分等高级操作用；销毁后返回 null） */
+  getEditor: () => Editor | null;
 }
 
 /** 遍历文档收集标题（pos 为文档绝对位置） */
@@ -177,6 +179,7 @@ export default function TiptapEditor({
             .insertContent(" ")
             .run();
         },
+        getEditor: () => (editor && !editor.isDestroyed ? editor : null),
       });
     }
   }, [editor, onReady]);
