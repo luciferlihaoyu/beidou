@@ -416,6 +416,7 @@ export interface AiProject {
   synopsis: AiSynopsis | null;
   market: AiMarketReport | null;
   cover_prompt: AiCoverPrompt | null;
+  kb_query: string;
   chapter_count: number;
   created_at: string;
   updated_at: string;
@@ -457,6 +458,7 @@ export interface AiChapterJob {
   attempt: number;
   review_issues: { type?: string; severity?: string; issue?: string; suggestion?: string }[] | null;
   review_score: number | null;
+  summary: string;
   finished_at: string | null;
 }
 
@@ -703,5 +705,19 @@ export const aiFactoryM7 = {
     api.post<{ score: number; issues: { type: string; severity: string; detail: string }[] }>(
       `/api/ai-factory/projects/${projectId}/lint`,
       { text }
+    ),
+};
+
+// ---------- 璇玑知识库联动 ----------
+export const xuanjiApi = {
+  upload: (title: string, content: string, folderName = "") =>
+    api.post<{ ok: boolean; result: unknown }>("/api/integrations/xuanji/upload", {
+      title,
+      content,
+      folder_name: folderName,
+    }),
+  kbSync: (projectId: number) =>
+    api.post<{ ok: boolean; title: string; chars: number }>(
+      `/api/ai-factory/projects/${projectId}/kb-sync`
     ),
 };

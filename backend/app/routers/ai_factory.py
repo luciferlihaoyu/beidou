@@ -25,7 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import get_db
 from ..deps import get_ai_config, get_current_user
-from ..models import AIConfig, AiChapterJob, AiProject, Chapter, Character, Novel, User, Volume, WorldviewEntry
+from ..models import AIConfig, AiChapterJob, AiProject, Chapter, Character, IntegrationConfig, Novel, User, Volume, WorldviewEntry
 
 router = APIRouter(prefix="/api/ai-factory", tags=["ai-factory"])
 
@@ -153,6 +153,7 @@ def _project_out(p: AiProject, novel: Novel | None = None, chapter_count: int = 
         "synopsis": json.loads(p.synopsis_json) if p.synopsis_json else None,
         "market": json.loads(p.market_json) if p.market_json else None,
         "cover_prompt": json.loads(p.cover_prompt) if p.cover_prompt else None,
+        "kb_query": p.kb_query,
         "chapter_count": chapter_count,
         "created_at": p.created_at.isoformat(),
         "updated_at": p.updated_at.isoformat(),
@@ -549,6 +550,8 @@ def _job_out(job: AiChapterJob, chapter: Chapter | None, number: int) -> dict:
         "actual_words": job.actual_words,
         "attempt": job.attempt,
         "review_issues": json.loads(job.review_issues) if job.review_issues else None,
+        "review_score": job.review_score,
+        "summary": job.summary or "",
         "finished_at": job.finished_at.isoformat() if job.finished_at else None,
     }
 
@@ -762,6 +765,53 @@ async def _assemble_context(p: AiProject, novel: Novel, chapter: Chapter, job: A
     )
     ordered = order_chapters(chapters, volumes)
     idx = next((i for i, c in enumerate(ordered) if c.id == chapter.id), None)
+
+    # 最近十章记忆卡（每章定稿时的 150 字剧情摘要——防前言不搭后语的滚动记忆）
+    done_jobs = (
+        (
+            await db.execute(
+                select(AiChapterJob).where(
+                    AiChapterJob.project_id == p.id,
+                    AiChapterJob.status.in_(["done", "needs_fix"]),
+                    AiChapterJob.summary != "",
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if done_jobs:
+        order_map = {c.id: i + 1 for i, c in enumerate(ordered)}
+        cards = sorted(
+            (j for j in done_jobs if j.chapter_id in order_map),
+            key=lambda j: order_map[j.chapter_id],
+        )[-10:]
+        if cards:
+            lines = [f"第{order_map[j.chapter_id]}章：{j.summary[:150]}" for j in cards]
+            parts.append("【最近章节记忆卡（保持剧情连贯，不得矛盾）】\n" + "\n".join(lines))
+
+    # 璇玑知识库参考资料（项目配置了 kb_query 才启用；失败静默不影响生成）
+    if p.kb_query:
+        try:
+            from .integrations import _xuanji_call
+
+            kc = (
+                (await db.execute(select(IntegrationConfig).where(IntegrationConfig.user_id == p.user_id)))
+                .scalars()
+                .first()
+            )
+            if kc and kc.xuanji_url:
+                docs = await _xuanji_call(kc, "kb.searchDocuments", {"query": p.kb_query})
+                if isinstance(docs, list) and docs:
+                    snippets = []
+                    for d in docs[:2]:
+                        full = await _xuanji_call(kc, "kb.getDocument", {"id": d.get("id")})
+                        if isinstance(full, dict) and full.get("content"):
+                            snippets.append(f"《{full.get('title', '')}》：{str(full['content'])[:600]}")
+                    if snippets:
+                        parts.append("【参考资料（璇玑知识库，仅供一致性参考）】\n" + "\n\n".join(snippets))
+        except Exception:  # noqa: BLE001  知识库不可达不阻塞生成
+            pass
     if idx is not None and idx > 0:
         n_recent = max(1, p.context_recent_chapters)
         recent = [c for c in ordered[:idx] if strip_html(c.content).strip()][-n_recent:]
@@ -984,6 +1034,7 @@ class ProjectSettingsIn(BaseModel):
     auto_mode: bool | None = None
     author_intent: str | None = Field(default=None, max_length=2000)
     current_focus: str | None = Field(default=None, max_length=2000)
+    kb_query: str | None = Field(default=None, max_length=200)
     context_recent_chapters: int | None = Field(default=None, ge=1, le=10)
     context_extra_chapters: list[int] | None = None
     setup_llm: str | None = None

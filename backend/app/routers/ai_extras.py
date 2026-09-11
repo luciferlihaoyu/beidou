@@ -175,3 +175,65 @@ async def cover_prompt(
 
     await db.commit()
     return {**result, "tiangong_task": task_created}
+
+
+@router.post("/projects/{project_id}/kb-sync")
+async def kb_sync(project_id: int, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    """把项目设定打包上传璇玑知识库（幂等 upsert，同标题覆盖）。
+
+    打包内容：立项 book_spec + 角色卡 + 世界观条目 + 状态文件摘要。
+    上传后璇玑侧可被检索——配合项目 kb_query 形成「设定入知识库 → 生成时召回」闭环。
+    """
+    from sqlalchemy import select as _select
+
+    from ..models import Character, WorldviewEntry
+    from .integrations import _xuanji_mcp
+
+    p = await _get_project(project_id, user, db)
+    spec = json.loads(p.book_spec_json or "{}")
+    title = (spec.get("titles") or [p.seed_prompt[:20]])[0]
+
+    parts = [f"# 《{title}》设定集（北斗 AI 工厂同步）\n"]
+    if spec:
+        parts.append("## 立项\n" + json.dumps(spec, ensure_ascii=False, indent=2))
+    if p.author_intent:
+        parts.append(f"## 作者意图\n{p.author_intent}")
+    if p.global_summary:
+        parts.append(f"## 剧情摘要\n{p.global_summary}")
+    if p.character_state:
+        parts.append(f"## 角色状态\n{p.character_state}")
+    if p.novel_id:
+        chars = (
+            (await db.execute(_select(Character).where(Character.novel_id == p.novel_id)))
+            .scalars()
+            .all()
+        )
+        if chars:
+            parts.append("## 角色卡\n" + "\n".join(f"- **{c.name}**（{c.role}）：{(c.description or '')[:200]}" for c in chars))
+        wvs = (
+            (await db.execute(_select(WorldviewEntry).where(WorldviewEntry.novel_id == p.novel_id)))
+            .scalars()
+            .all()
+        )
+        if wvs:
+            parts.append("## 世界观\n" + "\n".join(f"- [{w.category}] {w.title}：{(w.content or '')[:200]}" for w in wvs))
+    content = "\n\n".join(parts)
+
+    from ..models import IntegrationConfig as IC
+
+    kc = (
+        (await db.execute(_select(IC).where(IC.user_id == user.id)))
+        .scalars()
+        .first()
+    )
+    if not kc or not kc.xuanji_url:
+        raise HTTPException(400, "请先在「账号设置 → 集成」里配置璇玑地址和 API Key")
+
+    from .integrations import _xuanji_ensure_folder
+
+    folder_id = await _xuanji_ensure_folder(kc, "北斗小说资料")
+    args: dict = {"title": f"北斗·{title}·设定集", "content": content}
+    if folder_id is not None:
+        args["folderId"] = folder_id
+    result = await _xuanji_mcp(kc, "document_upsert", args)
+    return {"ok": True, "title": f"北斗·{title}·设定集", "chars": len(content), "result": result}

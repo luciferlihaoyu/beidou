@@ -351,6 +351,7 @@ class AiProject(Base):
     synopsis_json: Mapped[str] = mapped_column(Text, default="")  # 多版本简介 {short,standard,promotion,douyin}
     market_json: Mapped[str] = mapped_column(Text, default="")  # 市场调研报告（选题用）
     cover_prompt: Mapped[str] = mapped_column(Text, default="")  # 封面绘图 prompt（中文描述+英文 prompt）
+    kb_query: Mapped[str] = mapped_column(String(200), default="")  # 璇玑知识源检索词（空=不启用）
     subplot_board: Mapped[str] = mapped_column(Text, default="")  # 支线进度板：A/B/C 线状态
     created_at: Mapped[datetime] = mapped_column(default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(default=utcnow, onupdate=utcnow)

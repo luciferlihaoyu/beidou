@@ -245,6 +245,26 @@ export default function ChapterGenPanel({
             <p className="mt-1 whitespace-pre-wrap leading-5">{project.global_summary}</p>
           </details>
         )}
+        {/* 最近十章记忆卡（滚动记忆，生成时自动注入防断片） */}
+        {jobs.some((j) => j.summary) && (
+          <details className="text-xs text-muted-foreground">
+            <summary className="cursor-pointer hover:text-foreground">
+              记忆卡 · 最近 {jobs.filter((j) => j.summary).slice(-10).length} 章（自动生成注入）
+            </summary>
+            <div className="mt-1.5 space-y-1">
+              {jobs
+                .filter((j) => j.summary)
+                .slice(-10)
+                .map((j) => (
+                  <p key={j.id} className="rounded bg-muted/40 px-2 py-1 leading-5">
+                    <span className="font-medium text-foreground/80">{j.chapter_title}</span>
+                    <span className="mx-1 text-muted-foreground/50">·</span>
+                    {j.summary}
+                  </p>
+                ))}
+            </div>
+          </details>
+        )}
       </div>
 
       {/* 章节任务表 */}

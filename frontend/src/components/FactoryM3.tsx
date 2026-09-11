@@ -9,6 +9,7 @@ import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import {
   Bot,
+  BookMarked,
   Image as ImageIcon,
   Pause,
   Play,
@@ -19,6 +20,7 @@ import {
 import {
   aiFactoryM2,
   aiFactoryM3,
+  xuanjiApi,
   type AiProject,
   type BatchEvent,
   type RetentionDashboard,
@@ -289,6 +291,9 @@ export function M3Toolbar({
   const [batchOpen, setBatchOpen] = useState(false);
   const [synopsisOpen, setSynopsisOpen] = useState(false);
   const [coverOpen, setCoverOpen] = useState(false);
+  const [kbEditing, setKbEditing] = useState(false);
+  const [kbQuery, setKbQuery] = useState(project.kb_query ?? "");
+  const [kbSyncing, setKbSyncing] = useState(false);
   const [intent, setIntent] = useState(project.author_intent ?? "");
   const [focus, setFocus] = useState(project.current_focus ?? "");
   const [editing, setEditing] = useState<"none" | "intent" | "focus">("none");
@@ -342,7 +347,72 @@ export function M3Toolbar({
           <ImageIcon className="mr-1 h-3.5 w-3.5" />
           封面{project.cover_prompt?.prompt_en ? " ✓" : ""}
         </Button>
+        <Button
+          variant={kbEditing ? "secondary" : "outline"}
+          size="sm"
+          className="h-8"
+          onClick={() => setKbEditing(!kbEditing)}
+        >
+          <BookMarked className="mr-1 h-3.5 w-3.5" />
+          知识库{project.kb_query ? " ✓" : ""}
+        </Button>
       </div>
+
+      {kbEditing && (
+        <div className="rounded-lg border border-border bg-card p-3">
+          <p className="mb-1.5 text-xs text-muted-foreground">
+            璇玑知识源：每章生成时按此检索词从璇玑知识库召回参考资料注入（历史/设定/素材）。
+            需先在「账户 → 集成」配置璇玑。
+          </p>
+          <input
+            className="h-8 w-full rounded-md border border-border bg-transparent px-3 text-sm"
+            placeholder="检索词，如：唐代官制 / 本书设定集（留空 = 不启用）"
+            value={kbQuery}
+            onChange={(e) => setKbQuery(e.target.value)}
+          />
+          <div className="mt-2 flex items-center justify-between">
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-7 text-xs"
+              disabled={kbSyncing}
+              onClick={async () => {
+                setKbSyncing(true);
+                try {
+                  const r = await xuanjiApi.kbSync(project.id);
+                  toast.success(`已上传璇玑：《${r.title}》（${(r.chars / 1000).toFixed(1)}K 字）`);
+                } catch (e) {
+                  toast.error(e instanceof Error ? e.message : "上传失败");
+                } finally {
+                  setKbSyncing(false);
+                }
+              }}
+            >
+              {kbSyncing ? "上传中…" : "↑ 上传本书设定到璇玑"}
+            </Button>
+            <div className="flex gap-2">
+              <Button variant="ghost" size="sm" onClick={() => setKbEditing(false)}>
+                取消
+              </Button>
+              <Button
+                size="sm"
+                onClick={async () => {
+                  try {
+                    const p = await aiFactoryM2.updateProject(project.id, { kb_query: kbQuery });
+                    onProjectChange(p);
+                    toast.success(kbQuery.trim() ? "知识源已启用" : "知识源已关闭");
+                    setKbEditing(false);
+                  } catch (e) {
+                    toast.error(e instanceof Error ? e.message : "保存失败");
+                  }
+                }}
+              >
+                保存
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {editing === "intent" && (
         <div className="rounded-lg border border-border bg-card p-3">

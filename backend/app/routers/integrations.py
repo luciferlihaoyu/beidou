@@ -375,6 +375,77 @@ async def xuanji_search(
     ]
 
 
+async def _xuanji_mcp(config: IntegrationConfig, tool: str, args: dict):
+    """调璇玑 MCP 工具（JSON-RPC over HTTP，POST /api/mcp）。
+
+    写能力走这里（document_upsert/folder_create 等 MCP 工具），
+    读取走 _xuanji_call（tRPC）。响应兼容纯 JSON 与 SSE（text/event-stream）。
+    """
+    base = _xuanji_base(config)
+    headers = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
+    if config.xuanji_api_key:
+        headers["Authorization"] = f"Bearer {config.xuanji_api_key}"
+    payload = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": tool, "arguments": args}}
+    try:
+        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+            resp = await client.post(f"{base}/api/mcp", json=payload, headers=headers)
+    except httpx.HTTPError as exc:
+        raise HTTPException(400, f"无法连接璇玑: {exc.__class__.__name__}")
+    if resp.status_code in (401, 403):
+        raise HTTPException(400, "璇玑拒绝了访问（401/403）——写操作需要带 write 权限的 API Key")
+    # SSE 响应：取最后一条 data: JSON
+    body_text = resp.text
+    if "text/event-stream" in resp.headers.get("content-type", ""):
+        data_lines = [l[5:].strip() for l in body_text.splitlines() if l.startswith("data:")]
+        if not data_lines:
+            raise HTTPException(400, "璇玑 MCP 返回了空事件流")
+        body_text = data_lines[-1]
+    try:
+        rpc = json.loads(body_text)
+    except ValueError:
+        raise HTTPException(400, f"璇玑 MCP 返回无法解析（HTTP {resp.status_code}）")
+    if "error" in rpc:
+        raise HTTPException(400, f"璇玑工具错误：{rpc['error'].get('message', '未知')}")
+    # MCP 工具结果：result.content[0].text（JSON 字符串）
+    try:
+        text = rpc["result"]["content"][0]["text"]
+        return json.loads(text)
+    except (KeyError, IndexError, TypeError, ValueError):
+        return rpc.get("result", {})
+
+
+async def _xuanji_ensure_folder(config: IntegrationConfig, name: str):
+    """按名找璇玑目录，找不到就建，返回 folder_id（失败返回 None）。"""
+    if not name.strip():
+        return None
+    folders = await _xuanji_mcp(config, "folder_list", {})
+    folder_list = folders.get("folders", folders) if isinstance(folders, dict) else folders
+    if isinstance(folder_list, list):
+        for f in folder_list:
+            if isinstance(f, dict) and f.get("name") == name.strip():
+                return f.get("id")
+    created = await _xuanji_mcp(config, "folder_create", {"name": name.strip()})
+    return created.get("id") if isinstance(created, dict) else None
+
+
+class XuanjiUploadIn(BaseModel):
+    title: str = Field(min_length=1, max_length=200)
+    content: str = Field(min_length=1, max_length=100000)
+    folder_name: str = Field(default="", max_length=100)  # 给了就归档到该目录（不存在则创建）
+
+
+@router.post("/xuanji/upload")
+async def xuanji_upload(data: XuanjiUploadIn, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    """往璇玑知识库上传文档（document_upsert 幂等：同标题覆盖更新不重复）。"""
+    config = await _get_config(user, db)
+    folder_id = await _xuanji_ensure_folder(config, data.folder_name)
+    args: dict = {"title": data.title.strip(), "content": data.content}
+    if folder_id is not None:
+        args["folderId"] = folder_id
+    result = await _xuanji_mcp(config, "document_upsert", args)
+    return {"ok": True, "result": result}
+
+
 @router.get("/xuanji/document/{doc_id}")
 async def xuanji_document(doc_id: int, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     """读取璇玑单篇文档全文。"""
