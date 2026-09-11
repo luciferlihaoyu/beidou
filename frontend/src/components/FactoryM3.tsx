@@ -90,6 +90,12 @@ export function BatchRunDialog({
       case "chapter_done":
         push("ok", `✅ ${ev.title} 定稿 ${ev.words.toLocaleString()} 字${ev.state_updated ? " · 状态文件已更新" : ""}（${ev.done}/${ev.total}）`);
         break;
+      case "quality_warn":
+        push("warn", `⚠️ 质量门禁：${ev.title} AI 味仅 ${ev.score} 分（连续 ${ev.streak} 章低分，满 2 章自动暂停）`);
+        break;
+      case "paused":
+        push("error", `🛑 连跑已自动暂停：${ev.reason}`);
+        break;
       case "error":
         push("error", `❌ ${ev.title ? ev.title + "：" : ""}${ev.message}`);
         break;

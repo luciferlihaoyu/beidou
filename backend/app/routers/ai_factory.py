@@ -578,6 +578,149 @@ async def list_jobs(project_id: int, user: User = Depends(get_current_user), db:
     return [_job_out(j, chapter_map.get(j.chapter_id), number_map.get(j.chapter_id or 0, 0)) for j in jobs]
 
 
+# ================= 伏笔台账章龄追踪 + 统一状态文件更新 =================
+
+HOOK_AGING_CHAPTERS = 8  # 8 章未推进 → 黄灯
+HOOK_OVERDUE_CHAPTERS = 15  # 15 章未推进 → 红灯
+
+
+async def _count_done_jobs(db: AsyncSession, project_id: int) -> int:
+    result = await db.execute(
+        select(func.count())
+        .select_from(AiChapterJob)
+        .where(AiChapterJob.project_id == project_id, AiChapterJob.status.in_(["done", "needs_fix"]))
+    )
+    return int(result.scalar() or 0)
+
+
+def _stamp_plot_arcs(old_json: str, new_arcs: list, done_no: int) -> str:
+    """伏笔台账维护 planted_chapter（种植章号）：
+    新列表条目按 title 匹配旧台账继承戳记；匹配不到视为本章新埋。"""
+    try:
+        old = json.loads(old_json) if old_json else []
+    except ValueError:
+        old = []
+    planted = {
+        str(a.get("title", "")): a.get("planted_chapter")
+        for a in old
+        if isinstance(a, dict) and a.get("title")
+    }
+    out = []
+    for a in new_arcs:
+        if not isinstance(a, dict):
+            continue
+        if not isinstance(a.get("planted_chapter"), int):
+            a["planted_chapter"] = planted.get(str(a.get("title", ""))) or done_no
+        out.append(a)
+    return json.dumps(out, ensure_ascii=False)[:4000]
+
+
+def _hook_alerts(arcs_json: str, done_no: int) -> list[dict]:
+    """超期伏笔：未回收且章龄超阈值。"""
+    try:
+        arcs = json.loads(arcs_json) if arcs_json else []
+    except ValueError:
+        arcs = []
+    alerts = []
+    for a in arcs:
+        if not isinstance(a, dict):
+            continue
+        if str(a.get("status", "")).strip() == "已回收":
+            continue
+        planted = a.get("planted_chapter")
+        if not isinstance(planted, int) or planted <= 0:
+            continue
+        age = done_no - planted
+        if age >= HOOK_OVERDUE_CHAPTERS:
+            level = "overdue"
+        elif age >= HOOK_AGING_CHAPTERS:
+            level = "aging"
+        else:
+            continue
+        alerts.append(
+            {
+                "title": str(a.get("title", "")),
+                "status": str(a.get("status", "")),
+                "note": str(a.get("note", "")),
+                "planted_chapter": planted,
+                "age": age,
+                "level": level,
+            }
+        )
+    alerts.sort(key=lambda x: -x["age"])
+    return alerts
+
+
+def _hook_reminder_text(p: AiProject, done_no: int) -> str:
+    """生成注入文本：超期伏笔提醒（最高优先级）。"""
+    alerts = _hook_alerts(p.plot_arcs, done_no)
+    if not alerts:
+        return ""
+    lines = "；".join(
+        f"「{a['title']}」（{a['status']}，已 {a['age']} 章未推进）" for a in alerts[:5]
+    )
+    return (
+        f"\n【伏笔提醒——以下伏笔/情节弧埋设过久，本章请尽量推进或回收】\n{lines}\n"
+    )
+
+
+async def _update_state_files(
+    p: AiProject,
+    chapter: Chapter,
+    text: str,
+    summary_llm: AIConfig,
+    db: AsyncSession,
+    include_particle: bool = False,
+) -> bool:
+    """定稿后增量更新状态文件（global_summary/character_state/plot_arcs[/particle_ledger]）。
+
+    finalize 与 batch-run 共用。plot_arcs 自动维护 planted_chapter。
+    失败返回 False，绝不抛错（不阻塞定稿）。
+    """
+    try:
+        novel = await db.get(Novel, p.novel_id) if p.novel_id else None
+        title = novel.title if novel else ""
+        particle_part = (
+            f"【现有资源账本】\n{p.particle_ledger or '（空）'}\n\n" if include_particle else ""
+        )
+        particle_field = (
+            '  "particle_ledger": "资源账本纯文本：金钱/关键物品/等级数值当前状态（≤500 字）"\n'
+            if include_particle
+            else ""
+        )
+        prompt = (
+            f"作品：《{title}》\n\n"
+            f"【现有前情摘要】\n{p.global_summary or '（空——这是第一章）'}\n\n"
+            f"【现有角色状态】\n{p.character_state or '（空）'}\n\n"
+            f"【现有伏笔台账】\n{p.plot_arcs or '（空）'}\n\n"
+            + particle_part
+            + f"【刚完成的本章《{chapter.title or ''}》正文】\n{text[:4000]}\n\n"
+            "请增量更新状态文件，输出 JSON（只输出 JSON）：\n"
+            "{\n"
+            '  "global_summary": "融合本章后的全书摘要（≤1200 字，保留旧关键情节，补本章进展）",\n'
+            '  "character_state": [{"name": "角色名", "location": "所在", "goal": "当前目标", "condition": "状态", "change": "本章变化"}],\n'
+            '  "plot_arcs": [{"title": "伏笔/情节弧", "status": "埋设中/推进中/已回收", "note": "本章进展"}],\n'
+            + particle_field
+            + "}\n只列活跃角色与未回收伏笔；已回收伏笔保留一条标记已回收；精炼、结构化。"
+        )
+        raw = await _chat_text(summary_llm, _SYSTEM, prompt, max_tokens=3000)
+        state = _parse_json(raw)
+        if not isinstance(state, dict):
+            return False
+        if state.get("global_summary"):
+            p.global_summary = str(state["global_summary"])[:3000]
+        if isinstance(state.get("character_state"), list):
+            p.character_state = json.dumps(state["character_state"], ensure_ascii=False)[:4000]
+        if isinstance(state.get("plot_arcs"), list):
+            done_no = await _count_done_jobs(db, p.id)
+            p.plot_arcs = _stamp_plot_arcs(p.plot_arcs, state["plot_arcs"], done_no)
+        if include_particle and state.get("particle_ledger"):
+            p.particle_ledger = str(state["particle_ledger"])[:1500]
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
 async def _assemble_context(p: AiProject, novel: Novel, chapter: Chapter, job: AiChapterJob, db: AsyncSession) -> str:
     """上下文预算制组装（§3.1）：立项 + 状态文件三件套 + 角色卡 + 最近 N 章 + 本章任务。"""
     parts = [f"作品：《{novel.title}》"]
@@ -604,6 +747,11 @@ async def _assemble_context(p: AiProject, novel: Novel, chapter: Chapter, job: A
         parts.append(f"角色当前状态：{p.character_state}")
     if p.plot_arcs:
         parts.append(f"伏笔台账：{p.plot_arcs}")
+        # 超期伏笔提醒（章龄追踪，埋太久的钩子强制推进）
+        done_no = await _count_done_jobs(db, p.id)
+        reminder = _hook_reminder_text(p, done_no)
+        if reminder:
+            parts.append(reminder.strip())
 
     # 最近 N 章原文（默认 2 章，每章取末尾 2500 字——接最近的情节）
     chapters = (
@@ -738,39 +886,15 @@ async def finalize_chapter(
     except Exception:  # noqa: BLE001
         pass
 
-    # 2. AI 更新状态文件四分（global_summary / character_state / plot_arcs）
-    state_updated = False
-    try:
-        config = await _pick_config(user, db, p.summary_llm)
-        update_prompt = (
-            f"作品：《{(await db.get(Novel, p.novel_id)).title}》\n\n"
-            f"【现有前情摘要】\n{p.global_summary or '（空——这是第一章）'}\n\n"
-            f"【现有角色状态】\n{p.character_state or '（空）'}\n\n"
-            f"【现有伏笔台账】\n{p.plot_arcs or '（空）'}\n\n"
-            f"【刚完成的本章《{chapter.title or ''}》正文】\n{strip_html(chapter.content)[:4000]}\n\n"
-            "请增量更新三份状态文件，输出 JSON（只输出 JSON）：\n"
-            "{\n"
-            '  "global_summary": "融合本章后的全书摘要（≤1200 字，保留旧关键情节，补本章进展）",\n'
-            '  "character_state": [{"name": "角色名", "location": "所在", "goal": "当前目标", '
-            '"condition": "身体/情绪状态", "change": "本章变化"}],\n'
-            '  "plot_arcs": [{"title": "伏笔/情节弧", "status": "埋设中/推进中/已回收", '
-            '"note": "本章进展"}]\n'
-            "}\n"
-            "要求：只列活跃角色与未回收伏笔；已回收的伏笔保留一条标记已回收；"
-            "状态文件是给后续章节生成用的记忆，要精炼、结构化。"
-        )
-        raw = await _chat_text(config, _SYSTEM, update_prompt, max_tokens=3000)
-        state = _parse_json(raw)
-        if isinstance(state, dict):
-            if state.get("global_summary"):
-                p.global_summary = str(state["global_summary"])[:3000]
-            if isinstance(state.get("character_state"), list):
-                p.character_state = json.dumps(state["character_state"], ensure_ascii=False)[:4000]
-            if isinstance(state.get("plot_arcs"), list):
-                p.plot_arcs = json.dumps(state["plot_arcs"], ensure_ascii=False)[:4000]
-            state_updated = True
-    except Exception:  # noqa: BLE001  状态文件更新失败不阻塞定稿
-        pass
+    # 2. AI 更新状态文件（共享函数，含伏笔章龄戳记）
+    config = await _pick_config(user, db, p.summary_llm)
+    state_updated = await _update_state_files(p, chapter, strip_html(chapter.content), config, db)
+
+    # 2.5 人物关系自动同步（失败不阻塞）
+    if p.novel_id:
+        novel_obj = await db.get(Novel, p.novel_id)
+        if novel_obj is not None:
+            await _sync_relations_from_chapter(p, novel_obj, strip_html(chapter.content), config, db)
 
     # 3. 本章摘要 + job 状态
     try:
@@ -884,3 +1008,66 @@ async def update_project(
     await db.commit()
     novel = await db.get(Novel, p.novel_id) if p.novel_id else None
     return _project_out(p, novel)
+
+
+async def _sync_relations_from_chapter(p: AiProject, novel: Novel, text: str, llm: AIConfig, db: AsyncSession) -> int:
+    """定稿后自动增量抽取人物关系（人物关系图 ↔ AI 工厂联动）。
+
+    只从本章抽取新关系；角色名必须匹配现有角色卡；去重 (from,to,relation)；
+    失败返回 0 不抛错（不阻塞定稿）。
+    """
+    from .relations import _parse_relations_json
+    from ..models import CharacterRelation
+
+    try:
+        chars = (
+            (await db.execute(select(Character).where(Character.novel_id == novel.id)))
+            .scalars()
+            .all()
+        )
+        if len(chars) < 2:
+            return 0
+        name_map = {c.name: c for c in chars}
+        char_line = "；".join(f"{c.name}（{c.role}）" for c in chars[:15])
+        prompt = (
+            f"作品：《{novel.title}》\n角色卡：{char_line}\n\n"
+            f"【本章正文节选】\n{text[:3000]}\n\n"
+            "请抽取本章中新出现或发生变化的人物关系，只输出 JSON 数组（无新关系输出 []）：\n"
+            '[{"from": "角色名", "to": "角色名", "relation": "关系词", "description": "一句话"}]\n'
+            "要求：from/to 必须用角色卡原名；relation 用简短中文词（师徒/仇敌/挚友等）；最多 8 条；没把握不输出。"
+        )
+        raw = await _chat_text(llm, _SYSTEM, prompt, max_tokens=1000)
+        items = _parse_relations_json(raw)
+        if not items:
+            return 0
+        existing = (
+            (await db.execute(select(CharacterRelation).where(CharacterRelation.novel_id == novel.id)))
+            .scalars()
+            .all()
+        )
+        seen = {(r.from_character_id, r.to_character_id, r.relation) for r in existing}
+        created = 0
+        for it in items[:8]:
+            fc = name_map.get(str(it.get("from", "")).strip())
+            tc = name_map.get(str(it.get("to", "")).strip())
+            rel = str(it.get("relation", "")).strip()[:50]
+            if not fc or not tc or not rel or fc.id == tc.id:
+                continue
+            key = (fc.id, tc.id, rel)
+            if key in seen:
+                continue
+            seen.add(key)
+            db.add(
+                CharacterRelation(
+                    novel_id=novel.id,
+                    from_character_id=fc.id,
+                    to_character_id=tc.id,
+                    relation=rel,
+                    description=str(it.get("description", ""))[:300],
+                    source="ai",
+                )
+            )
+            created += 1
+        return created
+    except Exception:  # noqa: BLE001
+        return 0

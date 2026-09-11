@@ -17,7 +17,7 @@ import {
   X,
   Wand2,
 } from "lucide-react";
-import { aiFactoryApi, aiFactoryM2, aiFactoryM3, aiFactoryM6, streamPost, type AiChapterJob, type AiProject } from "@/lib/api";
+import { aiFactoryApi, aiFactoryM2, aiFactoryM3, aiFactoryM6, aiFactoryM7, streamPost, type AiChapterJob, type AiProject, type HookAlert } from "@/lib/api";
 import { M3Toolbar, RetentionPanel } from "@/components/FactoryM3";
 import { Button } from "@/components/ui/button";
 import {
@@ -54,6 +54,12 @@ export default function ChapterGenPanel({
   const [reviewBusy, setReviewBusy] = useState(false);
   const [rewriteJob, setRewriteJob] = useState<AiChapterJob | null>(null);
   const [revising, setRevising] = useState(false);
+  const [hookAlerts, setHookAlerts] = useState<HookAlert[]>([]);
+
+  const loadHookAlerts = useCallback(() => {
+    aiFactoryM7.hookAlerts(project.id).then((r) => setHookAlerts(r.alerts)).catch(() => {});
+  }, [project.id]);
+  useEffect(loadHookAlerts, [loadHookAlerts]);
   const abortRef = useRef<AbortController | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -102,6 +108,7 @@ export default function ChapterGenPanel({
       setGenJob(null);
       setGenOutput("");
       loadJobs();
+      loadHookAlerts();
       // 刷新项目（状态文件变化）
       onProjectChange(await aiFactoryApi.get(project.id));
     } catch (e) {
@@ -191,6 +198,47 @@ export default function ChapterGenPanel({
             style={{ width: `${jobs.length ? (doneCount / jobs.length) * 100 : 0}%` }}
           />
         </div>
+        {/* 完本预测：按近 7 天定稿速度推算 */}
+        {(() => {
+          const target = project.target_chapters ?? jobs.length;
+          const remaining = Math.max(0, target - doneCount);
+          if (remaining === 0) return null;
+          const weekAgo = Date.now() - 7 * 86400_000;
+          const recentDone = jobs.filter(
+            (j) => j.finished_at && new Date(j.finished_at).getTime() > weekAgo
+          ).length;
+          if (recentDone === 0) return null;
+          const days = Math.ceil((remaining / recentDone) * 7);
+          const eta = new Date(Date.now() + days * 86400_000);
+          return (
+            <p className="text-[11px] text-muted-foreground">
+              📅 近 7 天定稿 {recentDone} 章，剩 {remaining} 章 —— 按此速度预计{" "}
+              <span className="font-medium text-foreground">{eta.getMonth() + 1} 月 {eta.getDate()} 日</span>完本
+            </p>
+          );
+        })()}
+        {/* 伏笔到期提醒 */}
+        {hookAlerts.length > 0 && (
+          <div className="rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2">
+            <p className="mb-1 text-xs font-medium text-amber-600 dark:text-amber-400">
+              ⚓ {hookAlerts.filter((a) => a.level === "overdue").length > 0 ? `${hookAlerts.filter((a) => a.level === "overdue").length} 条伏笔严重超期` : ""}
+              {hookAlerts.filter((a) => a.level === "overdue").length > 0 && hookAlerts.filter((a) => a.level === "aging").length > 0 ? " · " : ""}
+              {hookAlerts.filter((a) => a.level === "aging").length > 0 ? `${hookAlerts.filter((a) => a.level === "aging").length} 条待推进` : ""}
+              （已自动注入生成提示）
+            </p>
+            <div className="space-y-0.5">
+              {hookAlerts.slice(0, 5).map((a, i) => (
+                <p key={i} className="text-xs text-foreground/80">
+                  {a.level === "overdue" ? "🔴" : "🟡"} {a.title}
+                  <span className="text-muted-foreground"> · 埋于第 {a.planted_chapter} 章 · {a.age} 章未推进</span>
+                </p>
+              ))}
+              {hookAlerts.length > 5 && (
+                <p className="text-[11px] text-muted-foreground">…共 {hookAlerts.length} 条</p>
+              )}
+            </div>
+          </div>
+        )}
         {project.global_summary && (
           <details className="mt-2 text-xs text-muted-foreground">
             <summary className="cursor-pointer hover:text-foreground">前情摘要（状态文件）</summary>

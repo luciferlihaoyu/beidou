@@ -31,10 +31,12 @@ from .ai_factory import (  # noqa: F401  router 不复用（避免重复注册�
     _SYSTEM,
     _chat_text,
     _get_project,
+    _hook_alerts,
     _normalize_base,
     _parse_json,
     _pick_config,
     _text_to_html,
+    _update_state_files,
 )
 from .ai_factory import router as _ai_factory_router  # noqa: F401  仅确保初始化顺序
 
@@ -112,6 +114,15 @@ async def review_full(
         for i in deai["issues"]
         if i.get("severity") in ("high", "medium")
     ]
+    # 文字规范检测合并（错别字/敏感词/重复词/标点）
+    from ..textlint import lint
+
+    lint_report = lint(text)
+    issues = issues + [
+        {"type": f"规范·{i['type']}", "severity": i["severity"], "issue": i["detail"], "suggestion": ""}
+        for i in lint_report["issues"]
+        if i["severity"] in ("high", "medium")
+    ]
     retention = data.get("retention") if isinstance(data.get("retention"), dict) else None
     score = data.get("score")
     if isinstance(score, (int, float)) and deai["score"] < 70:
@@ -129,6 +140,7 @@ async def review_full(
         "issues": issues,
         "has_high": has_high,
         "deai_score": deai["score"],
+        "lint_score": lint_report["score"],
         "retention": retention,
     }
 
@@ -187,6 +199,7 @@ async def batch_run(
         total = len(pending)
         yield _sse({"event": "start", "total": total})
         done_n = 0
+        low_quality_streak = 0  # 质量门禁：连续低分（AI味<60）达到 2 章自动暂停
         for job in pending:
             chapter = await db.get(Chapter, job.chapter_id)
             if chapter is None:
@@ -284,38 +297,12 @@ async def batch_run(
             except Exception:  # noqa: BLE001
                 pass
 
-            # ---- 状态文件增量更新（失败不阻塞）----
-            state_updated = False
-            try:
-                update_prompt = (
-                    f"作品：《{novel.title}》\n\n"
-                    f"【现有前情摘要】\n{p.global_summary or '（空——这是第一章）'}\n\n"
-                    f"【现有角色状态】\n{p.character_state or '（空）'}\n\n"
-                    f"【现有伏笔台账】\n{p.plot_arcs or '（空）'}\n\n"
-                    f"【现有资源账本】\n{p.particle_ledger or '（空）'}\n\n"
-                    f"【刚完成的本章《{chapter.title or ''}》正文】\n{text[:4000]}\n\n"
-                    "请增量更新四份状态文件，输出 JSON（只输出 JSON）：\n"
-                    "{\n"
-                    '  "global_summary": "融合本章后的全书摘要（≤1200 字）",\n'
-                    '  "character_state": [{"name": "角色名", "location": "所在", "goal": "当前目标", "condition": "状态", "change": "本章变化"}],\n'
-                    '  "plot_arcs": [{"title": "伏笔/情节弧", "status": "埋设中/推进中/已回收", "note": "本章进展"}],\n'
-                    '  "particle_ledger": "资源账本纯文本：金钱/关键物品/等级数值当前状态（≤500 字）"\n'
-                    "}\n只列活跃角色与未回收伏笔，要精炼。"
-                )
-                raw = await _chat_text(summary_llm, _SYSTEM, update_prompt, max_tokens=3000)
-                state = _parse_json(raw)
-                if isinstance(state, dict):
-                    if state.get("global_summary"):
-                        p.global_summary = str(state["global_summary"])[:3000]
-                    if isinstance(state.get("character_state"), list):
-                        p.character_state = json.dumps(state["character_state"], ensure_ascii=False)[:4000]
-                    if isinstance(state.get("plot_arcs"), list):
-                        p.plot_arcs = json.dumps(state["plot_arcs"], ensure_ascii=False)[:4000]
-                    if state.get("particle_ledger"):
-                        p.particle_ledger = str(state["particle_ledger"])[:1500]
-                    state_updated = True
-            except Exception:  # noqa: BLE001
-                pass
+            # ---- 状态文件增量更新（共享函数，失败不阻塞；含伏笔章龄戳记）----
+            state_updated = await _update_state_files(p, chapter, text, summary_llm, db, include_particle=True)
+            # ---- 人物关系自动同步（失败不阻塞）----
+            from .ai_factory import _sync_relations_from_chapter
+
+            await _sync_relations_from_chapter(p, novel, text, summary_llm, db)
 
             # ---- 本章摘要 + job 收尾 ----
             try:
@@ -331,6 +318,15 @@ async def batch_run(
             job.finished_at = datetime.now(timezone.utc)
             await db.commit()
             done_n += 1
+
+            # ---- 质量门禁：最终成稿 AI 味 <60 记一记，连续 2 章自动暂停 ----
+            final_score = detect(strip_html(chapter.content))["score"]
+            if final_score < 60:
+                low_quality_streak += 1
+                yield _sse({"event": "quality_warn", "job_id": job.id, "title": title, "score": final_score, "streak": low_quality_streak})
+            else:
+                low_quality_streak = 0
+
             yield _sse({
                 "event": "chapter_done",
                 "job_id": job.id,
@@ -340,6 +336,15 @@ async def batch_run(
                 "done": done_n,
                 "total": total,
             })
+
+            if low_quality_streak >= 2:
+                yield _sse({
+                    "event": "paused",
+                    "reason": f"连续 {low_quality_streak} 章 AI 味低于 60 分，已自动暂停——建议调整提示词或更换正文模型后重跑",
+                    "done": done_n,
+                    "total": total,
+                })
+                return
 
         yield _sse({"event": "done", "completed": done_n, "total": total})
 
@@ -517,3 +522,39 @@ async def rewrite_partial(
         "new_excerpt": new_excerpt,
         "deai_score": detect(new_excerpt)["score"],
     }
+
+
+# ================= 伏笔到期提醒 + 文本规范检测 =================
+
+@router.get("/projects/{project_id}/hook-alerts")
+async def hook_alerts(project_id: int, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    """超期伏笔列表（前端进度卡展示：黄灯 ≥8 章，红灯 ≥15 章）。"""
+    from .ai_factory import _count_done_jobs
+
+    p = await _get_project(project_id, user, db)
+    done_no = await _count_done_jobs(db, p.id)
+    alerts = _hook_alerts(p.plot_arcs, done_no)
+    return {
+        "done_chapters": done_no,
+        "alerts": alerts,
+        "aging_count": sum(1 for a in alerts if a["level"] == "aging"),
+        "overdue_count": sum(1 for a in alerts if a["level"] == "overdue"),
+    }
+
+
+class LintIn(BaseModel):
+    text: str = Field(min_length=1, max_length=30000)
+
+
+@router.post("/projects/{project_id}/lint")
+async def lint_text(
+    project_id: int, data: LintIn, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
+):
+    """文本规范检测（本地零成本）：重复词/敏感词/标点问题。
+
+    供编辑器与定稿前自检使用，与 anti_llm 互补（那个查 AI 味，这个查文字规范）。
+    """
+    await _get_project(project_id, user, db)
+    from ..textlint import lint
+
+    return lint(data.text)

@@ -285,6 +285,8 @@ export interface IntegrationState {
   has_alist_password: boolean;
   xuanji_url: string;
   has_xuanji_key: boolean;
+  auto_backup_enabled: boolean;
+  last_backup_at: string;
 }
 
 // ---------- 章节快照 ----------
@@ -491,6 +493,8 @@ export type BatchEvent =
   | { event: "deai"; job_id: number; score: number; rewritten?: boolean }
   | { event: "rewrite"; job_id: number; score: number }
   | { event: "chapter_done"; job_id: number; title: string; words: number; state_updated: boolean; done: number; total: number }
+  | { event: "quality_warn"; job_id: number; title: string; score: number; streak: number }
+  | { event: "paused"; reason: string; done: number; total: number }
   | { event: "error"; message: string; job_id?: number; title?: string }
   | { event: "done"; completed: number; total: number };
 
@@ -550,6 +554,7 @@ export const aiFactoryM3 = {
       issues: NonNullable<AiChapterJob["review_issues"]>;
       has_high: boolean;
       deai_score: number;
+      lint_score?: number;
       retention: { hooks?: { type?: string; desc?: string }[]; cool_points?: { type?: string; desc?: string }[] } | null;
     }>(`/api/ai-factory/projects/${projectId}/jobs/${jobId}/review-full`),
   retention: (projectId: number) =>
@@ -672,5 +677,31 @@ export const aiFactoryM6 = {
     api.post<{ word_count: number; new_excerpt: string; deai_score: number }>(
       `/api/ai-factory/projects/${projectId}/jobs/${jobId}/rewrite-partial`,
       { excerpt, instruction }
+    ),
+};
+
+// ---------- 伏笔提醒 + 文本规范检测 ----------
+
+export interface HookAlert {
+  title: string;
+  status: string;
+  note: string;
+  planted_chapter: number;
+  age: number;
+  level: "aging" | "overdue";
+}
+
+export const aiFactoryM7 = {
+  hookAlerts: (projectId: number) =>
+    api.get<{
+      done_chapters: number;
+      alerts: HookAlert[];
+      aging_count: number;
+      overdue_count: number;
+    }>(`/api/ai-factory/projects/${projectId}/hook-alerts`),
+  lint: (projectId: number, text: string) =>
+    api.post<{ score: number; issues: { type: string; severity: string; detail: string }[] }>(
+      `/api/ai-factory/projects/${projectId}/lint`,
+      { text }
     ),
 };
