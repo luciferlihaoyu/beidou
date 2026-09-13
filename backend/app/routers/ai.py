@@ -73,20 +73,22 @@ async def list_config_models(config_id: int, user: User = Depends(get_current_us
         raise HTTPException(404, "配置不存在")
     if not config.api_key:
         raise HTTPException(400, "该配置还没有填写 API Key")
-    url = _normalize_base(config.base_url) + "/models"
+    url = _normalize_base(config.base_url) + "/v1/models"  # OpenAI 兼容标准路径
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(20.0, connect=8.0)) as client:
             resp = await client.get(url, headers={"Authorization": f"Bearer {config.api_key}"})
-    except httpx.HTTPError:
-        return {"models": []}
+    except httpx.HTTPError as exc:
+        return {"models": [], "error": f"无法连接端点：{exc.__class__.__name__}"}
     if resp.status_code != 200:
-        return {"models": []}
+        return {"models": [], "error": f"端点返回 HTTP {resp.status_code}：{resp.text[:120]}"}
     try:
         data = resp.json()
         models = sorted({m["id"] for m in data.get("data", []) if isinstance(m, dict) and m.get("id")})
+        if not models:
+            return {"models": [], "error": "端点返回了空模型清单"}
         return {"models": models}
     except (ValueError, AttributeError):
-        return {"models": []}
+        return {"models": [], "error": "端点返回格式无法解析（非标准 /v1/models 响应）"}
 
 
 @router.post("/configs", response_model=AIConfigOut)

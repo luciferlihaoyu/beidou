@@ -583,7 +583,7 @@ export const aiConfigApi = {
   list: () => api.get<AIConfig[]>("/api/ai/configs"),
   /** 从配置指向的端点（天枢等 OpenAI 兼容端点）拉 /models 清单 */
   models: (configId: number) =>
-    api.get<{ models: string[] }>(`/api/ai/configs/${configId}/models`),
+    api.get<{ models: string[]; error?: string }>(`/api/ai/configs/${configId}/models`),
 };
 
 // ---------- 人工写作 AI 助手（编辑器内续写 / 润色 / 头脑风暴，SSE 流式） ----------

@@ -79,13 +79,23 @@ export default function ModelRouteDialog({
           cs.filter((c) => c.has_key).map(async (c) => {
             try {
               const r = await aiConfigApi.models(c.id);
-              return [c.id, r.models] as const;
+              return [c.id, r.models, r.error] as const;
             } catch {
-              return [c.id, []] as const;
+              return [c.id, [], "请求失败"] as const;
             }
           })
         );
-        setModelsByConfig(Object.fromEntries(entries));
+        setModelsByConfig(
+          Object.fromEntries(entries.map(([id, models]) => [id, models as string[]]))
+        );
+        // 拉取失败的配置：汇总提示（此前静默降级，用户不知道为何只有一个模型）
+        const failures = entries.filter(([, models]) => models.length === 0);
+        if (failures.length > 0) {
+          const names = failures
+            .map(([id, , err]) => `${cs.find((c) => c.id === id)?.name ?? id}${err ? `（${err}）` : ""}`)
+            .join("、");
+          toast.warning(`以下配置的模型清单拉取失败，仅显示默认模型：${names}`, { duration: 8000 });
+        }
         setLoadingModels(false);
       })
       .catch((e) => toast.error(e.message));
