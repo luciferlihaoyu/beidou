@@ -417,6 +417,8 @@ export interface AiProject {
   market: AiMarketReport | null;
   cover_prompt: AiCoverPrompt | null;
   kb_query: string;
+  platform: string;
+  custom_words: string;
   chapter_count: number;
   created_at: string;
   updated_at: string;
@@ -720,4 +722,29 @@ export const xuanjiApi = {
     api.post<{ ok: boolean; title: string; chars: number }>(
       `/api/ai-factory/projects/${projectId}/kb-sync`
     ),
+};
+
+// ---------- 平台敏感词 + 去AI味 ----------
+export const PLATFORM_CHOICES: { key: string; name: string }[] = [
+  { key: "", name: "通用（不指定平台）" },
+  { key: "qidian", name: "起点中文网" },
+  { key: "fanqie", name: "番茄小说" },
+  { key: "qimao", name: "七猫小说" },
+  { key: "jjwxc", name: "晋江文学城" },
+  { key: "feilu", name: "飞卢小说" },
+];
+
+export interface DeflavorResult {
+  saved: boolean;
+  before_score: number;
+  after_score: number;
+  word_count?: number;
+  before_issues?: string[];
+  after_issues?: string[];
+  message?: string;
+}
+
+export const aiFactoryM9 = {
+  deflavor: (projectId: number, jobId: number) =>
+    api.post<DeflavorResult>(`/api/ai-factory/projects/${projectId}/jobs/${jobId}/deflavor`),
 };

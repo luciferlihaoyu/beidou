@@ -352,6 +352,8 @@ class AiProject(Base):
     market_json: Mapped[str] = mapped_column(Text, default="")  # 市场调研报告（选题用）
     cover_prompt: Mapped[str] = mapped_column(Text, default="")  # 封面绘图 prompt（中文描述+英文 prompt）
     kb_query: Mapped[str] = mapped_column(String(200), default="")  # 璇玑知识源检索词（空=不启用）
+    platform: Mapped[str] = mapped_column(String(20), default="")  # 目标平台（敏感词词库分档）
+    custom_words: Mapped[str] = mapped_column(String(500), default="")  # 自定义敏感词（逗号分隔）
     subplot_board: Mapped[str] = mapped_column(Text, default="")  # 支线进度板：A/B/C 线状态
     created_at: Mapped[datetime] = mapped_column(default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(default=utcnow, onupdate=utcnow)

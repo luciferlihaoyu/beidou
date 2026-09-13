@@ -154,6 +154,8 @@ def _project_out(p: AiProject, novel: Novel | None = None, chapter_count: int = 
         "market": json.loads(p.market_json) if p.market_json else None,
         "cover_prompt": json.loads(p.cover_prompt) if p.cover_prompt else None,
         "kb_query": p.kb_query,
+        "platform": p.platform,
+        "custom_words": p.custom_words,
         "chapter_count": chapter_count,
         "created_at": p.created_at.isoformat(),
         "updated_at": p.updated_at.isoformat(),
@@ -1035,6 +1037,8 @@ class ProjectSettingsIn(BaseModel):
     author_intent: str | None = Field(default=None, max_length=2000)
     current_focus: str | None = Field(default=None, max_length=2000)
     kb_query: str | None = Field(default=None, max_length=200)
+    platform: str | None = Field(default=None, max_length=20)
+    custom_words: str | None = Field(default=None, max_length=500)
     context_recent_chapters: int | None = Field(default=None, ge=1, le=10)
     context_extra_chapters: list[int] | None = None
     setup_llm: str | None = None

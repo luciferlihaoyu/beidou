@@ -117,7 +117,7 @@ async def review_full(
     # 文字规范检测合并（错别字/敏感词/重复词/标点）
     from ..textlint import lint
 
-    lint_report = lint(text)
+    lint_report = lint(text, platform=p.platform, custom_words=[w.strip() for w in p.custom_words.split(",") if w.strip()])
     issues = issues + [
         {"type": f"规范·{i['type']}", "severity": i["severity"], "issue": i["detail"], "suggestion": ""}
         for i in lint_report["issues"]
@@ -461,6 +461,68 @@ async def revise_chapter(project_id: int, job_id: int, user: User = Depends(get_
     }
 
 
+@router.post("/projects/{project_id}/jobs/{job_id}/deflavor")
+async def deflavor_chapter(project_id: int, job_id: int, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    """手动去 AI 味：三遍法改写（去泛化→落回角色视角→冷读），保剧情保字数。
+
+    与 revise 的区别：revise 按审校意见修问题，deflavor 专职去 AI 味（结构层+词句层）。
+    返回前后分数对比。改写后复检分数不升反降则不保存（防越改越糟）。
+    """
+    p = await _get_project(project_id, user, db)
+    job = await db.get(AiChapterJob, job_id)
+    if job is None or job.project_id != p.id or job.chapter_id is None:
+        raise HTTPException(404, "章节任务不存在")
+    chapter = await db.get(Chapter, job.chapter_id)
+    if chapter is None:
+        raise HTTPException(404, "章节不存在")
+
+    text = strip_html(chapter.content)
+    if len(text) < 100:
+        raise HTTPException(400, "章节内容太短，无需去味")
+    before = detect(text)
+
+    config = await _pick_config(user, db, p.chapter_llm)
+    from ..anti_llm import deflavor_rewrite_prompt
+
+    raw = await _chat_text(config, _SYSTEM, deflavor_rewrite_prompt(text, before), max_tokens=8000)
+    rewritten = raw.strip()
+    if len(rewritten) < len(text) * 0.3:
+        raise HTTPException(400, "去味结果过短（疑似截断），未保存，请重试")
+
+    after = detect(rewritten)
+    if after["score"] <= before["score"]:
+        return {
+            "saved": False,
+            "before_score": before["score"],
+            "after_score": after["score"],
+            "message": "改写后分数未提升，已放弃保存（原文保留）",
+        }
+
+    chapter.content = _text_to_html(rewritten)
+    chapter.word_count = count_words(chapter.content)
+    job.review_score = after["score"]
+    job.actual_words = chapter.word_count
+    if job.status == "needs_fix" and after["score"] >= 70:
+        job.status = "done"
+        job.review_issues = None
+    await db.commit()
+    try:
+        from ..search_fts import sync_chapter
+
+        await sync_chapter(db, chapter.id)
+        await db.commit()
+    except Exception:  # noqa: BLE001
+        pass
+    return {
+        "saved": True,
+        "word_count": chapter.word_count,
+        "before_score": before["score"],
+        "after_score": after["score"],
+        "before_issues": [i["type"] for i in before["issues"]],
+        "after_issues": [i["type"] for i in after["issues"]],
+    }
+
+
 class RewritePartialIn(BaseModel):
     excerpt: str = Field(min_length=10, max_length=3000)  # 要重写的原文摘段
     instruction: str = Field(default="", max_length=500)
@@ -554,7 +616,7 @@ async def lint_text(
 
     供编辑器与定稿前自检使用，与 anti_llm 互补（那个查 AI 味，这个查文字规范）。
     """
-    await _get_project(project_id, user, db)
+    p = await _get_project(project_id, user, db)
     from ..textlint import lint
 
-    return lint(data.text)
+    return lint(data.text, platform=p.platform, custom_words=[w.strip() for w in p.custom_words.split(",") if w.strip()])

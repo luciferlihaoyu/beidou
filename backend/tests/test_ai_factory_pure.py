@@ -111,3 +111,47 @@ class TestRouteFormat:
         ]:
             cfg, _, model = field.partition("@")
             assert cfg == expect_id and model == expect_model
+
+
+class TestAntiLlmStructural:
+    """M9 结构层检测：上帝视角/章末总结体/三连排比/套词密度。"""
+
+    def test_god_view_and_ending_detected(self):
+        text = "他看着远方。殊不知，命运的齿轮已经转动。" + "他走在路上。" * 20 + "这一夜，注定无人入眠。"
+        r = detect(text)
+        types = {i["type"] for i in r["issues"]}
+        assert "上帝视角" in types and "章末总结体" in types
+
+    def test_triple_parallel_detected(self):
+        text = "他不是害怕，也不是退缩，而是在等待时机。" + "风吹过。" * 20
+        assert any(i["type"] == "三连排比" for i in detect(text)["issues"])
+
+    def test_cliche_density_detected(self):
+        text = ("他深吸一口气，眼中闪过一丝光，嘴角勾起一抹笑，仿佛一切尽在掌握。" * 6)
+        assert any(i["type"] == "套词密度" for i in detect(text)["issues"])
+
+    def test_clean_text_no_structural_flags(self):
+        good = "他把烟按灭在墙上。「走吧。」她说。风从巷口灌进来。" * 10
+        types = {i["type"] for i in detect(good)["issues"]}
+        assert "上帝视角" not in types and "章末总结体" not in types
+
+
+class TestTextLintPlatform:
+    def test_platform_extra_words(self):
+        from app.textlint import lint
+
+        text = "他们在地下赌场碰头。"
+        plain = lint(text)
+        fanqie = lint(text, platform="fanqie")
+        assert fanqie["score"] < plain["score"]
+
+    def test_custom_words(self):
+        from app.textlint import lint
+
+        r = lint("他开启了阿尔法系统。", custom_words=["阿尔法"])
+        assert any("阿尔法" in i["detail"] for i in r["issues"])
+
+    def test_unknown_platform_falls_back(self):
+        from app.textlint import lint
+
+        assert lint("干净文本。", platform="nonexistent")["score"] == 100

@@ -10,6 +10,7 @@ import { toast } from "sonner";
 import {
   Bot,
   BookMarked,
+  ShieldAlert,
   Image as ImageIcon,
   Pause,
   Play,
@@ -21,6 +22,7 @@ import {
   aiFactoryM2,
   aiFactoryM3,
   xuanjiApi,
+  PLATFORM_CHOICES,
   type AiProject,
   type BatchEvent,
   type RetentionDashboard,
@@ -294,6 +296,9 @@ export function M3Toolbar({
   const [kbEditing, setKbEditing] = useState(false);
   const [kbQuery, setKbQuery] = useState(project.kb_query ?? "");
   const [kbSyncing, setKbSyncing] = useState(false);
+  const [platEditing, setPlatEditing] = useState(false);
+  const [platform, setPlatform] = useState(project.platform ?? "");
+  const [customWords, setCustomWords] = useState(project.custom_words ?? "");
   const [intent, setIntent] = useState(project.author_intent ?? "");
   const [focus, setFocus] = useState(project.current_focus ?? "");
   const [editing, setEditing] = useState<"none" | "intent" | "focus">("none");
@@ -356,7 +361,69 @@ export function M3Toolbar({
           <BookMarked className="mr-1 h-3.5 w-3.5" />
           知识库{project.kb_query ? " ✓" : ""}
         </Button>
+        <Button
+          variant={platEditing ? "secondary" : "outline"}
+          size="sm"
+          className="h-8"
+          onClick={() => setPlatEditing(!platEditing)}
+        >
+          <ShieldAlert className="mr-1 h-3.5 w-3.5" />
+          平台规范{project.platform ? ` · ${PLATFORM_CHOICES.find((c) => c.key === project.platform)?.name ?? project.platform}` : ""}
+        </Button>
       </div>
+
+      {platEditing && (
+        <div className="rounded-lg border border-border bg-card p-3">
+          <p className="mb-1.5 text-xs text-muted-foreground">
+            目标平台决定审校时用哪套敏感词库（各平台机审口径不同）；自定义词可补充编辑点名禁用的词。
+          </p>
+          <div className="flex flex-wrap gap-1.5">
+            {PLATFORM_CHOICES.map((c) => (
+              <button
+                key={c.key}
+                type="button"
+                onClick={() => setPlatform(c.key)}
+                className={`rounded-full border px-3 py-1 text-xs transition-colors ${
+                  platform === c.key
+                    ? "border-primary bg-primary/10 text-primary"
+                    : "border-border text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                {c.name}
+              </button>
+            ))}
+          </div>
+          <input
+            className="mt-2 h-8 w-full rounded-md border border-border bg-transparent px-3 text-sm"
+            placeholder="自定义敏感词，逗号分隔（如：金手指,系统流,真实地名）"
+            value={customWords}
+            onChange={(e) => setCustomWords(e.target.value)}
+          />
+          <div className="mt-2 flex justify-end gap-2">
+            <Button variant="ghost" size="sm" onClick={() => setPlatEditing(false)}>
+              取消
+            </Button>
+            <Button
+              size="sm"
+              onClick={async () => {
+                try {
+                  const p = await aiFactoryM2.updateProject(project.id, {
+                    platform,
+                    custom_words: customWords,
+                  });
+                  onProjectChange(p);
+                  toast.success("平台规范已保存");
+                  setPlatEditing(false);
+                } catch (e) {
+                  toast.error(e instanceof Error ? e.message : "保存失败");
+                }
+              }}
+            >
+              保存
+            </Button>
+          </div>
+        </div>
+      )}
 
       {kbEditing && (
         <div className="rounded-lg border border-border bg-card p-3">

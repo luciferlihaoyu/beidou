@@ -41,6 +41,8 @@ async def init_db():
         await _ensure_column(conn, "ai_projects", "market_json", "TEXT NOT NULL DEFAULT ''")
         await _ensure_column(conn, "ai_projects", "cover_prompt", "TEXT NOT NULL DEFAULT ''")
         await _ensure_column(conn, "ai_projects", "kb_query", "TEXT NOT NULL DEFAULT ''")
+        await _ensure_column(conn, "ai_projects", "platform", "TEXT NOT NULL DEFAULT ''")
+        await _ensure_column(conn, "ai_projects", "custom_words", "TEXT NOT NULL DEFAULT ''")
 
     await _migrate()
 

@@ -22,6 +22,51 @@ SENSITIVE_WORDS: dict[str, list[str]] = {
     "赌博": ["赌场", "百家乐", "赌球"],
 }
 
+# ---- 平台特色加严词库（在通用词表上叠加；按公开机审口径整理，可用自定义词补充）----
+PLATFORM_PROFILES: dict[str, dict] = {
+    "": {"name": "通用", "extra": {}},
+    "qidian": {
+        "name": "起点中文网",
+        "extra": {
+            "政治": ["国家领导人", "反动", "颠覆政权", "政治运动"],
+            "影射现实": ["真实地名暴动", "现实机构黑幕"],
+        },
+    },
+    "fanqie": {
+        "name": "番茄小说",
+        "extra": {
+            "暴恐": ["砍杀", "分尸", "碎尸"],
+            "涉黑": ["黑帮火并", "收保护费", "地下赌场"],
+            "色情": ["床戏", "肉体交易"],
+        },
+    },
+    "qimao": {
+        "name": "七猫小说",
+        "extra": {
+            "暴恐": ["砍杀", "分尸"],
+            "涉黑": ["黑帮", "收保护费"],
+            "赌博": ["地下赌场", "网络赌博"],
+        },
+    },
+    "jjwxc": {
+        "name": "晋江文学城",
+        "extra": {
+            "色情": ["床戏", "肉体", "情欲", "欢爱"],
+            "耽美敏感": ["男男性行为", "女女性行为"],
+            "政治": ["影射时政"],
+        },
+    },
+    "feilu": {
+        "name": "飞卢小说",
+        "extra": {
+            "政治": ["国家领导人", "颠覆政权"],
+        },
+    },
+}
+
+PLATFORM_CHOICES = [(k, v["name"]) for k, v in PLATFORM_PROFILES.items()]
+
+
 # ---- 高频错别字对（容易写错的）----
 TYPO_PAIRS: list[tuple[str, str]] = [
     ("在见", "再见"),
@@ -68,8 +113,12 @@ _LEGIT_REDUP = {
 }
 
 
-def lint(text: str) -> dict:
-    """对纯文本跑全部规范检测，返回 {score, issues}（100 分制）。"""
+def lint(text: str, platform: str = "", custom_words: list[str] | None = None) -> dict:
+    """对纯文本跑全部规范检测，返回 {score, issues}（100 分制）。
+
+    platform：目标平台 key（qidian/fanqie/qimao/jjwxc/feilu），叠加平台特色词库。
+    custom_words：项目自定义敏感词（编辑点名禁用的词）。
+    """
     issues: list[dict] = []
 
     # 1. 相邻 2 字词重复
@@ -80,11 +129,23 @@ def lint(text: str) -> dict:
         ctx = text[max(0, m.start() - 8) : m.end() + 8]
         issues.append({"type": "重复词", "severity": "medium", "detail": f"「{word}{word}」相邻重复（…{ctx}…）"})
 
-    # 2. 敏感词
-    for cat, words in SENSITIVE_WORDS.items():
+    # 2. 敏感词（通用 + 平台加严 + 自定义）
+    word_groups: list[tuple[str, list[str], str]] = [
+        (cat, words, "") for cat, words in SENSITIVE_WORDS.items()
+    ]
+    profile = PLATFORM_PROFILES.get(platform)
+    if profile:
+        word_groups += [(cat, words, f"[{profile['name']}]") for cat, words in profile["extra"].items()]
+    if custom_words:
+        word_groups.append(("自定义", [w for w in custom_words if w.strip()], ""))
+    for cat, words, tag in word_groups:
         for w in words:
-            if w in text:
-                issues.append({"type": "敏感词", "severity": "high", "detail": f"含{cat}类敏感词「{w}」，平台机审可能拦截"})
+            if w and w in text:
+                issues.append({
+                    "type": "敏感词",
+                    "severity": "high",
+                    "detail": f"{tag}含{cat}类敏感词「{w}」，平台机审可能拦截",
+                })
 
     # 3. 常见错别字
     for wrong, right in TYPO_PAIRS:

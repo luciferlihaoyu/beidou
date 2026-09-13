@@ -9,6 +9,7 @@ import { toast } from "sonner";
 import {
   CheckCircle2,
   Circle,
+  Eraser,
   FileEdit,
   Loader2,
   RefreshCw,
@@ -17,7 +18,7 @@ import {
   X,
   Wand2,
 } from "lucide-react";
-import { aiFactoryApi, aiFactoryM2, aiFactoryM3, aiFactoryM6, aiFactoryM7, streamPost, type AiChapterJob, type AiProject, type HookAlert } from "@/lib/api";
+import { aiFactoryApi, aiFactoryM2, aiFactoryM3, aiFactoryM6, aiFactoryM7, aiFactoryM9, streamPost, type AiChapterJob, type AiProject, type HookAlert } from "@/lib/api";
 import { M3Toolbar, RetentionPanel } from "@/components/FactoryM3";
 import { Button } from "@/components/ui/button";
 import {
@@ -131,6 +132,25 @@ export default function ChapterGenPanel({
       toast.error(e instanceof Error ? e.message : "审校失败");
     } finally {
       setReviewBusy(false);
+    }
+  }
+
+  // ---------- 去 AI 味（M9：三遍法改写，前后分数对比） ----------
+  const [deflavoringId, setDeflavoringId] = useState<number | null>(null);
+  async function runDeflavor(job: AiChapterJob) {
+    setDeflavoringId(job.id);
+    try {
+      const r = await aiFactoryM9.deflavor(project.id, job.id);
+      if (r.saved) {
+        toast.success(`去味完成：AI 味 ${r.before_score} → ${r.after_score} 分`);
+      } else {
+        toast.info(r.message ?? `改写后未提升（${r.before_score} → ${r.after_score}），已保留原文`);
+      }
+      loadJobs();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "去味失败");
+    } finally {
+      setDeflavoringId(null);
     }
   }
 
@@ -317,6 +337,23 @@ export default function ChapterGenPanel({
                 >
                   <ShieldCheck className="mr-1 h-3 w-3" />
                   审校
+                </Button>
+              )}
+              {(j.status === "done" || j.status === "needs_fix") && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-7 px-2 text-xs"
+                  disabled={deflavoringId !== null}
+                  title="三遍法去 AI 味（保剧情保字数，前后分数对比，不提升不保存）"
+                  onClick={() => void runDeflavor(j)}
+                >
+                  {deflavoringId === j.id ? (
+                    <Loader2 className="mr-1 h-3 w-3 animate-spin" />
+                  ) : (
+                    <Eraser className="mr-1 h-3 w-3" />
+                  )}
+                  去味
                 </Button>
               )}
               {j.review_score !== null && j.review_score !== undefined && (
