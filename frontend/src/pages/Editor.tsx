@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type RefObject } from "react";
 import { useNavigate, useParams } from "react-router";
 import {
   AlignVerticalJustifyCenter,
@@ -32,6 +32,7 @@ import {
   Settings2,
   Sparkles,
   Trash2,
+  Wand2,
   X,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -57,10 +58,12 @@ import { useGlobalShortcuts } from "@/hooks/useGlobalShortcuts";
 import { POMODORO_WRITE_MIN, usePomodoro } from "@/hooks/usePomodoro";
 import { ReferenceDataProvider, type ReferenceData } from "@/contexts/ReferenceDataContext";
 import {
+  aiAssist,
   api,
   listChapters,
   streamPost,
   updateChapter,
+  type AiAssistAction,
   type AIConfig,
   type Character,
   type Chapter,
@@ -93,7 +96,8 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Textarea } from "@/components/ui/textarea";
 
 type SaveState = "saved" | "saving" | "dirty";
 
@@ -280,6 +284,8 @@ export default function Editor() {
 
   // 大章节拆分
   const [splitting, setSplitting] = useState(false);
+  // 编辑器 AI 助手（续写 / 润色 / 头脑风暴）
+  const [aiAssistOpen, setAiAssistOpen] = useState(false);
 
   // 章节快照（面板 + 手动存稿点 Dialog）
   const [snapshotOpen, setSnapshotOpen] = useState(false);
@@ -2106,6 +2112,17 @@ export default function Editor() {
                   >
                     <Gauge className="h-3.5 w-3.5" />
                   </Button>
+                  {/* AI 助手：续写 / 润色 / 头脑风暴 */}
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className={`h-5 w-5 ${aiAssistOpen ? "text-primary" : ""}`}
+                    title="AI 助手（续写 / 润色 / 头脑风暴）"
+                    disabled={activeId === null}
+                    onClick={() => setAiAssistOpen(true)}
+                  >
+                    <Wand2 className="h-3.5 w-3.5" />
+                  </Button>
                   {/* 写作排版偏好：字号 / 行距 / 页宽 */}
                   <DropdownMenu>
                     <DropdownMenuTrigger asChild>
@@ -2296,6 +2313,15 @@ export default function Editor() {
           novelId={novelId}
           chapter={polishChapter}
           onApplied={(id, html) => void handlePolishApplied(id, html)}
+        />
+
+        {/* 编辑器 AI 助手（续写 / 润色 / 头脑风暴） */}
+        <AiAssistDialog
+          open={aiAssistOpen}
+          onOpenChange={setAiAssistOpen}
+          novelId={novelId}
+          chapterId={activeId}
+          editorRef={editorRef}
         />
 
         {/* 废纸篓（P4-2） */}
@@ -2604,5 +2630,266 @@ export default function Editor() {
         />
       )}
     </AppShell>
+  );
+}
+
+/**
+ * AI 助手对话框：续写 / 润色 / 头脑风暴（人工写作编辑器的 AI 辅助，走 SSE 流式）。
+ *
+ * 说明：本组件常驻挂载（state 都在组件内），关闭弹窗只卸载 DialogContent，
+ * 进行中的流式请求不会中断，重新打开仍能看到已生成的内容。
+ */
+function AiAssistDialog({
+  open,
+  onOpenChange,
+  novelId,
+  chapterId,
+  editorRef,
+}: {
+  open: boolean;
+  onOpenChange: (v: boolean) => void;
+  novelId: number;
+  chapterId: number | null;
+  editorRef: RefObject<EditorHandle | null>;
+}) {
+  const [tab, setTab] = useState<AiAssistAction>("continue");
+  const [instruction, setInstruction] = useState("");
+  const [result, setResult] = useState("");
+  const [streaming, setStreaming] = useState(false);
+  // 润色：打开弹窗瞬间抓取的选区文本与位置（弹窗打开期间编辑器文档不变，位置仍有效）
+  const [selText, setSelText] = useState("");
+  const selRange = useRef<{ from: number; to: number } | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    setResult("");
+    setInstruction("");
+    const ed = editorRef.current?.getEditor();
+    if (ed && !ed.isDestroyed) {
+      const { from, to } = ed.state.selection;
+      selRange.current = from === to ? null : { from, to };
+      setSelText(from === to ? "" : ed.state.doc.textBetween(from, to, "\n").trim());
+    } else {
+      selRange.current = null;
+      setSelText("");
+    }
+    // editorRef 是 ref，无需入依赖；chapterId 变化时重抓选区
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, chapterId]);
+
+  async function run(action: AiAssistAction, selectedText = "") {
+    setResult("");
+    setStreaming(true);
+    try {
+      await aiAssist(
+        novelId,
+        { action, selected_text: selectedText, instruction: instruction.trim(), chapter_id: chapterId },
+        (t) => setResult((prev) => prev + t)
+      );
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "AI 请求失败");
+    } finally {
+      setStreaming(false);
+    }
+  }
+
+  /** 纯文本 → 段落 HTML（转义 <，与 TiptapEditor.insertAtCursor 同口径） */
+  function toParagraphHtml(text: string) {
+    return text
+      .split(/\n+/)
+      .filter((l) => l.trim())
+      .map((l) => `<p>${l.replace(/</g, "&lt;")}</p>`)
+      .join("");
+  }
+
+  function insertContinue() {
+    if (!result.trim()) return;
+    editorRef.current?.insertAtCursor(result);
+    toast.success("已插入到光标处");
+    onOpenChange(false);
+  }
+
+  function replaceSelection() {
+    const ed = editorRef.current?.getEditor();
+    const range = selRange.current;
+    if (!ed || ed.isDestroyed || !range || !result.trim()) return;
+    // insertContentAt({from,to}) 等价于「删除选区后在原位插入」
+    ed.chain().focus().insertContentAt(range, toParagraphHtml(result)).run();
+    toast.success("已替换选中文本");
+    onOpenChange(false);
+  }
+
+  async function copyResult() {
+    try {
+      await navigator.clipboard.writeText(result);
+      toast.success("已复制到剪贴板");
+    } catch {
+      toast.error("复制失败，请手动选择复制");
+    }
+  }
+
+  const resultBlock = (placeholder: string) =>
+    streaming || result ? (
+      <div className="max-h-64 overflow-y-auto rounded-md border border-border bg-muted/30 p-3">
+        {streaming && (
+          <p className="mb-1 flex items-center gap-1.5 text-[11px] text-muted-foreground">
+            <Loader2 className="h-3 w-3 animate-spin" />
+            AI 正在生成…
+          </p>
+        )}
+        <p className="whitespace-pre-wrap text-sm leading-relaxed">
+          {result}
+          {streaming && <span className="animate-pulse">▍</span>}
+        </p>
+        {!streaming && !result && (
+          <p className="text-xs text-muted-foreground">{placeholder}</p>
+        )}
+      </div>
+    ) : null;
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="flex max-h-[85vh] flex-col sm:max-w-xl">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <Wand2 className="h-4 w-4" />
+            AI 助手
+          </DialogTitle>
+        </DialogHeader>
+
+        <Tabs
+          value={tab}
+          onValueChange={(v) => {
+            setTab(v as AiAssistAction);
+            setResult("");
+            setInstruction("");
+          }}
+        >
+          <TabsList className="grid h-8 w-full grid-cols-3">
+            <TabsTrigger value="continue" className="h-6 text-xs">
+              续写
+            </TabsTrigger>
+            <TabsTrigger value="polish" className="h-6 text-xs">
+              润色
+            </TabsTrigger>
+            <TabsTrigger value="brainstorm" className="h-6 text-xs">
+              头脑风暴
+            </TabsTrigger>
+          </TabsList>
+
+          {/* 续写 */}
+          <TabsContent value="continue" className="space-y-3 pt-1">
+            <p className="text-xs text-muted-foreground">
+              基于当前章节结尾（最近 2000 字）与作品信息，无缝续写 300-600 字正文。
+            </p>
+            <Textarea
+              className="min-h-16 text-sm"
+              value={instruction}
+              onChange={(e) => setInstruction(e.target.value)}
+              placeholder="续写方向指示（可选），如：让冲突在这里爆发、插入一段回忆"
+            />
+            {resultBlock("生成结果会显示在这里")}
+            <div className="flex justify-end gap-2">
+              {result && !streaming && (
+                <Button variant="outline" size="sm" onClick={() => void run("continue")}>
+                  重新生成
+                </Button>
+              )}
+              {(!result || streaming) && (
+                <Button
+                  size="sm"
+                  disabled={streaming || chapterId === null}
+                  onClick={() => void run("continue")}
+                >
+                  {streaming ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : <Sparkles className="mr-1 h-3.5 w-3.5" />}
+                  开始续写
+                </Button>
+              )}
+              {result && !streaming && (
+                <Button size="sm" onClick={insertContinue}>
+                  插入到光标处
+                </Button>
+              )}
+            </div>
+          </TabsContent>
+
+          {/* 润色 */}
+          <TabsContent value="polish" className="space-y-3 pt-1">
+            {selText ? (
+              <div className="max-h-28 overflow-y-auto rounded-md border border-border bg-muted/30 p-2.5">
+                <p className="mb-1 text-[11px] text-muted-foreground tnum">
+                  已选中 {selText.length} 字（超 3000 字后端自动截断）
+                </p>
+                <p className="whitespace-pre-wrap text-xs leading-relaxed text-muted-foreground">
+                  {selText.length > 200 ? selText.slice(0, 200) + "…" : selText}
+                </p>
+              </div>
+            ) : (
+              <p className="rounded-md border border-dashed border-border p-3 text-xs text-muted-foreground">
+                未检测到选中文字——请先在编辑器中选中要润色的段落，再打开本面板。
+              </p>
+            )}
+            <Textarea
+              className="min-h-14 text-sm"
+              value={instruction}
+              onChange={(e) => setInstruction(e.target.value)}
+              placeholder="润色要求（可选），如：加强画面感、压缩对话"
+            />
+            {resultBlock("润色结果会显示在这里")}
+            <div className="flex justify-end gap-2">
+              {result && !streaming && (
+                <Button variant="outline" size="sm" onClick={() => void run("polish", selText)}>
+                  重新生成
+                </Button>
+              )}
+              {(!result || streaming) && (
+                <Button
+                  size="sm"
+                  disabled={streaming || !selText}
+                  onClick={() => void run("polish", selText)}
+                >
+                  {streaming ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : <Sparkles className="mr-1 h-3.5 w-3.5" />}
+                  开始润色
+                </Button>
+              )}
+              {result && !streaming && (
+                <Button size="sm" onClick={replaceSelection}>
+                  替换选中文本
+                </Button>
+              )}
+            </div>
+          </TabsContent>
+
+          {/* 头脑风暴 */}
+          <TabsContent value="brainstorm" className="space-y-3 pt-1">
+            <p className="text-xs text-muted-foreground">
+              基于作品信息与已有章节概要，针对卡文点给出 3 个剧情走向建议（概述 + 冲突点 + 钩子）。
+            </p>
+            <Textarea
+              className="min-h-16 text-sm"
+              value={instruction}
+              onChange={(e) => setInstruction(e.target.value)}
+              placeholder="你卡在哪里？如：主角拿到玉佩后不知道该怎么推进了"
+            />
+            {resultBlock("建议会显示在这里")}
+            <div className="flex justify-end gap-2">
+              {result && !streaming && (
+                <Button variant="outline" size="sm" onClick={() => void copyResult()}>
+                  复制
+                </Button>
+              )}
+              <Button
+                size="sm"
+                disabled={streaming}
+                onClick={() => void run("brainstorm")}
+              >
+                {streaming ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : <Sparkles className="mr-1 h-3.5 w-3.5" />}
+                {result && !streaming ? "再来一组" : "生成建议"}
+              </Button>
+            </div>
+          </TabsContent>
+        </Tabs>
+      </DialogContent>
+    </Dialog>
   );
 }

@@ -8,7 +8,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .config import settings
 from .db import engine, init_db
-from .routers import ai, ai_extras, ai_factory, ai_import, auth, batch, chapters, export, integrations, library, novels, pomodoro, recycle, relations, search, sso, skills, snapshots, stats, volumes, settings as settings_router
+from .routers import ai, ai_assist, ai_extras, ai_factory, ai_import, auth, batch, chapters, export, integrations, library, novels, pomodoro, recycle, relations, search, sso, skills, snapshots, stats, volumes, settings as settings_router
 
 
 async def _auto_backup_loop():
@@ -75,6 +75,7 @@ app.include_router(ai_factory.router)
 app.include_router(batch.router)
 app.include_router(ai_import.router)
 app.include_router(ai_extras.router)
+app.include_router(ai_assist.router)
 
 
 @app.get("/api/health")
