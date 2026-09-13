@@ -155,3 +155,31 @@ class TestTextLintPlatform:
         from app.textlint import lint
 
         assert lint("干净文本。", platform="nonexistent")["score"] == 100
+
+
+class TestUsageAndNightly:
+    """M13 成本账本 + 夜间连跑基础逻辑。"""
+
+    def test_estimate_tokens(self):
+        from app.routers.ai_factory import _estimate_tokens
+
+        assert _estimate_tokens("汉" * 1700) == 1000
+        assert _estimate_tokens("") == 0
+
+    def test_record_usage_accumulates(self):
+        from app.routers.ai_factory import _record_usage
+
+        class FakeProject:
+            tokens_prompt = 100
+            tokens_completion = 50
+
+        p = FakeProject()
+        _record_usage(p, 200, 80)
+        assert p.tokens_prompt == 300 and p.tokens_completion == 130
+        _record_usage(p, -5, 0)  # 负数防御
+        assert p.tokens_prompt == 300
+
+    def test_nightly_window_constant(self):
+        from app.nightly import NIGHTLY_WINDOW_HOURS
+
+        assert NIGHTLY_WINDOW_HOURS == (2, 3, 4)

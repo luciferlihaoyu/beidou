@@ -237,6 +237,27 @@ export default function ChapterGenPanel({
             </p>
           );
         })()}
+        {/* Token 成本账本 + 夜间连跑战报 */}
+        {(project.tokens_prompt > 0 || project.tokens_completion > 0) && (
+          <p className="text-[11px] text-muted-foreground">
+            🪙 累计消耗 {((project.tokens_prompt + project.tokens_completion) / 1000).toFixed(1)}K tokens
+            （输入 {(project.tokens_prompt / 1000).toFixed(1)}K / 输出 {(project.tokens_completion / 1000).toFixed(1)}K，含估算）
+          </p>
+        )}
+        {project.nightly_last_run && (
+          <div className="rounded-md border border-indigo-500/30 bg-indigo-500/5 px-3 py-2 text-xs">
+            <p className="font-medium text-indigo-600 dark:text-indigo-400">
+              🌙 夜间连跑战报（{project.nightly_last_run.date}）：完成 {project.nightly_last_run.done}/{project.nightly_last_run.total} 章
+              {project.nightly_last_run.chapters.length > 0 &&
+                ` · ${project.nightly_last_run.chapters.map((c) => c.title).join("、")}`}
+            </p>
+            {project.nightly_last_run.errors.length > 0 && (
+              <p className="mt-0.5 text-destructive">
+                {project.nightly_last_run.errors.map((e) => e.error).join("；")}
+              </p>
+            )}
+          </div>
+        )}
         {/* 伏笔到期提醒 */}
         {hookAlerts.length > 0 && (
           <div className="rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2">

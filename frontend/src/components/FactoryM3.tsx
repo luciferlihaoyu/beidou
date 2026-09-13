@@ -51,11 +51,13 @@ export function BatchRunDialog({
   open,
   onOpenChange,
   onFinished,
+  onProjectChange,
 }: {
   project: AiProject;
   open: boolean;
   onOpenChange: (v: boolean) => void;
   onFinished: () => void;
+  onProjectChange?: (p: AiProject) => void;
 }) {
   const [count, setCount] = useState(5);
   const [running, setRunning] = useState(false);
@@ -211,6 +213,44 @@ export function BatchRunDialog({
             )}
           </div>
         </div>
+        {/* 夜间定时连跑设置 */}
+        {!running && (
+          <div className="mt-2 flex items-center justify-between rounded-md border border-border bg-muted/30 px-3 py-2 text-xs">
+            <label className="flex cursor-pointer items-center gap-1.5">
+              <input
+                type="checkbox"
+                className="accent-primary"
+                checked={project.nightly_enabled ?? false}
+                onChange={async (e) => {
+                  try {
+                    const p = await aiFactoryM2.updateProject(project.id, { nightly_enabled: e.target.checked });
+                    onProjectChange?.(p);
+                    toast.success(e.target.checked ? "夜间连跑已开启——每天凌晨自动执行，次日看战报" : "夜间连跑已关闭");
+                  } catch (err) {
+                    toast.error(err instanceof Error ? err.message : "保存失败");
+                  }
+                }}
+              />
+              🌙 夜间定时连跑
+            </label>
+            {project.nightly_enabled && (
+              <select
+                className="h-6 rounded border border-border bg-transparent px-1 text-xs"
+                value={project.nightly_chapters ?? 3}
+                onChange={async (e) => {
+                  try {
+                    const p = await aiFactoryM2.updateProject(project.id, { nightly_chapters: Number(e.target.value) });
+                    onProjectChange?.(p);
+                  } catch { /* ignore */ }
+                }}
+              >
+                {[1, 2, 3, 5, 8, 10].map((n) => (
+                  <option key={n} value={n}>{n} 章/晚</option>
+                ))}
+              </select>
+            )}
+          </div>
+        )}
       </DialogContent>
     </Dialog>
   );
@@ -533,6 +573,7 @@ export function M3Toolbar({
           onBatchFinished();
           onJobsChanged();
         }}
+        onProjectChange={onProjectChange}
       />
       <SynopsisDialog project={project} open={synopsisOpen} onOpenChange={setSynopsisOpen} onChange={onProjectChange} />
       <CoverDialog project={project} open={coverOpen} onOpenChange={setCoverOpen} onChange={onProjectChange} />

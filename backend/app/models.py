@@ -277,7 +277,7 @@ class ChapterSnapshot(Base):
     - content 存原始 HTML（编辑器内容）
     - content_text 派生的纯文本，用于 diff 渲染（避免 HTML 标签噪声）
     - content_hash: sha256(chapter.content)，去重用
-    - trigger: auto / manual / pre_rollback
+    - trigger: auto / manual / pre_rollback / ai_rewrite
     """
 
     __tablename__ = "chapter_snapshots"
@@ -294,7 +294,7 @@ class ChapterSnapshot(Base):
     word_count: Mapped[int] = mapped_column(default=0)
     content_hash: Mapped[str] = mapped_column(String(64), index=True)  # sha256 hex
     label: Mapped[str] = mapped_column(String(100), default="")  # manual 存稿点名
-    trigger: Mapped[str] = mapped_column(String(16))  # auto / manual / pre_rollback
+    trigger: Mapped[str] = mapped_column(String(16))  # auto / manual / pre_rollback / ai_rewrite
     created_at: Mapped[datetime] = mapped_column(default=utcnow, index=True)
 
 
@@ -354,6 +354,11 @@ class AiProject(Base):
     kb_query: Mapped[str] = mapped_column(String(200), default="")  # 璇玑知识源检索词（空=不启用）
     platform: Mapped[str] = mapped_column(String(20), default="")  # 目标平台（敏感词词库分档）
     custom_words: Mapped[str] = mapped_column(String(500), default="")  # 自定义敏感词（逗号分隔）
+    tokens_prompt: Mapped[int] = mapped_column(default=0)  # 累计 prompt tokens（成本账本）
+    tokens_completion: Mapped[int] = mapped_column(default=0)  # 累计 completion tokens
+    nightly_enabled: Mapped[bool] = mapped_column(default=False)  # 夜间定时连跑开关
+    nightly_chapters: Mapped[int] = mapped_column(default=3)  # 每晚连跑章数（1-10）
+    nightly_last_run: Mapped[str] = mapped_column(String(300), default="")  # JSON：{date, done, errors}
     subplot_board: Mapped[str] = mapped_column(Text, default="")  # 支线进度板：A/B/C 线状态
     created_at: Mapped[datetime] = mapped_column(default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(default=utcnow, onupdate=utcnow)

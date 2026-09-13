@@ -43,6 +43,11 @@ async def init_db():
         await _ensure_column(conn, "ai_projects", "kb_query", "TEXT NOT NULL DEFAULT ''")
         await _ensure_column(conn, "ai_projects", "platform", "TEXT NOT NULL DEFAULT ''")
         await _ensure_column(conn, "ai_projects", "custom_words", "TEXT NOT NULL DEFAULT ''")
+        await _ensure_column(conn, "ai_projects", "tokens_prompt", "INTEGER NOT NULL DEFAULT 0")
+        await _ensure_column(conn, "ai_projects", "tokens_completion", "INTEGER NOT NULL DEFAULT 0")
+        await _ensure_column(conn, "ai_projects", "nightly_enabled", "BOOLEAN NOT NULL DEFAULT 0")
+        await _ensure_column(conn, "ai_projects", "nightly_chapters", "INTEGER NOT NULL DEFAULT 3")
+        await _ensure_column(conn, "ai_projects", "nightly_last_run", "TEXT NOT NULL DEFAULT ''")
 
     await _migrate()
 

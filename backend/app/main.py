@@ -15,13 +15,15 @@ async def _auto_backup_loop():
     """每 30 分钟检查一次：给开启自动备份且今日未备份的用户备份到 AList。"""
     import asyncio
 
+    from .nightly import nightly_tick
     from .routers.integrations import auto_backup_tick
 
     while True:
-        try:
-            await auto_backup_tick()
-        except Exception:  # noqa: BLE001  后台任务绝不炸掉主进程
-            pass
+        for tick in (auto_backup_tick, nightly_tick):
+            try:
+                await tick()
+            except Exception:  # noqa: BLE001  后台任务绝不炸掉主进程
+                pass
         await asyncio.sleep(30 * 60)
 
 
