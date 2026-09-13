@@ -93,9 +93,9 @@ async def list_snapshots(
     chapter: Chapter = Depends(get_owned_chapter),
     db: AsyncSession = Depends(get_db),
 ):
-    """按 created_at 倒序列出快照（不含 content）。可选 ``?trigger=auto|manual|pre_rollback`` 过滤。"""
-    if trigger is not None and trigger not in ("auto", "manual", "pre_rollback"):
-        raise HTTPException(400, "trigger 仅支持 auto/manual/pre_rollback")
+    """按 created_at 倒序列出快照（不含 content）。可选 ``?trigger=auto|manual|pre_rollback|ai_rewrite`` 过滤。"""
+    if trigger is not None and trigger not in ("auto", "manual", "pre_rollback", "ai_rewrite"):
+        raise HTTPException(400, "trigger 仅支持 auto/manual/pre_rollback/ai_rewrite")
     query = select(ChapterSnapshot).where(ChapterSnapshot.chapter_id == chapter.id)
     if trigger is not None:
         query = query.where(ChapterSnapshot.trigger == trigger)

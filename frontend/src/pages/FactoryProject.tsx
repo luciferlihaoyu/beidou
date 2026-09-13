@@ -13,6 +13,7 @@ import {
   Check,
   ChevronRight,
   Cpu,
+  Download,
   Loader2,
   Radar,
   RefreshCw,
@@ -22,7 +23,7 @@ import { toast } from "sonner";
 import AppShell from "@/components/AppShell";
 import ChapterGenPanel from "@/components/ChapterGenPanel";
 import ModelRouteDialog from "@/components/ModelRouteDialog";
-import { aiFactoryM5 } from "@/lib/api";
+import { aiFactoryM5, downloadExportPack } from "@/lib/api";
 import { aiFactoryApi, type AiBookSpec, type AiProject } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -375,6 +376,35 @@ export default function FactoryProject() {
         {/* ===== 阶段 4：生成（M2 章节生成面板 + 大纲预览） ===== */}
         {cur >= 3 && (
           <div className="space-y-4">
+            {/* 投稿导出包 */}
+            <div className="flex items-center justify-between gap-3 rounded-lg border border-border bg-card px-4 py-3">
+              <div className="min-w-0">
+                <p className="text-sm font-medium">投稿导出包</p>
+                <p className="mt-0.5 text-xs text-muted-foreground">
+                  含分章TXT+敏感词终检+简介+封面prompt
+                </p>
+              </div>
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-8 shrink-0"
+                disabled={busy !== null}
+                onClick={() => {
+                  setBusy("export");
+                  downloadExportPack(projectId)
+                    .then(() => toast.success("投稿包已开始下载"))
+                    .catch((e) => toast.error(e instanceof Error ? e.message : "导出失败"))
+                    .finally(() => setBusy(null));
+                }}
+              >
+                {busy === "export" ? (
+                  <Loader2 className="mr-1 h-4 w-4 animate-spin" />
+                ) : (
+                  <Download className="mr-1 h-4 w-4" />
+                )}
+                {busy === "export" ? "导出中…" : "导出投稿包"}
+              </Button>
+            </div>
             <ChapterGenPanel project={project} onProjectChange={setProject} />
             {project.outline?.volumes && (
               <details className="rounded-lg border border-border bg-card">

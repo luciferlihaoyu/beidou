@@ -96,6 +96,27 @@ async def create_snapshot(
     return snap
 
 
+async def try_snapshot_before_ai(
+    db: AsyncSession,
+    chapter: Chapter,
+    label: str,
+) -> ChapterSnapshot | None:
+    """AI 改写覆盖正文前的自动备份（trigger="ai_rewrite"）。
+
+    快照失败绝不阻塞改写主流程：任何异常只记日志并返回 None。
+    同内容已存在快照时 create_snapshot 会去重返回已有对象，不会膨胀。
+    """
+    try:
+        return await create_snapshot(db, chapter, "ai_rewrite", label)
+    except Exception:  # noqa: BLE001
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "AI 改写前自动快照失败（chapter_id=%s, label=%s）", chapter.id, label, exc_info=True
+        )
+        return None
+
+
 async def restore_snapshot(
     db: AsyncSession,
     chapter: Chapter,

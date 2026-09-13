@@ -296,7 +296,7 @@ export interface Snapshot {
   id: number;
   created_at: string;
   label: string;
-  trigger: "auto" | "manual" | "pre_rollback";
+  trigger: "auto" | "manual" | "pre_rollback" | "ai_rewrite";
   word_count: number;
   content_hash: string;
 }
@@ -419,6 +419,17 @@ export interface AiProject {
   kb_query: string;
   platform: string;
   custom_words: string;
+  tokens_prompt: number;
+  tokens_completion: number;
+  nightly_enabled: boolean;
+  nightly_chapters: number;
+  nightly_last_run: {
+    date: string;
+    done: number;
+    total: number;
+    chapters: { title: string; words: number; deai_score: number }[];
+    errors: { title?: string; error: string }[];
+  } | null;
   chapter_count: number;
   created_at: string;
   updated_at: string;
@@ -574,6 +585,24 @@ export const aiConfigApi = {
   models: (configId: number) =>
     api.get<{ models: string[] }>(`/api/ai/configs/${configId}/models`),
 };
+
+// ---------- 人工写作 AI 助手（编辑器内续写 / 润色 / 头脑风暴，SSE 流式） ----------
+export type AiAssistAction = "continue" | "polish" | "brainstorm";
+export interface AiAssistRequest {
+  action: AiAssistAction;
+  selected_text?: string;
+  instruction?: string;
+  chapter_id?: number | null;
+}
+/** 编辑器 AI 助手统一入口：逐段回调文本，{done}/{error} 由 streamPost 消化 */
+export function aiAssist(
+  novelId: number,
+  body: AiAssistRequest,
+  onChunk: (text: string) => void,
+  signal?: AbortSignal
+): Promise<void> {
+  return streamPost(`/api/novels/${novelId}/ai-assist`, body, onChunk, signal);
+}
 
 // ---------- AI 工厂 M4：导入续写 ----------
 
@@ -748,3 +777,41 @@ export const aiFactoryM9 = {
   deflavor: (projectId: number, jobId: number) =>
     api.post<DeflavorResult>(`/api/ai-factory/projects/${projectId}/jobs/${jobId}/deflavor`),
 };
+
+// ---------- AI 工厂：投稿导出包 ----------
+
+/** 触发浏览器下载投稿包 zip（GET /api/ai-factory/projects/{id}/export-pack）。 */
+export async function downloadExportPack(projectId: number): Promise<void> {
+  const token = getToken();
+  const resp = await fetch(`/api/ai-factory/projects/${projectId}/export-pack`, {
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  });
+  if (!resp.ok) {
+    let message = `导出失败 (${resp.status})`;
+    try {
+      const data = await resp.json();
+      if (typeof data.detail === "string") message = data.detail;
+    } catch {
+      /* ignore */
+    }
+    throw new ApiError(resp.status, message);
+  }
+  const blob = await resp.blob();
+  // 优先用服务端 RFC 5987 文件名（投稿包_书名_日期.zip），拿不到再用兜底名
+  let filename = `投稿包_${projectId}.zip`;
+  const cd = resp.headers.get("Content-Disposition") ?? "";
+  const m = cd.match(/filename\*=UTF-8''([^;]+)/i);
+  if (m) {
+    try {
+      filename = decodeURIComponent(m[1]);
+    } catch {
+      /* ignore */
+    }
+  }
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}

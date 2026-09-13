@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..db import get_db
 from ..deps import get_current_user
 from ..models import AiProject, User
+from ..utils import chapter_display_title, strip_html
 from .ai_factory import _SYSTEM, _chat_text, _get_project, _parse_json, _pick_config
 
 router = APIRouter(prefix="/api/ai-factory", tags=["ai-factory"])
@@ -237,3 +238,169 @@ async def kb_sync(project_id: int, user: User = Depends(get_current_user), db: A
         args["folderId"] = folder_id
     result = await _xuanji_mcp(kc, "document_upsert", args)
     return {"ok": True, "title": f"北斗·{title}·设定集", "chars": len(content), "result": result}
+
+
+# ================= 投稿导出包 =================
+
+def _safe_name(name: str) -> str:
+    """清理文件/目录名里的路径危险字符。"""
+    import re as _re
+
+    return _re.sub(r'[\\/:*?"<>|]', "_", name).strip() or "未命名"
+
+
+def _build_export_pack(p: AiProject, novel, groups) -> bytes:
+    """生成投稿包 zip（纯本地计算）：
+
+    - 正文/[第N卷_卷名/]第001章_标题.txt（纯文本，按章节顺序）
+    - 敏感词终检报告.txt（仅 done 章参与 lint，只列有问题的章节；平均分 ≥90 判可投稿）
+    - 简介.txt / 封面prompt.txt / 书籍信息.json（有则给）
+    """
+    import io
+    import zipfile
+    from datetime import datetime
+
+    from ..textlint import PLATFORM_PROFILES, lint
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        # ---- 1. 正文 ----
+        vol_index = 0
+        chapter_total = 0
+        word_total = 0
+        done_reports: list[dict] = []  # {number, title, score, issues}
+        done_count = 0
+        custom_words = [w.strip() for w in (p.custom_words or "").split(",") if w.strip()]
+        for volume, chapters in groups:
+            subdir = ""
+            if volume is not None:
+                vol_index += 1
+                subdir = f"正文/第{vol_index}卷_{_safe_name(volume.title)}/"
+            else:
+                subdir = "正文/"
+            for chapter, number in chapters:
+                text = strip_html(chapter.content).strip()
+                if not text:
+                    continue
+                chapter_total += 1
+                word_total += chapter.word_count or len(text)
+                display = chapter_display_title(chapter.title, number)
+                fname = f"{subdir}第{number:03d}章_{_safe_name(chapter.title.strip() or display)}.txt"
+                z.writestr(fname, f"{display}\n\n{text}\n")
+                # 2. 敏感词终检（只跑 done 章）
+                if chapter.status == "done":
+                    done_count += 1
+                    rep = lint(text, platform=p.platform or "", custom_words=custom_words)
+                    done_reports.append(
+                        {"number": number, "title": display, "score": rep["score"], "issues": rep["issues"]}
+                    )
+
+        # ---- 2. 敏感词终检报告 ----
+        platform_name = PLATFORM_PROFILES.get(p.platform or "", PLATFORM_PROFILES[""])["name"]
+        lines = [
+            f"《{novel.title}》敏感词终检报告",
+            f"生成时间：{datetime.now().strftime('%Y-%m-%d %H:%M')}",
+            f"目标平台：{platform_name}" + (f"（自定义词 {len(custom_words)} 个）" if custom_words else ""),
+            f"检测范围：done 章节 {done_count} 章 / 全书共 {chapter_total} 章",
+            "",
+        ]
+        problem = [r for r in done_reports if r["issues"]]
+        if not done_reports:
+            lines.append("（没有已完成章节可检测）")
+        elif not problem:
+            lines.append("✅ 全部检测章节均未命中敏感词/规范问题。")
+        else:
+            for r in problem:
+                lines.append(f"—— {r['title']}（得分 {r['score']}）——")
+                for i in r["issues"]:
+                    lines.append(f"  [{i['severity']}] {i['type']}：{i['detail']}")
+                lines.append("")
+        if done_reports:
+            avg = round(sum(r["score"] for r in done_reports) / len(done_reports), 1)
+            lines.append("———————")
+            lines.append(f"全书平均分：{avg}")
+            lines.append("结论：" + ("✅ 可投稿" if avg >= 90 else "⚠️ 建议修稿后再投（平均分低于 90）"))
+        z.writestr("敏感词终检报告.txt", "\n".join(lines) + "\n")
+
+        # ---- 3. 简介（4 版本，如有）----
+        synopsis = json.loads(p.synopsis_json) if p.synopsis_json else {}
+        if any(synopsis.get(k) for k in ("short", "standard", "promotion", "douyin")):
+            label_map = [("short", "精简版（投稿用）"), ("standard", "标准版（详情页）"),
+                         ("promotion", "推广版（社区推文）"), ("douyin", "抖音版（短视频钩子）")]
+            parts = [f"《{novel.title}》多版本简介\n"]
+            for k, lab in label_map:
+                if synopsis.get(k):
+                    parts.append(f"【{lab}】\n{synopsis[k]}\n")
+            z.writestr("简介.txt", "\n".join(parts))
+
+        # ---- 4. 封面 prompt（如有）----
+        cover = json.loads(p.cover_prompt) if p.cover_prompt else {}
+        if cover.get("concept") or cover.get("prompt_en"):
+            parts = [f"《{novel.title}》封面设计\n"]
+            if cover.get("concept"):
+                parts.append(f"【中文构思】\n{cover['concept']}\n")
+            if cover.get("prompt_en"):
+                parts.append(f"【英文 Prompt】\n{cover['prompt_en']}\n")
+            if cover.get("negative"):
+                parts.append(f"【负面 Prompt】\n{cover['negative']}\n")
+            z.writestr("封面prompt.txt", "\n".join(parts))
+
+        # ---- 5. 书籍信息 ----
+        spec = json.loads(p.book_spec_json) if p.book_spec_json else {}
+        info = {
+            "书名": novel.title,
+            "作者": novel.author or "",
+            "题材": p.genre or novel.genre or "",
+            "状态": novel.status,
+            "目标平台": platform_name,
+            "章数": chapter_total,
+            "总字数": word_total,
+            "导出时间": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "核心梗概": spec.get("premise", ""),
+            "来源": "北斗 AI 工厂投稿包",
+        }
+        z.writestr("书籍信息.json", json.dumps(info, ensure_ascii=False, indent=2))
+
+    return buf.getvalue()
+
+
+@router.get("/projects/{project_id}/export-pack")
+async def export_pack(project_id: int, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    """投稿导出包：分章 TXT + 敏感词终检报告 + 简介 + 封面 prompt + 书籍信息，zip 一键下载。"""
+    import io
+    from datetime import datetime
+    from urllib.parse import quote
+
+    from sqlalchemy import select as _select
+    from fastapi.responses import StreamingResponse
+
+    from ..models import Chapter, Novel, Volume
+    from ..utils import order_chapters as _order
+
+    p = await _get_project(project_id, user, db)
+    if p.novel_id is None:
+        raise HTTPException(400, "项目未关联小说")
+    novel = await db.get(Novel, p.novel_id)
+    if novel is None:
+        raise HTTPException(404, "关联小说不存在")
+
+    chapters = (await db.execute(_select(Chapter).where(Chapter.novel_id == novel.id))).scalars().all()
+    volumes = (await db.execute(_select(Volume).where(Volume.novel_id == novel.id))).scalars().all()
+    ordered = _order(chapters, volumes)
+    volume_map = {v.id: v for v in volumes}
+    # 分组：与 export.py 相同的卷组织逻辑（跳过完全空章）
+    groups: list = []
+    for i, chapter in enumerate(ordered):
+        if not strip_html(chapter.content).strip():
+            continue
+        volume = volume_map.get(chapter.volume_id)
+        if not groups or groups[-1][0] != volume:
+            groups.append((volume, []))
+        groups[-1][1].append((chapter, i + 1))
+    if not groups:
+        raise HTTPException(400, "还没有可导出的章节内容")
+
+    data = _build_export_pack(p, novel, groups)
+    filename = f"投稿包_{_safe_name(novel.title)}_{datetime.now().strftime('%Y%m%d')}.zip"
+    headers = {"Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}"}
+    return StreamingResponse(io.BytesIO(data), media_type="application/zip", headers=headers)

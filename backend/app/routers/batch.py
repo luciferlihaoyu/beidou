@@ -27,7 +27,9 @@ from ..db import get_db
 from ..deps import count_words, get_current_user
 from ..models import AiChapterJob, AiProject, Chapter, Novel, User, Volume
 from ..utils import chapter_display_title, order_chapters, strip_html
-from .ai_factory import (  # noqa: F401  router 不复用（避免重复注册），仅借工具函数
+from .ai_factory import (
+    _estimate_tokens,
+    _record_usage,  # noqa: F401  router 不复用（避免重复注册），仅借工具函数
     _SYSTEM,
     _chat_text,
     _get_project,
@@ -321,6 +323,16 @@ async def batch_run(
 
             # ---- 质量门禁：最终成稿 AI 味 <60 记一记，连续 2 章自动暂停 ----
             final_score = detect(strip_html(chapter.content))["score"]
+
+            # 成本账本：流式生成拿不到 usage，按字数粗估（生成 + 摘要 + 可能的改写）
+            est_prompt = _estimate_tokens(context) + _estimate_tokens(text[:4000])
+            est_completion = _estimate_tokens(text) + 120
+            if report["score"] < 70:
+                est_prompt += _estimate_tokens(text[:8000])
+                est_completion += _estimate_tokens(text)
+            _record_usage(p, est_prompt, est_completion)
+            await db.commit()
+
             if final_score < 60:
                 low_quality_streak += 1
                 yield _sse({"event": "quality_warn", "job_id": job.id, "title": title, "score": final_score, "streak": low_quality_streak})
@@ -433,11 +445,17 @@ async def revise_chapter(project_id: int, job_id: int, user: User = Depends(get_
         "4. 只输出修订后的正文全文，不要任何解释\n\n"
         f"原文：\n{text[:12000]}"
     )
-    raw = await _chat_text(config, _SYSTEM, prompt, max_tokens=8000)
+    usage: dict = {}
+    raw = await _chat_text(config, _SYSTEM, prompt, max_tokens=8000, usage_sink=usage)
+    _record_usage(p, usage.get("prompt", 0), usage.get("completion", 0))
     revised = raw.strip()
     if len(revised) < len(text) * 0.3:
         raise HTTPException(400, "AI 修订结果过短（疑似截断），未保存，请重试")
 
+    # 覆盖正文前自动快照（失败不阻塞），改砸了可从快照面板回滚
+    from ..snapshot_service import try_snapshot_before_ai
+
+    await try_snapshot_before_ai(db, chapter, "AI修订前自动备份")
     chapter.content = _text_to_html(revised)
     chapter.word_count = count_words(chapter.content)
     # 复检 AI 味
@@ -484,7 +502,9 @@ async def deflavor_chapter(project_id: int, job_id: int, user: User = Depends(ge
     config = await _pick_config(user, db, p.chapter_llm)
     from ..anti_llm import deflavor_rewrite_prompt
 
-    raw = await _chat_text(config, _SYSTEM, deflavor_rewrite_prompt(text, before), max_tokens=8000)
+    usage2: dict = {}
+    raw = await _chat_text(config, _SYSTEM, deflavor_rewrite_prompt(text, before), max_tokens=8000, usage_sink=usage2)
+    _record_usage(p, usage2.get("prompt", 0), usage2.get("completion", 0))
     rewritten = raw.strip()
     if len(rewritten) < len(text) * 0.3:
         raise HTTPException(400, "去味结果过短（疑似截断），未保存，请重试")
@@ -498,6 +518,10 @@ async def deflavor_chapter(project_id: int, job_id: int, user: User = Depends(ge
             "message": "改写后分数未提升，已放弃保存（原文保留）",
         }
 
+    # 覆盖正文前自动快照（失败不阻塞）
+    from ..snapshot_service import try_snapshot_before_ai
+
+    await try_snapshot_before_ai(db, chapter, "AI去味前自动备份")
     chapter.content = _text_to_html(rewritten)
     chapter.word_count = count_words(chapter.content)
     job.review_score = after["score"]
@@ -568,6 +592,10 @@ async def rewrite_partial(
         raise HTTPException(400, "AI 返回为空，请重试")
 
     new_text = text[:pos] + new_excerpt + text[pos + len(excerpt) :]
+    # 覆盖正文前自动快照（失败不阻塞）
+    from ..snapshot_service import try_snapshot_before_ai
+
+    await try_snapshot_before_ai(db, chapter, "AI重写前自动备份")
     chapter.content = _text_to_html(new_text)
     chapter.word_count = count_words(chapter.content)
     job.actual_words = chapter.word_count

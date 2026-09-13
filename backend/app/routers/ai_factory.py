@@ -74,8 +74,18 @@ async def _pick_config(user: User, db: AsyncSession, route_field: str | None) ->
     return await get_ai_config(user, db)
 
 
-async def _chat_text(config: AIConfig, system: str, user_prompt: str, max_tokens: int = 4000) -> str:
-    """非流式 chat completion，返回纯文本。"""
+async def _chat_text(
+    config: AIConfig,
+    system: str,
+    user_prompt: str,
+    max_tokens: int = 4000,
+    usage_sink: dict | None = None,
+) -> str:
+    """非流式 chat completion，返回纯文本。
+
+    usage_sink：传入 dict 时回填精确 token 用量（{"prompt": N, "completion": M}，
+    端点不返回 usage 则保持 0）——供成本统计埋点。
+    """
     url = _normalize_base(config.base_url) + "/v1/chat/completions"
     payload = {
         "model": config.model,
@@ -92,9 +102,25 @@ async def _chat_text(config: AIConfig, system: str, user_prompt: str, max_tokens
     if resp.status_code != 200:
         raise HTTPException(502, f"AI 接口返回 {resp.status_code}: {resp.text[:200]}")
     try:
-        return resp.json()["choices"][0]["message"]["content"] or ""
+        data = resp.json()
+        if usage_sink is not None:
+            usage = data.get("usage") or {}
+            usage_sink["prompt"] = usage_sink.get("prompt", 0) + int(usage.get("prompt_tokens") or 0)
+            usage_sink["completion"] = usage_sink.get("completion", 0) + int(usage.get("completion_tokens") or 0)
+        return data["choices"][0]["message"]["content"] or ""
     except (KeyError, IndexError, TypeError) as exc:
         raise HTTPException(502, f"AI 接口响应格式异常: {exc}") from exc
+
+
+def _record_usage(p: AiProject, prompt_tokens: int, completion_tokens: int) -> None:
+    """累计项目 token 用量（调用方负责 db.commit）。"""
+    p.tokens_prompt = (p.tokens_prompt or 0) + max(0, prompt_tokens)
+    p.tokens_completion = (p.tokens_completion or 0) + max(0, completion_tokens)
+
+
+def _estimate_tokens(text: str) -> int:
+    """中文 token 粗估：约 1.7 字/token（流式响应拿不到 usage 时用）。"""
+    return int(len(text) / 1.7)
 
 
 def _parse_json(text: str):
@@ -156,6 +182,11 @@ def _project_out(p: AiProject, novel: Novel | None = None, chapter_count: int = 
         "kb_query": p.kb_query,
         "platform": p.platform,
         "custom_words": p.custom_words,
+        "tokens_prompt": p.tokens_prompt or 0,
+        "tokens_completion": p.tokens_completion or 0,
+        "nightly_enabled": p.nightly_enabled,
+        "nightly_chapters": p.nightly_chapters,
+        "nightly_last_run": json.loads(p.nightly_last_run) if p.nightly_last_run else None,
         "chapter_count": chapter_count,
         "created_at": p.created_at.isoformat(),
         "updated_at": p.updated_at.isoformat(),
@@ -926,6 +957,11 @@ async def finalize_chapter(
         raise HTTPException(404, "章节不存在")
 
     # 1. 正文落库（手写 HTML 转换 + 字数统计 + FTS 同步）
+    # 重写已有正文的章节时，覆盖前自动快照（失败不阻塞），改砸了可回滚
+    if strip_html(chapter.content or "").strip():
+        from ..snapshot_service import try_snapshot_before_ai
+
+        await try_snapshot_before_ai(db, chapter, "AI重写前自动备份")
     chapter.content = _text_to_html(data.content_text)
     chapter.word_count = count_words(chapter.content)
     if chapter.status == "draft":
@@ -1039,6 +1075,8 @@ class ProjectSettingsIn(BaseModel):
     kb_query: str | None = Field(default=None, max_length=200)
     platform: str | None = Field(default=None, max_length=20)
     custom_words: str | None = Field(default=None, max_length=500)
+    nightly_enabled: bool | None = None
+    nightly_chapters: int | None = Field(default=None, ge=1, le=10)
     context_recent_chapters: int | None = Field(default=None, ge=1, le=10)
     context_extra_chapters: list[int] | None = None
     setup_llm: str | None = None

@@ -34,12 +34,14 @@ const TRIGGER_LABEL: Record<Snapshot["trigger"], string> = {
   auto: "自动",
   manual: "手动",
   pre_rollback: "回滚前",
+  ai_rewrite: "AI 改写前",
 };
 
 const TRIGGER_VARIANT: Record<Snapshot["trigger"], "default" | "secondary" | "outline"> = {
   auto: "outline",
   manual: "default",
   pre_rollback: "secondary",
+  ai_rewrite: "secondary",
 };
 
 function fmtDate(iso: string): string {
@@ -247,7 +249,9 @@ export default function SnapshotPanel({
                                   ? "自动存档"
                                   : s.trigger === "pre_rollback"
                                     ? "回滚前备份"
-                                    : "快照"}
+                                    : s.trigger === "ai_rewrite"
+                                      ? "AI 改写前备份"
+                                      : "快照"}
                               </span>
                             )}
                           </div>
