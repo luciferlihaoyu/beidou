@@ -4,7 +4,7 @@
  * 每阶段：AI 生成 → 人工确认/修改 → 推进。状态机由后端把关。
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router";
 import {
   ArrowLeft,
@@ -50,7 +50,26 @@ export default function FactoryProject() {
   const [routeOpen, setRouteOpen] = useState(false);
   // 立项编辑态
   const [spec, setSpec] = useState<AiBookSpec | null>(null);
+  const [autoSavedAt, setAutoSavedAt] = useState("");
+  const autoSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const specDirty = useRef(false);
+
   const [title, setTitle] = useState("");
+  // 立项草案自动保存：编辑后防抖 800ms 落库（不推进状态机，刷新不丢）
+  useEffect(() => {
+    if (!specDirty.current || !spec || project?.status !== "draft") return;
+    if (autoSaveTimer.current) clearTimeout(autoSaveTimer.current);
+    autoSaveTimer.current = setTimeout(() => {
+      specDirty.current = false;
+      aiFactoryApi
+        .saveBookSpecDraft(projectId, spec as unknown as Record<string, unknown>, title)
+        .then((r) => setAutoSavedAt(r.saved_at))
+        .catch(() => {});
+    }, 800);
+    return () => {
+      if (autoSaveTimer.current) clearTimeout(autoSaveTimer.current);
+    };
+  }, [spec, title, project?.status, projectId]);
 
   const load = useCallback(() => {
     aiFactoryApi
@@ -97,13 +116,21 @@ export default function FactoryProject() {
         <Textarea
           className="mt-1 min-h-16 text-sm"
           value={String(spec?.[k] ?? "")}
-          onChange={(e) => spec && setSpec({ ...spec, [k]: e.target.value })}
+          onChange={(e) => {
+            if (!spec) return;
+            specDirty.current = true;
+            setSpec({ ...spec, [k]: e.target.value });
+          }}
         />
       ) : (
         <Input
           className="mt-1 h-8 text-sm"
           value={String(spec?.[k] ?? "")}
-          onChange={(e) => spec && setSpec({ ...spec, [k]: e.target.value })}
+          onChange={(e) => {
+            if (!spec) return;
+            specDirty.current = true;
+            setSpec({ ...spec, [k]: e.target.value });
+          }}
         />
       )}
     </div>
@@ -265,6 +292,9 @@ export default function FactoryProject() {
                     <div>
                       <h3 className="text-sm font-medium">立项草案（可修改）</h3>
                       <p className="text-[11px] text-muted-foreground/70">你填写的字段重新生成时原样保留，AI 只补空白</p>
+                      {autoSavedAt && (
+                        <p className="text-[11px] text-green-600/80 dark:text-green-400/80">✓ 已自动保存 {autoSavedAt}</p>
+                      )}
                     </div>
                     <Button
                       variant="ghost"
@@ -303,7 +333,14 @@ export default function FactoryProject() {
                           </button>
                         ))}
                       </div>
-                      <Input className="mt-1.5 h-8 text-sm" value={title} onChange={(e) => setTitle(e.target.value)} />
+                      <Input
+                        className="mt-1.5 h-8 text-sm"
+                        value={title}
+                        onChange={(e) => {
+                          specDirty.current = true;
+                          setTitle(e.target.value);
+                        }}
+                      />
                     </div>
                     <div className="grid grid-cols-2 gap-3">
                       {specField("genre", "类型")}

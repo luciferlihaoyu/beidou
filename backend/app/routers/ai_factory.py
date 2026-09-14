@@ -403,6 +403,32 @@ async def init_project(
     return _project_out(p)
 
 
+class BookSpecDraftIn(BaseModel):
+    """立项草案自动保存：编辑即存，不推进状态机。"""
+
+    book_spec: dict
+    title: str = Field(default="", max_length=200)  # 当前选定/自填的书名（塞进 titles[0]）
+
+
+@router.put("/projects/{project_id}/book-spec-draft")
+async def save_book_spec_draft(
+    project_id: int, data: BookSpecDraftIn, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
+):
+    """保存立项草案（自动保存用）：只更新 book_spec_json，状态保持 draft。"""
+    p = await _get_project(project_id, user, db)
+    if p.status != "draft":
+        raise HTTPException(400, "已确认立项，草案不可再改")
+    spec = data.book_spec
+    if data.title.strip():
+        titles = spec.get("titles") if isinstance(spec.get("titles"), list) else []
+        spec["titles"] = [data.title.strip()] + [t for t in titles if t != data.title.strip()][:2]
+    p.book_spec_json = json.dumps(spec, ensure_ascii=False)
+    if isinstance(spec.get("genre"), str) and spec["genre"].strip():
+        p.genre = spec["genre"].strip()[:50]
+    await db.commit()
+    return {"ok": True, "saved_at": __import__("datetime").datetime.now().strftime("%H:%M:%S")}
+
+
 class BookSpecConfirmIn(BaseModel):
     title: str = Field(min_length=1, max_length=200)  # 最终选定的书名
     book_spec: dict  # 人工可改后的八字段

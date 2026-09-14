@@ -452,6 +452,11 @@ export const aiFactoryApi = {
   create: (data: AiProjectCreate) => api.post<AiProject>("/api/ai-factory/projects", data),
   remove: (id: number, deleteNovel = false) =>
     api.delete<{ ok: boolean }>(`/api/ai-factory/projects/${id}${deleteNovel ? "?delete_novel=true" : ""}`),
+  saveBookSpecDraft: (id: number, bookSpec: Record<string, unknown>, title: string) =>
+    api.put<{ ok: boolean; saved_at: string }>(`/api/ai-factory/projects/${id}/book-spec-draft`, {
+      book_spec: bookSpec,
+      title,
+    }),
   init: (id: number, existingSpec?: Record<string, unknown>) =>
     api.post<AiProject>(`/api/ai-factory/projects/${id}/init`, existingSpec ? { existing_spec: existingSpec } : {}),
   confirmBookSpec: (id: number, title: string, bookSpec: AiBookSpec) =>
