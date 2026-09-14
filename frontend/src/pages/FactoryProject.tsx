@@ -22,6 +22,7 @@ import {
 import { toast } from "sonner";
 import AppShell from "@/components/AppShell";
 import ChapterGenPanel from "@/components/ChapterGenPanel";
+import SetupStagePanel from "@/components/SetupStagePanel";
 import ModelRouteDialog from "@/components/ModelRouteDialog";
 import { aiFactoryM5, downloadExportPack } from "@/lib/api";
 import { aiFactoryApi, type AiBookSpec, type AiProject } from "@/lib/api";
@@ -386,20 +387,14 @@ export default function FactoryProject() {
           </div>
         )}
 
-        {/* ===== 阶段 2：设定 ===== */}
+        {/* ===== 阶段 2：设定（可逐项编辑，即时落库） ===== */}
         {project.status === "setup" && (
-          <div className="rounded-lg border border-dashed border-border py-10 text-center">
-            <Sparkles className="mx-auto mb-2 h-8 w-8 text-primary/40" />
-            <p className="mb-1 text-sm text-muted-foreground">生成角色卡（4-8 个）+ 世界观条目（6-12 条）</p>
-            <p className="mb-3 text-xs text-muted-foreground/70">将直接写入书稿的设定系统，之后可在设定页继续编辑</p>
-            <Button
-              onClick={() => void run("setup", () => aiFactoryApi.setup(projectId), "设定已生成，进入大纲")}
-              disabled={busy !== null}
-            >
-              {busy === "setup" ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : <Sparkles className="mr-1 h-4 w-4" />}
-              AI 生成设定
-            </Button>
-          </div>
+          <SetupStagePanel
+            project={project}
+            busy={busy}
+            onRun={run}
+            onOutline={() => void run("outline", () => aiFactoryApi.outline(projectId), "大纲已生成，流水线就绪")}
+          />
         )}
 
         {/* ===== 阶段 3：大纲 ===== */}

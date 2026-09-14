@@ -541,7 +541,7 @@ async def setup_project(project_id: int, user: User = Depends(get_current_user),
                 content=str(w.get("content", ""))[:5000],
             )
         )
-    p.status = "outline"
+    # 停 setup 状态：让用户在向导里预览/编辑设定，点「确认并生成大纲」才推进
     await db.commit()
     novel = await db.get(Novel, p.novel_id)
     return _project_out(p, novel)
@@ -554,8 +554,8 @@ async def setup_project(project_id: int, user: User = Depends(get_current_user),
 async def outline_project(project_id: int, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     """AI 生成卷-章大纲：建 Volume/Chapter 骨架 + AiChapterJob（pending）。"""
     p = await _get_project(project_id, user, db)
-    if p.status not in ("outline",):
-        raise HTTPException(400, f"当前状态 {p.status} 不能生成大纲（请先完成设定）")
+    if p.status not in ("setup", "outline"):
+        raise HTTPException(400, f"当前状态 {p.status} 不能生成大纲（请先完成立项）")
     spec = json.loads(p.book_spec_json or "{}")
     config = await _pick_config(user, db, p.outline_llm)
 
