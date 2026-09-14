@@ -166,6 +166,8 @@ async def _do_backup(config: IntegrationConfig) -> dict:
     data = buf.getvalue()
     remote = f"{config.alist_root.strip('/')}/backup/beidou-{now}.zip"
     try:
+        # AList 原生 put 不自动建目录——先确保 backup/ 存在，否则报路径不存在
+        await client.ensure_dirs(f"{config.alist_root.strip('/')}/backup")
         await client.put(remote, data, "application/zip")
     except AlistError as exc:
         raise HTTPException(400, str(exc))
