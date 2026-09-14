@@ -251,11 +251,14 @@ export function BatchRunDialog({
                 type="checkbox"
                 className="accent-primary"
                 checked={project.nightly_enabled ?? false}
-                onChange={async (e) => {
+                onChange={async () => {
+                  // 不用 e.target.checked（label 包裹点击时事件目标可能不是 input），
+                  // 以当前项目状态取反为准——提示与 UI 显示严格一致
+                  const next = !(project.nightly_enabled ?? false);
                   try {
-                    const p = await aiFactoryM2.updateProject(project.id, { nightly_enabled: e.target.checked });
+                    const p = await aiFactoryM2.updateProject(project.id, { nightly_enabled: next });
                     onProjectChange?.(p);
-                    toast.success(e.target.checked ? "夜间连跑已开启——每天凌晨自动执行，次日看战报" : "夜间连跑已关闭");
+                    toast.success(next ? "夜间连跑已开启——每天凌晨自动执行，次日看战报" : "夜间连跑已关闭");
                   } catch (err) {
                     toast.error(err instanceof Error ? err.message : "保存失败");
                   }
