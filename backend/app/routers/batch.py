@@ -632,6 +632,50 @@ async def hook_alerts(project_id: int, user: User = Depends(get_current_user), d
     }
 
 
+# ---------- 后台批量连跑（窗口可关，轮询查进度） ----------
+
+
+class BgStartIn(BaseModel):
+    count: int = Field(default=5, ge=1, le=10)
+
+
+@router.post("/projects/{project_id}/batch-bg/start")
+async def batch_bg_start(
+    project_id: int, data: BgStartIn, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
+):
+    """启动后台批量连跑：服务端异步执行，窗口可关；轮询 status 拿进度。"""
+    p = await _get_project(project_id, user, db)
+    if p.status != "writing":
+        raise HTTPException(400, "项目未进入写作阶段")
+    from ..nightly import start_batch_background
+
+    result = await start_batch_background(p.id, user.id, data.count)
+    if not result["ok"]:
+        raise HTTPException(409, result["error"])
+    return {"ok": True}
+
+
+@router.get("/projects/{project_id}/batch-bg/status")
+async def batch_bg_status(project_id: int, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    """查询后台连跑进度：{running, done, total, current, results, error, started_at}。"""
+    p = await _get_project(project_id, user, db)
+    from ..nightly import get_batch_background
+
+    entry = get_batch_background(p.id)
+    if entry is None:
+        return {"running": False, "done": 0, "total": 0, "results": [], "error": "", "current": ""}
+    return entry
+
+
+@router.post("/projects/{project_id}/batch-bg/stop")
+async def batch_bg_stop(project_id: int, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    """请求停止后台连跑（当前章写完后停，不强杀——防半截正文）。"""
+    p = await _get_project(project_id, user, db)
+    from ..nightly import stop_batch_background
+
+    return {"ok": stop_batch_background(p.id)}
+
+
 class LintIn(BaseModel):
     text: str = Field(min_length=1, max_length=30000)
 

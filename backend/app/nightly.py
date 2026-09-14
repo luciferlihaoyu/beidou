@@ -203,9 +203,113 @@ async def nightly_tick() -> int:
             todo.append((p.id, p.user_id))
     n = 0
     for project_id, user_id in todo:
+        bg = BG_TASKS.get(project_id)
+        if bg and bg.get("running"):
+            continue  # 后台手动连跑在执行，夜跑避让（防双写同一章）
         try:
             await run_nightly_for_project(project_id, user_id)
             n += 1
         except Exception:  # noqa: BLE001  单项目失败不影响其他
             pass
     return n
+
+
+# ---------- 后台批量连跑（用户手动触发，窗口可关）----------
+
+import asyncio
+
+# 在跑的后台任务注册表：project_id -> 状态 dict（内存态，进程重启即清——足够用，
+# 因为任务本身的生命周期也只在本进程内）
+BG_TASKS: dict[int, dict] = {}
+
+
+async def run_batch_background(project_id: int, user_id: int, count: int) -> None:
+    """后台批量连跑：与夜跑共用 _generate_one 单章管线，进度写 BG_TASKS 供轮询。
+
+    窗口关闭/断网不影响执行；完成/失败/停止后状态保留在注册表供最后查看。
+    """
+    entry = BG_TASKS[project_id]
+    try:
+        async with SessionLocal() as db:
+            p = await db.get(AiProject, project_id)
+            if p is None or p.status != "writing" or p.novel_id is None:
+                entry.update(running=False, error="项目未就绪（需已进入写作阶段）")
+                return
+            novel = await db.get(Novel, p.novel_id)
+            if novel is None:
+                entry.update(running=False, error="小说不存在")
+                return
+
+            jobs = ((await db.execute(select(AiChapterJob).where(AiChapterJob.project_id == p.id))).scalars().all())
+            chapters = ((await db.execute(select(Chapter).where(Chapter.novel_id == p.novel_id))).scalars().all())
+            volumes = ((await db.execute(select(Volume).where(Volume.novel_id == p.novel_id))).scalars().all())
+            ordered = order_chapters(chapters, volumes)
+            number_map = {c.id: i + 1 for i, c in enumerate(ordered)}
+            pending = [j for j in jobs if j.status in ("pending", "failed") and j.chapter_id]
+            pending.sort(key=lambda j: number_map.get(j.chapter_id or 0, 99999))
+            pending = pending[: max(1, min(count, 10))]
+            entry["total"] = len(pending)
+
+            low_streak = 0
+            for job in pending:
+                if entry.get("stop_requested"):
+                    entry["results"].append({"ok": False, "error": "已手动停止"})
+                    break
+                chapter = await db.get(Chapter, job.chapter_id)
+                if chapter is None:
+                    continue
+                num = number_map.get(chapter.id, 0)
+                entry["current"] = chapter_display_title(chapter.title, num)
+                try:
+                    r = await _generate_one(p, novel, job, chapter, num, db)
+                except Exception as exc:  # noqa: BLE001  单章失败继续下一章
+                    job.status = "failed"
+                    await db.commit()
+                    r = {"title": chapter_display_title(chapter.title, num), "ok": False, "error": str(exc)[:100]}
+                entry["results"].append(r)
+                if r.get("ok"):
+                    entry["done"] += 1
+                    if r.get("deai_score", 100) < 60:
+                        low_streak += 1
+                        if low_streak >= 2:
+                            entry["results"].append({"ok": False, "error": "质量门禁：连续 2 章 AI 味 <60，提前收工"})
+                            break
+                    else:
+                        low_streak = 0
+                entry["current"] = ""
+    except Exception as exc:  # noqa: BLE001
+        entry["error"] = str(exc)[:200]
+    finally:
+        entry["running"] = False
+        entry["finished_at"] = datetime.now(timezone.utc).isoformat()
+
+
+async def start_batch_background(project_id: int, user_id: int, count: int) -> dict:
+    """启动后台连跑；同项目互斥（在跑则拒绝）。返回初始状态。"""
+    existing = BG_TASKS.get(project_id)
+    if existing and existing.get("running"):
+        return {"ok": False, "error": "该项目已有后台连跑在执行", "status": existing}
+    BG_TASKS[project_id] = {
+        "running": True,
+        "done": 0,
+        "total": 0,
+        "current": "",
+        "results": [],
+        "error": "",
+        "stop_requested": False,
+        "started_at": datetime.now(timezone.utc).isoformat(),
+    }
+    asyncio.create_task(run_batch_background(project_id, user_id, count))
+    return {"ok": True, "status": BG_TASKS[project_id]}
+
+
+def get_batch_background(project_id: int) -> dict | None:
+    return BG_TASKS.get(project_id)
+
+
+def stop_batch_background(project_id: int) -> bool:
+    entry = BG_TASKS.get(project_id)
+    if entry and entry.get("running"):
+        entry["stop_requested"] = True
+        return True
+    return False

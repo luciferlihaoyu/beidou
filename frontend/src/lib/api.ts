@@ -821,3 +821,24 @@ export async function downloadExportPack(projectId: number): Promise<void> {
   a.click();
   URL.revokeObjectURL(url);
 }
+
+// ---------- 后台批量连跑（窗口可关） ----------
+export interface BgBatchStatus {
+  running: boolean;
+  done: number;
+  total: number;
+  current: string;
+  results: { title?: string; ok: boolean; words?: number; deai_score?: number; error?: string }[];
+  error: string;
+  started_at?: string;
+  finished_at?: string;
+}
+
+export const aiFactoryBg = {
+  start: (projectId: number, count: number) =>
+    api.post<{ ok: boolean }>(`/api/ai-factory/projects/${projectId}/batch-bg/start`, { count }),
+  status: (projectId: number) =>
+    api.get<BgBatchStatus>(`/api/ai-factory/projects/${projectId}/batch-bg/status`),
+  stop: (projectId: number) =>
+    api.post<{ ok: boolean }>(`/api/ai-factory/projects/${projectId}/batch-bg/stop`),
+};

@@ -10,6 +10,8 @@ import { toast } from "sonner";
 import {
   Bot,
   BookMarked,
+  CloudCog,
+  Loader2,
   ShieldAlert,
   Image as ImageIcon,
   Pause,
@@ -22,6 +24,7 @@ import {
   aiFactoryM2,
   aiFactoryM3,
   xuanjiApi,
+  aiFactoryBg,
   PLATFORM_CHOICES,
   type AiProject,
   type BatchEvent,
@@ -61,6 +64,21 @@ export function BatchRunDialog({
 }) {
   const [count, setCount] = useState(5);
   const [running, setRunning] = useState(false);
+  const [bgStarting, setBgStarting] = useState(false);
+
+  async function startBg() {
+    setBgStarting(true);
+    try {
+      await aiFactoryBg.start(project.id, count);
+      toast.success(`后台连跑已启动（${count} 章）——窗口可关，进度在生成面板顶部可见`);
+      onOpenChange(false);
+      onFinished();  // 触发一次刷新，进度卡立刻开始轮询
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "启动失败");
+    } finally {
+      setBgStarting(false);
+    }
+  }
   const [lines, setLines] = useState<BatchLine[]>([]);
   const [curChapter, setCurChapter] = useState<string>("");
   const abortRef = useRef<AbortController | null>(null);
@@ -201,10 +219,22 @@ export function BatchRunDialog({
                 停止
               </Button>
             ) : (
-              <Button size="sm" onClick={() => void start()}>
-                <Play className="mr-1 h-3.5 w-3.5" />
-                {lines.length ? "再跑一批" : "开始连跑"}
-              </Button>
+              <>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={bgStarting}
+                  title="服务端后台执行：窗口可关、断网不影响；进度在生成面板顶部实时可见"
+                  onClick={() => void startBg()}
+                >
+                  {bgStarting ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : <CloudCog className="mr-1 h-3.5 w-3.5" />}
+                  后台执行
+                </Button>
+                <Button size="sm" onClick={() => void start()}>
+                  <Play className="mr-1 h-3.5 w-3.5" />
+                  {lines.length ? "再跑一批" : "开始连跑"}
+                </Button>
+              </>
             )}
             {!running && lines.length > 0 && (
               <Button variant="ghost" size="sm" onClick={() => onOpenChange(false)}>

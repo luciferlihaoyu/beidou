@@ -18,7 +18,7 @@ import {
   X,
   Wand2,
 } from "lucide-react";
-import { aiFactoryApi, aiFactoryM2, aiFactoryM3, aiFactoryM6, aiFactoryM7, aiFactoryM9, streamPost, type AiChapterJob, type AiProject, type HookAlert } from "@/lib/api";
+import { aiFactoryApi, aiFactoryBg, aiFactoryM2, aiFactoryM3, aiFactoryM6, aiFactoryM7, aiFactoryM9, streamPost, type AiChapterJob, type AiProject, type BgBatchStatus, type HookAlert } from "@/lib/api";
 import { M3Toolbar, RetentionPanel } from "@/components/FactoryM3";
 import { Button } from "@/components/ui/button";
 import {
@@ -68,6 +68,38 @@ export default function ChapterGenPanel({
     aiFactoryM2.jobs(project.id).then(setJobs).catch((e) => toast.error(e.message));
   }, [project.id]);
   useEffect(loadJobs, [loadJobs]);
+
+  // ---------- 后台连跑状态轮询 ----------
+  const [bg, setBg] = useState<BgBatchStatus | null>(null);
+  const bgWasRunning = useRef(false);
+  useEffect(() => {
+    let timer: ReturnType<typeof setInterval> | null = null;
+    const poll = () => {
+      aiFactoryBg
+        .status(project.id)
+        .then((s) => {
+          setBg(s.total > 0 || s.running ? s : null);
+          if (s.running) {
+            bgWasRunning.current = true;
+            if (!timer) timer = setInterval(poll, 3000);
+          } else if (bgWasRunning.current) {
+            // 刚跑完：刷新章节列表 + 项目数据（token 账本/战报）
+            bgWasRunning.current = false;
+            loadJobs();
+            aiFactoryApi.get(project.id).then(onProjectChange).catch(() => {});
+            if (timer) {
+              clearInterval(timer);
+              timer = null;
+            }
+          }
+        })
+        .catch(() => {});
+    };
+    poll();
+    return () => {
+      if (timer) clearInterval(timer);
+    };
+  }, [project.id, loadJobs, onProjectChange]);
 
   const doneCount = jobs.filter((j) => j.status === "done" || j.status === "needs_fix").length;
   const totalWords = jobs.reduce((s, j) => s + j.actual_words, 0);
@@ -243,6 +275,37 @@ export default function ChapterGenPanel({
             🪙 累计消耗 {((project.tokens_prompt + project.tokens_completion) / 1000).toFixed(1)}K tokens
             （输入 {(project.tokens_prompt / 1000).toFixed(1)}K / 输出 {(project.tokens_completion / 1000).toFixed(1)}K，含估算）
           </p>
+        )}
+        {/* 后台连跑状态（窗口可关，这里实时可见） */}
+        {bg && (bg.running || bg.results.length > 0) && (
+          <div className="rounded-md border border-sky-500/30 bg-sky-500/5 px-3 py-2 text-xs">
+            <div className="flex items-center justify-between">
+              <p className="font-medium text-sky-600 dark:text-sky-400">
+                {bg.running ? (
+                  <>
+                    🚀 后台连跑中 {bg.done}/{bg.total} 章
+                    {bg.current && <span className="ml-1 font-normal text-muted-foreground">正在写：{bg.current}</span>}
+                  </>
+                ) : (
+                  <>🚀 后台连跑结束：完成 {bg.results.filter((r) => r.ok).length}/{bg.results.length} 章</>
+                )}
+              </p>
+              {bg.running && (
+                <button
+                  className="text-muted-foreground hover:text-destructive"
+                  onClick={() => void aiFactoryBg.stop(project.id).then(() => toast.success("已请求停止（当前章写完后停）"))}
+                >
+                  停止
+                </button>
+              )}
+            </div>
+            {bg.results.length > 0 && (
+              <p className="mt-0.5 text-muted-foreground">
+                {bg.results.map((r) => (r.ok ? `✅ ${r.title}${r.deai_score != null ? `(${r.deai_score}分)` : ""}` : `❌ ${r.title ?? ""}${r.error ?? ""}`)).join(" · ")}
+              </p>
+            )}
+            {bg.error && <p className="mt-0.5 text-destructive">{bg.error}</p>}
+          </div>
         )}
         {project.nightly_last_run && (
           <div className="rounded-md border border-indigo-500/30 bg-indigo-500/5 px-3 py-2 text-xs">
