@@ -262,16 +262,29 @@ export default function FactoryProject() {
               spec && (
                 <div className="rounded-lg border border-border bg-card p-4">
                   <div className="mb-3 flex items-center justify-between">
-                    <h3 className="text-sm font-medium">立项草案（可修改）</h3>
+                    <div>
+                      <h3 className="text-sm font-medium">立项草案（可修改）</h3>
+                      <p className="text-[11px] text-muted-foreground/70">你填写的字段重新生成时原样保留，AI 只补空白</p>
+                    </div>
                     <Button
                       variant="ghost"
                       size="sm"
                       className="h-7 text-xs"
-                      onClick={() => void run("init", () => aiFactoryApi.init(projectId), "已重新生成")}
+                      onClick={() =>
+                        void run(
+                          "init",
+                          () =>
+                            aiFactoryApi.init(projectId, {
+                              ...spec,
+                              titles: [title.trim(), ...(spec.titles ?? [])].filter(Boolean),
+                            }),
+                          "已重新生成（你填写的字段已保留）"
+                        )
+                      }
                       disabled={busy !== null}
                     >
                       <RefreshCw className={`mr-1 h-3 w-3 ${busy === "init" ? "animate-spin" : ""}`} />
-                      重新生成
+                      重新生成（保留我填的）
                     </Button>
                   </div>
                   <div className="space-y-3">

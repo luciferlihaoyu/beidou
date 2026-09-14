@@ -290,9 +290,24 @@ async def delete_project(
 # ---------- 阶段 1：立项（book_spec 八字段，参考 GOAT）----------
 
 
+class InitIn(BaseModel):
+    """重新立项时可携带作者已填写的草案字段——已填的原样保留，AI 只补空白。"""
+
+    existing_spec: dict | None = None
+
+
 @router.post("/projects/{project_id}/init")
-async def init_project(project_id: int, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
-    """AI 生成立项草案：book_spec 八字段 + 书名候选 ×3。"""
+async def init_project(
+    project_id: int,
+    data: InitIn | None = None,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """AI 生成立项草案：book_spec 八字段 + 书名候选 ×3。
+
+    作者已填写的字段（existing_spec 中非空的）原样保留（双保险：prompt 约束 +
+    生成后强制合并覆盖），AI 只补空白字段。
+    """
     p = await _get_project(project_id, user, db)
     if p.status not in ("draft",):
         raise HTTPException(400, f"当前状态 {p.status} 不能重新立项")
@@ -322,12 +337,37 @@ async def init_project(project_id: int, user: User = Depends(get_current_user), 
         except (ValueError, TypeError):
             pass
 
+    # 作者已填写的字段（重新生成时保留区）
+    SCALAR_FIELDS = ["genre", "time", "place", "theme", "tone", "pov", "premise"]
+    kept: dict = {}
+    if data and data.existing_spec:
+        for k in SCALAR_FIELDS:
+            v = data.existing_spec.get(k)
+            if isinstance(v, str) and v.strip():
+                kept[k] = v.strip()
+        # 书名：用户已定的书名放候选首位
+        titles_in = data.existing_spec.get("titles")
+        if isinstance(titles_in, list) and titles_in and str(titles_in[0]).strip():
+            kept["_title"] = str(titles_in[0]).strip()
+
+    kept_line = ""
+    if kept:
+        kept_desc = "\n".join(
+            f"- {k}：{v}" for k, v in kept.items() if not k.startswith("_")
+        )
+        kept_line = (
+            "\n【作者已确定的设定——原样保留，禁止改动】\n" + kept_desc + "\n"
+            + (f"- 书名已定为「{kept['_title']}」（放候选首位，可再补 2 个备选）\n" if kept.get("_title") else "")
+            + "你只补全上面没有列出的空白字段，让补全部分与已确定设定自洽。\n"
+        )
+
     prompt = (
         f"用户的一句话创意：{p.seed_prompt}\n"
         + (f"类型偏好：{p.genre}\n" if p.genre else "")
         + (f"风格要求：{p.style_notes}\n" if p.style_notes else "")
         + target_line
         + market_line
+        + kept_line
         + "\n请为这个创意做小说立项，输出 JSON（只输出 JSON）：\n"
         "{\n"
         '  "titles": ["书名候选1", "书名候选2", "书名候选3"],\n'
@@ -348,6 +388,14 @@ async def init_project(project_id: int, user: User = Depends(get_current_user), 
         raise HTTPException(502, f"AI 输出解析失败：{e}；原始输出前 200 字：{raw[:200]}") from e
     if not isinstance(spec, dict) or not spec.get("premise"):
         raise HTTPException(502, "AI 输出缺少核心字段（premise）")
+    # 双保险：作者已填字段强制覆盖 AI 输出（防模型不听话）
+    if kept:
+        for k in SCALAR_FIELDS:
+            if k in kept:
+                spec[k] = kept[k]
+        if kept.get("_title"):
+            titles = spec.get("titles") if isinstance(spec.get("titles"), list) else []
+            spec["titles"] = [kept["_title"]] + [t for t in titles if t != kept["_title"]][:2]
     p.book_spec_json = json.dumps(spec, ensure_ascii=False)
     if spec.get("genre") and not p.genre:
         p.genre = str(spec["genre"])[:50]
