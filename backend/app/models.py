@@ -110,6 +110,22 @@ class Foreshadowing(Base):
     created_at: Mapped[datetime] = mapped_column(default=utcnow)
 
 
+class NovelTerm(Base):
+    """常用词/写作用语库：人名、地名、招式、法宝、口头禅等高频用词。
+
+    编辑器「常用词」面板按 category 分组展示，点击词条插入到光标处。
+    """
+
+    __tablename__ = "novel_terms"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    novel_id: Mapped[int] = mapped_column(ForeignKey("novels.id", ondelete="CASCADE"), index=True)
+    category: Mapped[str] = mapped_column(String(50), default="其他")  # 人名 / 地名 / 招式 / 法宝 / 口头禅 / 其他
+    name: Mapped[str] = mapped_column(String(100))  # 词本身
+    note: Mapped[str] = mapped_column(String(500), default="")  # 备注 / 用法
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)
+
+
 class OutlineNode(Base):
     __tablename__ = "outline_nodes"
 

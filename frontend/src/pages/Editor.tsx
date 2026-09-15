@@ -25,6 +25,7 @@ import {
   Maximize2,
   Minimize2,
   MoreHorizontal,
+  NotebookText,
   PenLine,
   Plus,
   Search,
@@ -53,6 +54,7 @@ import QualityRadar from "@/components/QualityRadar";
 import RecycleBinView, { type RestoredPayload } from "@/components/RecycleBin";
 import { type EditorTheme, loadTheme } from "@/lib/editorTheme";
 import SnapshotPanel from "@/components/SnapshotPanel";
+import TermsPanel from "@/components/TermsPanel";
 import TiptapEditor, { type EditorHandle, type OutlineItem } from "@/components/TiptapEditor";
 import { useGlobalShortcuts } from "@/hooks/useGlobalShortcuts";
 import { POMODORO_WRITE_MIN, usePomodoro } from "@/hooks/usePomodoro";
@@ -85,6 +87,7 @@ import {
 } from "@/components/ui/dialog";
 import {
   DropdownMenu,
+  DropdownMenuCheckboxItem,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuLabel,
@@ -115,8 +118,81 @@ function stripHtml(html: string): string {
     .replace(/&#39;/g, "'");
 }
 
-function countWords(html: string): number {
-  return stripHtml(html).replace(/\s/g, "").length;
+// ---------- 字数三口径（与后端 deps.count_words_split 一致） ----------
+
+interface WordSplit {
+  /** 中文：CJK 字符数（汉字/假名/谚文，不含标点） */
+  cn: number;
+  /** English：连续 ASCII 字母单词数 */
+  en: number;
+  /** 总计：去空白全部字符数（等价于 countWords） */
+  total: number;
+}
+
+const CJK_RE = /[\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af]/g;
+
+function splitWords(html: string): WordSplit {
+  const plain = stripHtml(html);
+  const cn = (plain.match(CJK_RE) ?? []).length;
+  const en = (plain.match(/\b[A-Za-z]+\b/g) ?? []).length;
+  const total = plain.replace(/\s/g, "").length;
+  return { cn, en, total };
+}
+
+/** 章节对象 → 三口径字数（优先用后端 word_count_split，缺失时本地计算） */
+function chapterToSplit(c: Chapter): WordSplit {
+  const s = c.word_count_split;
+  if (s) return { cn: s.cjk, en: s.en, total: s.total };
+  return splitWords(c.content ?? "");
+}
+
+// ---------- 排版与标点 ----------
+
+/** 半角标点 → 全角映射 */
+const HALF_TO_FULL_PUNCT: Record<string, string> = {
+  ",": "，",
+  ".": "。",
+  "!": "！",
+  "?": "？",
+  ";": "；",
+  ":": "：",
+};
+
+const CJK_CHAR_RE = /[\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af]/;
+
+/**
+ * 单段文本排版：半角标点转全角（中文上下文）、直引号左右交替转中文引号、
+ * 连续 3+ 句号转省略号、行首空格清理。
+ */
+function reformatParagraphText(input: string): string {
+  let s = input.replace(/^[ \t　]+/, "");
+  s = s.replace(/\.{3,}/g, "……");
+  let dqOpen = false;
+  let sqOpen = false;
+  let out = "";
+  for (const ch of s) {
+    if (ch === '"') {
+      out += dqOpen ? "”" : "“";
+      dqOpen = !dqOpen;
+      continue;
+    }
+    if (ch === "'") {
+      out += sqOpen ? "’" : "‘";
+      sqOpen = !sqOpen;
+      continue;
+    }
+    const full = HALF_TO_FULL_PUNCT[ch];
+    if (full) {
+      const prev = out.match(/(\S)\s*$/)?.[1] ?? "";
+      if (CJK_CHAR_RE.test(prev)) {
+        out = out.replace(/[ \t]+$/, ""); // 收掉标点前多余空格
+        out += full;
+        continue;
+      }
+    }
+    out += ch;
+  }
+  return out;
 }
 
 function fmtDate(d: Date): string {
@@ -255,6 +331,32 @@ export default function Editor() {
 
   // 写作状态栏统计（今日字数以服务端统计为基准，本地输入实时累加）
   const [liveWords, setLiveWords] = useState(0);
+  // 三口径字数（中文/English/总计），与 liveWords（=total）同步维护
+  const [liveSplit, setLiveSplit] = useState<WordSplit>({ cn: 0, en: 0, total: 0 });
+  // 状态栏字数口径：total → cn → split 循环，localStorage beidou:wordcount-mode
+  const [wordMode, setWordMode] = useState<"total" | "cn" | "split">(() => {
+    const v = localStorage.getItem("beidou:wordcount-mode");
+    return v === "cn" || v === "split" ? v : "total";
+  });
+  const cycleWordMode = useCallback(() => {
+    setWordMode((prev) => {
+      const next = prev === "total" ? "cn" : prev === "cn" ? "split" : "total";
+      localStorage.setItem("beidou:wordcount-mode", next);
+      return next;
+    });
+  }, []);
+  // 输入时自动转标点开关，localStorage beidou:auto-punct
+  const [autoPunct, setAutoPunct] = useState(() => localStorage.getItem("beidou:auto-punct") === "1");
+  const toggleAutoPunct = useCallback(() => {
+    setAutoPunct((prev) => {
+      const next = !prev;
+      localStorage.setItem("beidou:auto-punct", next ? "1" : "0");
+      return next;
+    });
+  }, []);
+  // 常用词面板
+  const [termsOpen, setTermsOpen] = useState(false);
+  const [reformatting, setReformatting] = useState(false);
   const [todayWords, setTodayWords] = useState(0);
   const [sessionChars, setSessionChars] = useState(0);
   const sessionStart = useRef(Date.now());
@@ -359,6 +461,7 @@ export default function Editor() {
         if (activeIdRef.current === activeId) {
           setActiveContent(c.content ?? "");
           setLiveWords(c.word_count);
+          setLiveSplit(chapterToSplit(c));
           prevWords.current = c.word_count;
           setSaveState("saved");
         }
@@ -389,7 +492,9 @@ export default function Editor() {
       pendingHtml.current = html;
       setSaveState("dirty");
       // 写作统计
-      const words = countWords(html);
+      const split = splitWords(html);
+      const words = split.total;
+      setLiveSplit(split);
       const delta = words - prevWords.current;
       if (delta > 0) {
         prevWords.current = words;
@@ -847,6 +952,63 @@ export default function Editor() {
     }
   }
 
+  /**
+   * 一键排版：先落盘 + 自动快照（label「一键排版前」），再对当前章全文做
+   * 标点全角化 / 引号配对 / 空行压缩 / 行首空格清理 / 省略号归并。
+   * 逐文本块单事务替换，保留段落与标题结构（单个 undo 步可整体撤销）。
+   */
+  async function runReformat() {
+    if (activeId === null) {
+      toast.error("请先选择章节");
+      return;
+    }
+    const ed = editorRef.current?.getEditor();
+    if (!ed || ed.isDestroyed) return;
+    setReformatting(true);
+    try {
+      await flushSave(); // 先落盘，快照拿到的是当前编辑器状态
+      await api.post(`/api/novels/${novelId}/chapters/${activeId}/snapshots`, {
+        label: "一键排版前",
+      });
+    } catch (err) {
+      setReformatting(false);
+      toast.error(err instanceof Error ? err.message : "排版前快照失败，已中止");
+      return;
+    }
+    // 收集操作：多余空段删除（text=null）+ 文本块内容替换；按位置倒序应用到同一事务
+    const ops: { from: number; to: number; text: string | null }[] = [];
+    let prevEmpty = false;
+    ed.state.doc.forEach((node, offset) => {
+      if (!node.isTextblock) {
+        prevEmpty = false;
+        return;
+      }
+      const text = node.textContent;
+      if (text.trim() === "") {
+        if (prevEmpty) ops.push({ from: offset, to: offset + node.nodeSize, text: null });
+        prevEmpty = true;
+        return;
+      }
+      prevEmpty = false;
+      const next = reformatParagraphText(text);
+      if (next !== text) {
+        ops.push({ from: offset + 1, to: offset + node.nodeSize - 1, text: next });
+      }
+    });
+    setReformatting(false);
+    if (ops.length === 0) {
+      toast.info("没有需要调整的排版");
+      return;
+    }
+    const tr = ed.state.tr;
+    for (const op of [...ops].sort((a, b) => b.from - a.from)) {
+      if (op.text === null) tr.delete(op.from, op.to);
+      else tr.replaceWith(op.from, op.to, ed.state.schema.text(op.text));
+    }
+    ed.view.dispatch(tr.scrollIntoView());
+    toast.success("排版完成（原文已快照）");
+  }
+
   /** 快照面板恢复成功后重新拉章节正文并重挂编辑器 */
   async function reloadActiveChapter() {
     const id = activeIdRef.current;
@@ -856,6 +1018,7 @@ export default function Editor() {
       if (activeIdRef.current !== id) return; // 恢复期间切章了，丢弃过期结果
       setActiveContent(c.content ?? "");
       setLiveWords(c.word_count);
+      setLiveSplit(chapterToSplit(c));
       prevWords.current = c.word_count;
       pendingHtml.current = null;
       setSaveState("saved");
@@ -992,6 +1155,7 @@ export default function Editor() {
         const c = await api.get<Chapter>(`/api/novels/${novelId}/chapters/${activeId}`);
         setActiveContent(c.content ?? "");
         setLiveWords(c.word_count);
+        setLiveSplit(chapterToSplit(c));
         prevWords.current = c.word_count;
         pendingHtml.current = null;
         setReloadTick((t) => t + 1); // 强制重挂载编辑器以显示新内容
@@ -1150,6 +1314,7 @@ export default function Editor() {
       const c = await api.get<Chapter>(`/api/novels/${novelId}/chapters/${activeId}`);
       setActiveContent(c.content ?? "");
       setLiveWords(c.word_count);
+      setLiveSplit(chapterToSplit(c));
       prevWords.current = c.word_count;
       pendingHtml.current = null;
       setReloadTick((t) => t + 1); // 强制重挂载编辑器以显示新内容
@@ -1956,6 +2121,7 @@ export default function Editor() {
                       novelId={novelId}
                       chapterId={activeId}
                       theme={theme}
+                      autoPunct={autoPunct}
                       onReady={(h) => (editorRef.current = h)}
                     />
                 </div>
@@ -2028,6 +2194,18 @@ export default function Editor() {
                   <span className="min-w-0 truncate">{activeChapter?.display_title ?? ""}</span>
                 </span>
                 <span className="flex shrink-0 items-center gap-3 tnum">
+                  {/* 字数口径切换：总计 → 中文 → 中·英 三态循环（偏好存 localStorage） */}
+                  <button
+                    className="rounded px-1 hover:bg-accent"
+                    title="字数口径：点击切换（总计 → 中文 → 中英）"
+                    onClick={cycleWordMode}
+                  >
+                    {wordMode === "total"
+                      ? `总计 ${liveSplit.total.toLocaleString()}`
+                      : wordMode === "cn"
+                        ? `中文 ${liveSplit.cn.toLocaleString()}`
+                        : `中 ${liveSplit.cn.toLocaleString()} · 英 ${liveSplit.en.toLocaleString()}`}
+                  </button>
                   {/* A1 本章字数目标：点击设置，达标变绿 */}
                   <DropdownMenu>
                     <DropdownMenuTrigger asChild>
@@ -2122,6 +2300,47 @@ export default function Editor() {
                     onClick={() => setAiAssistOpen(true)}
                   >
                     <Wand2 className="h-3.5 w-3.5" />
+                  </Button>
+                  {/* 排版与标点：一键排版（自动快照）+ 输入时自动转标点 */}
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-5 w-5"
+                        title="排版与标点"
+                        disabled={activeId === null || reformatting}
+                      >
+                        {reformatting ? (
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        ) : (
+                          <PenLine className="h-3.5 w-3.5" />
+                        )}
+                      </Button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="end" className="w-48">
+                      <DropdownMenuItem onClick={() => void runReformat()}>
+                        <PenLine className="size-3.5" />
+                        一键排版（先自动快照）
+                      </DropdownMenuItem>
+                      <DropdownMenuSeparator />
+                      <DropdownMenuCheckboxItem
+                        checked={autoPunct}
+                        onCheckedChange={() => toggleAutoPunct()}
+                      >
+                        输入时自动转标点
+                      </DropdownMenuCheckboxItem>
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                  {/* 常用词库：分类分组，点击插入光标处 */}
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className={`h-5 w-5 ${termsOpen ? "text-primary" : ""}`}
+                    title="常用词库（人名 / 地名 / 招式 / 法宝）"
+                    onClick={() => setTermsOpen(true)}
+                  >
+                    <NotebookText className="h-3.5 w-3.5" />
                   </Button>
                   {/* 写作排版偏好：字号 / 行距 / 页宽 */}
                   <DropdownMenu>
@@ -2629,6 +2848,16 @@ export default function Editor() {
           onRestored={() => void reloadActiveChapter()}
         />
       )}
+
+      {/* 常用词库面板：分类分组 + 点击插入光标处 + 增删改 */}
+      <TermsPanel
+        open={termsOpen}
+        onOpenChange={setTermsOpen}
+        novelId={novelId}
+        onInsert={(term) => {
+          editorRef.current?.insertInline(term.name);
+        }}
+      />
     </AppShell>
   );
 }

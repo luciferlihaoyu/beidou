@@ -16,6 +16,8 @@ export interface OutlineItem {
 
 export interface EditorHandle {
   insertAtCursor: (text: string) => void;
+  /** 行内插入纯文本（不包段落，常用词/人名插入用；保留光标在插入文本之后） */
+  insertInline: (text: string) => void;
   appendContent: (html: string) => void;
   getText: () => string;
   /** 跳转到指定标题位置（大纲面板点击用） */
@@ -25,6 +27,19 @@ export interface EditorHandle {
   /** 取底层 Tiptap Editor 实例（章内搜索替换 / 光标拆分等高级操作用；销毁后返回 null） */
   getEditor: () => Editor | null;
 }
+
+/** 半角标点 → 全角（输入时自动转换 + 一键排版共用口径） */
+const HALF_TO_FULL_PUNCT: Record<string, string> = {
+  ",": "，",
+  ".": "。",
+  "!": "！",
+  "?": "？",
+  ";": "；",
+  ":": "：",
+};
+
+/** CJK 字符（汉字 + 假名 + 谚文），用于判断「中文上下文」 */
+const CJK_CHAR_RE = /[\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af]/;
 
 /** 遍历文档收集标题（pos 为文档绝对位置） */
 function collectOutline(editor: Editor): OutlineItem[] {
@@ -51,6 +66,7 @@ export default function TiptapEditor({
   novelId,
   chapterId,
   theme = DEFAULT_THEME,
+  autoPunct = false,
 }: {
   content: string;
   placeholder?: string;
@@ -61,14 +77,18 @@ export default function TiptapEditor({
   novelId?: number;
   chapterId?: number | null;
   theme?: EditorTheme;
+  /** 输入时自动转标点：敲半角 , . ! ? ; : 且前一字符是中文时替换为全角 */
+  autoPunct?: boolean;
 }) {
   // useEditor 的回调在创建时闭包捕获一次 props，经 ref 转发保证始终拿到最新值
   // （ref 写入放 effect 中同步，遵守渲染期不可触碰 ref 的约束）
   const callbacksRef = useRef({ onUpdate, onOutlineChange });
   const typewriterRef = useRef(typewriter);
+  const autoPunctRef = useRef(autoPunct);
   useEffect(() => {
     callbacksRef.current = { onUpdate, onOutlineChange };
     typewriterRef.current = typewriter;
+    autoPunctRef.current = autoPunct;
   });
 
   // 滚动容器（打字机模式需要读取/设置 scrollTop）
@@ -111,6 +131,17 @@ export default function TiptapEditor({
     content,
     editorProps: {
       attributes: { class: "prose-beidou px-10 py-8 md:px-14" },
+      // 输入时自动转标点：单字符半角标点 + 前一字符为中文 → 替换为全角。
+      // 返回 true 阻止默认输入，用 tr.insertText 一次性替换（不会递归触发本钩子，光标落在插入文本之后）
+      handleTextInput: (view, from, to, text) => {
+        if (!autoPunctRef.current || text.length !== 1) return false;
+        const full = HALF_TO_FULL_PUNCT[text];
+        if (!full) return false;
+        const prevChar = from > 0 ? view.state.doc.textBetween(from - 1, from) : "";
+        if (!CJK_CHAR_RE.test(prevChar)) return false;
+        view.dispatch(view.state.tr.insertText(full, from, to).scrollIntoView());
+        return true;
+      },
     },
     onUpdate: ({ editor }) => {
       callbacksRef.current.onUpdate(editor.getHTML());
@@ -151,6 +182,11 @@ export default function TiptapEditor({
             .map((l) => `<p>${l.replace(/</g, "&lt;")}</p>`)
             .join("");
           editor.chain().focus().insertContent(paragraphs).run();
+        },
+        insertInline: (text: string) => {
+          if (!editor || editor.isDestroyed || !text) return;
+          // 用 text 节点对象插入，避免 insertContent(string) 走 HTML 解析吞掉 <
+          editor.chain().focus().insertContent({ type: "text", text }).run();
         },
         appendContent: (html: string) => {
           if (!editor || editor.isDestroyed) return;

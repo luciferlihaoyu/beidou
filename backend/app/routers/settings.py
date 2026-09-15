@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import get_db
 from ..deps import get_owned_novel
-from ..models import Character, Foreshadowing, Novel, OutlineNode, WorldviewEntry
+from ..models import Character, Foreshadowing, Novel, NovelTerm, OutlineNode, WorldviewEntry
 
 router = APIRouter(prefix="/api/novels/{novel_id}/settings", tags=["settings"])
 
@@ -246,6 +246,82 @@ async def delete_foreshadowing(
             )
     except Exception:  # noqa: BLE001
         pass
+    await db.delete(item)
+    await db.commit()
+    return {"ok": True}
+
+
+# ---------- 常用词（写作用语库） ----------
+
+class TermIn(BaseModel):
+    category: str = Field(default="其他", max_length=50)
+    name: str = Field(min_length=1, max_length=100)
+    note: str = Field(default="", max_length=500)
+
+
+class TermOut(TermIn):
+    id: int
+
+    model_config = {"from_attributes": True}
+
+
+@router.get("/terms", response_model=list[TermOut])
+async def list_terms(
+    novel: Novel = Depends(get_owned_novel),
+    db: AsyncSession = Depends(get_db),
+    category: str | None = None,
+):
+    """列出常用词（按 category 分组排序）；可选 ?category= 过滤。"""
+    query = select(NovelTerm).where(NovelTerm.novel_id == novel.id)
+    if category:
+        query = query.where(NovelTerm.category == category)
+    query = query.order_by(NovelTerm.category, NovelTerm.id)
+    result = await db.execute(query)
+    return result.scalars().all()
+
+
+@router.post("/terms", response_model=TermOut)
+async def create_term(
+    data: TermIn, novel: Novel = Depends(get_owned_novel), db: AsyncSession = Depends(get_db)
+):
+    # 去重：同一小说下同名词条（不分分类）视为重复
+    dup = await db.execute(
+        select(NovelTerm).where(NovelTerm.novel_id == novel.id, NovelTerm.name == data.name)
+    )
+    if dup.scalar_one_or_none() is not None:
+        raise HTTPException(409, f"词条「{data.name}」已存在")
+    item = NovelTerm(novel_id=novel.id, **data.model_dump())
+    db.add(item)
+    await db.commit()
+    await db.refresh(item)
+    return item
+
+
+@router.put("/terms/{item_id}", response_model=TermOut)
+async def update_term(
+    item_id: int, data: TermIn, novel: Novel = Depends(get_owned_novel), db: AsyncSession = Depends(get_db)
+):
+    item = await db.get(NovelTerm, item_id)
+    if item is None or item.novel_id != novel.id:
+        raise HTTPException(404, "词条不存在")
+    if data.name != item.name:
+        dup = await db.execute(
+            select(NovelTerm).where(NovelTerm.novel_id == novel.id, NovelTerm.name == data.name)
+        )
+        if dup.scalar_one_or_none() is not None:
+            raise HTTPException(409, f"词条「{data.name}」已存在")
+    for key, value in data.model_dump().items():
+        setattr(item, key, value)
+    await db.commit()
+    await db.refresh(item)
+    return item
+
+
+@router.delete("/terms/{item_id}")
+async def delete_term(item_id: int, novel: Novel = Depends(get_owned_novel), db: AsyncSession = Depends(get_db)):
+    item = await db.get(NovelTerm, item_id)
+    if item is None or item.novel_id != novel.id:
+        raise HTTPException(404, "词条不存在")
     await db.delete(item)
     await db.commit()
     return {"ok": True}

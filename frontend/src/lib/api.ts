@@ -230,6 +230,33 @@ export interface OutlineNode {
   sort_order: number;
 }
 
+/** 常用词（写作用语库）：人名/地名/招式/法宝/口头禅等，编辑器一键插入 */
+export interface NovelTerm {
+  id: number;
+  category: string;
+  name: string;
+  note: string;
+}
+
+export interface NovelTermIn {
+  category: string;
+  name: string;
+  note?: string;
+}
+
+export const termsApi = {
+  list: (novelId: number, category?: string) =>
+    api.get<NovelTerm[]>(
+      `/api/novels/${novelId}/settings/terms${category ? `?category=${encodeURIComponent(category)}` : ""}`
+    ),
+  create: (novelId: number, data: NovelTermIn) =>
+    api.post<NovelTerm>(`/api/novels/${novelId}/settings/terms`, data),
+  update: (novelId: number, id: number, data: NovelTermIn) =>
+    api.put<NovelTerm>(`/api/novels/${novelId}/settings/terms/${id}`, data),
+  remove: (novelId: number, id: number) =>
+    api.delete<{ ok: boolean }>(`/api/novels/${novelId}/settings/terms/${id}`),
+};
+
 export interface AIConfig {
   id: number;
   name: string;
