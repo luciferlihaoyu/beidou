@@ -398,7 +398,7 @@ import asyncio
 BG_TASKS: dict[int, dict] = {}
 
 
-async def run_batch_background(project_id: int, user_id: int, count: int) -> None:
+async def run_batch_background(project_id: int, user_id: int, count: int, job_ids: list[int] | None = None) -> None:
     """后台批量连跑：与夜跑共用 _generate_one 单章管线，进度写 BG_TASKS 供轮询。
 
     窗口关闭/断网不影响执行；完成/失败/停止后状态保留在注册表供最后查看。
@@ -421,8 +421,13 @@ async def run_batch_background(project_id: int, user_id: int, count: int) -> Non
             ordered = order_chapters(chapters, volumes)
             number_map = {c.id: i + 1 for i, c in enumerate(ordered)}
             pending = [j for j in jobs if j.status in ("pending", "failed") and j.chapter_id]
+            if job_ids:
+                # 指定章节模式（单章后台生成）：只跑点名的 job，忽略 count
+                wanted = set(job_ids)
+                pending = [j for j in pending if j.id in wanted]
             pending.sort(key=lambda j: number_map.get(j.chapter_id or 0, 99999))
-            pending = pending[: max(1, min(count, 10))]
+            if not job_ids:
+                pending = pending[: max(1, min(count, 10))]
             entry["total"] = len(pending)
 
             low_streak = 0
@@ -460,7 +465,7 @@ async def run_batch_background(project_id: int, user_id: int, count: int) -> Non
         entry["finished_at"] = datetime.now(timezone.utc).isoformat()
 
 
-async def start_batch_background(project_id: int, user_id: int, count: int) -> dict:
+async def start_batch_background(project_id: int, user_id: int, count: int, job_ids: list[int] | None = None) -> dict:
     """启动后台连跑；同项目互斥（在跑则拒绝）。返回初始状态。"""
     existing = BG_TASKS.get(project_id)
     if existing and existing.get("running"):
@@ -475,7 +480,7 @@ async def start_batch_background(project_id: int, user_id: int, count: int) -> d
         "stop_requested": False,
         "started_at": datetime.now(timezone.utc).isoformat(),
     }
-    asyncio.create_task(run_batch_background(project_id, user_id, count))
+    asyncio.create_task(run_batch_background(project_id, user_id, count, job_ids))
     return {"ok": True, "status": BG_TASKS[project_id]}
 
 

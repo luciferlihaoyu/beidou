@@ -17,6 +17,7 @@ import {
   Sparkles,
   X,
   Wand2,
+  CloudCog,
 } from "lucide-react";
 import { aiFactoryApi, aiFactoryBg, aiFactoryM2, aiFactoryM3, aiFactoryM6, aiFactoryM7, aiFactoryM9, streamPost, type AiChapterJob, type AiProject, type BgBatchStatus, type HookAlert } from "@/lib/api";
 import { M3Toolbar, RetentionPanel } from "@/components/FactoryM3";
@@ -105,6 +106,16 @@ export default function ChapterGenPanel({
   const totalWords = jobs.reduce((s, j) => s + j.actual_words, 0);
 
   // ---------- 流式生成 ----------
+  // 单章后台生成：复用后台连跑管线（job_ids 指定本章）
+  async function startBgOne(job: AiChapterJob) {
+    try {
+      await aiFactoryBg.start(project.id, 1, [job.id]);
+      toast.success(`「${job.chapter_title}」已转入后台生成——页面可关，进度见顶部状态卡`);
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "启动失败");
+    }
+  }
+
   function startGenerate(job: AiChapterJob, instruction = "") {
     abortRef.current?.abort();
     const ctrl = new AbortController();
@@ -411,6 +422,18 @@ export default function ChapterGenPanel({
                   </>
                 )}
               </Button>
+              {(j.status === "pending" || j.status === "failed") && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-7 px-1.5 text-xs text-muted-foreground"
+                  title="后台生成：服务端执行，页面可关，进度见顶部状态卡"
+                  disabled={bg?.running}
+                  onClick={() => void startBgOne(j)}
+                >
+                  <CloudCog className="h-3 w-3" />
+                </Button>
+              )}
               {(j.status === "done" || j.status === "needs_fix") && (
                 <Button
                   variant="ghost"

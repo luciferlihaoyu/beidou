@@ -662,6 +662,7 @@ async def hook_alerts(project_id: int, user: User = Depends(get_current_user), d
 
 class BgStartIn(BaseModel):
     count: int = Field(default=5, ge=1, le=10)
+    job_ids: list[int] | None = None  # 指定后只跑这些章（单章后台生成用），忽略 count
 
 
 @router.post("/projects/{project_id}/batch-bg/start")
@@ -674,7 +675,7 @@ async def batch_bg_start(
         raise HTTPException(400, "项目未进入写作阶段")
     from ..nightly import start_batch_background
 
-    result = await start_batch_background(p.id, user.id, data.count)
+    result = await start_batch_background(p.id, user.id, data.count, data.job_ids)
     if not result["ok"]:
         raise HTTPException(409, result["error"])
     return {"ok": True}

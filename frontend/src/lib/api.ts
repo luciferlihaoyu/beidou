@@ -862,8 +862,11 @@ export interface BgBatchStatus {
 }
 
 export const aiFactoryBg = {
-  start: (projectId: number, count: number) =>
-    api.post<{ ok: boolean }>(`/api/ai-factory/projects/${projectId}/batch-bg/start`, { count }),
+  start: (projectId: number, count: number, jobIds?: number[]) =>
+    api.post<{ ok: boolean }>(`/api/ai-factory/projects/${projectId}/batch-bg/start`, {
+      count,
+      ...(jobIds?.length ? { job_ids: jobIds } : {}),
+    }),
   status: (projectId: number) =>
     api.get<BgBatchStatus>(`/api/ai-factory/projects/${projectId}/batch-bg/status`),
   stop: (projectId: number) =>
