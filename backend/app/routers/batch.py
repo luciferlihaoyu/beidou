@@ -224,48 +224,59 @@ async def batch_run(
             if p.current_focus:
                 system += f"\n【当前阶段焦点】{p.current_focus[:300]}"
 
-            # ---- 生成（复用 _stream_openai 的 httpx 流式）----
+            # ---- 生成（复用 _stream_openai 的 httpx 流式；失败自动重试一次）----
             parts: list[str] = []
             url = _normalize_base(chapter_llm.base_url) + "/v1/chat/completions"
             import httpx as _httpx
 
-            try:
-                async with _httpx.AsyncClient(timeout=_httpx.Timeout(300.0, connect=15.0)) as client:
-                    async with client.stream(
-                        "POST",
-                        url,
-                        json={"model": chapter_llm.model, "messages": [{"role": "system", "content": system}, {"role": "user", "content": context}], "stream": True},
-                        headers={"Authorization": f"Bearer {chapter_llm.api_key}"},
-                    ) as resp:
-                        if resp.status_code != 200:
-                            body = (await resp.aread()).decode(errors="ignore")[:200]
-                            yield _sse({"event": "error", "message": f"AI 接口返回 {resp.status_code}: {body}", "job_id": job.id, "title": title})
-                            job.status = "failed"
-                            await db.commit()
-                            return
-                        async for line in resp.aiter_lines():
-                            if not line.startswith("data:"):
+            text = ""
+            gen_error = ""
+            for attempt in range(2):
+                if attempt:
+                    # 重试前：SSE 注明「重试中」，job 重置回 pending 再重跑
+                    yield _sse({"event": "retry", "job_id": job.id, "title": title, "message": f"生成失败，重试中（{gen_error[:80]}）"})
+                    job.status = "pending"
+                    await db.commit()
+                    parts = []
+                try:
+                    async with _httpx.AsyncClient(timeout=_httpx.Timeout(300.0, connect=15.0)) as client:
+                        async with client.stream(
+                            "POST",
+                            url,
+                            json={"model": chapter_llm.model, "messages": [{"role": "system", "content": system}, {"role": "user", "content": context}], "stream": True},
+                            headers={"Authorization": f"Bearer {chapter_llm.api_key}"},
+                        ) as resp:
+                            if resp.status_code != 200:
+                                body = (await resp.aread()).decode(errors="ignore")[:200]
+                                gen_error = f"AI 接口返回 {resp.status_code}: {body}"
                                 continue
-                            data = line[5:].strip()
-                            if data == "[DONE]":
-                                break
-                            try:
-                                chunk = json.loads(data)
-                                delta = chunk["choices"][0].get("delta", {}).get("content")
-                                if delta:
-                                    parts.append(delta)
-                                    yield _sse({"event": "content", "job_id": job.id, "text": delta})
-                            except (json.JSONDecodeError, KeyError, IndexError):
-                                continue
-            except _httpx.HTTPError as exc:
-                yield _sse({"event": "error", "message": f"无法连接 AI 接口: {exc.__class__.__name__}", "job_id": job.id, "title": title})
-                job.status = "failed"
-                await db.commit()
-                return
+                            async for line in resp.aiter_lines():
+                                if not line.startswith("data:"):
+                                    continue
+                                data = line[5:].strip()
+                                if data == "[DONE]":
+                                    break
+                                try:
+                                    chunk = json.loads(data)
+                                    delta = chunk["choices"][0].get("delta", {}).get("content")
+                                    if delta:
+                                        parts.append(delta)
+                                        yield _sse({"event": "content", "job_id": job.id, "text": delta})
+                                except (json.JSONDecodeError, KeyError, IndexError):
+                                    continue
+                except _httpx.HTTPError as exc:
+                    gen_error = f"无法连接 AI 接口: {exc.__class__.__name__}"
+                    continue
+                text = "".join(parts).strip()
+                if len(text) < 100:
+                    gen_error = "生成内容过短"
+                    continue
+                gen_error = ""
+                break
 
-            text = "".join(parts).strip()
-            if len(text) < 100:
-                yield _sse({"event": "error", "message": "生成内容过短，判定失败", "job_id": job.id, "title": title})
+            if gen_error:
+                # 二次失败才标 failed（SSE 路径生成失败仍属关键问题：停止并回报）
+                yield _sse({"event": "error", "message": f"重试后仍失败：{gen_error}", "job_id": job.id, "title": title})
                 job.status = "failed"
                 await db.commit()
                 return
@@ -292,6 +303,19 @@ async def batch_run(
             if chapter.status == "draft":
                 chapter.status = "writing"
             await db.commit()
+
+            # ---- 超长自动分章（定稿后）：拆出的后续段只写正文+FTS，摘要/状态文件按完整章跑 ----
+            from ..nightly import _maybe_split_chapter
+
+            split_into = await _maybe_split_chapter(p, novel, job, chapter, text, db)
+            if split_into > 1:
+                yield _sse({
+                    "event": "split",
+                    "job_id": job.id,
+                    "title": title,
+                    "split_into": split_into,
+                    "message": f"{title} 过长（目标 {p.target_chapter_words} 字），已自动拆分为 {split_into} 章",
+                })
             try:
                 from ..search_fts import sync_chapter
 
@@ -342,9 +366,10 @@ async def batch_run(
             yield _sse({
                 "event": "chapter_done",
                 "job_id": job.id,
-                "title": title,
+                "title": title + (f"（过长自动拆 {split_into} 章）" if split_into > 1 else ""),
                 "words": chapter.word_count,
                 "state_updated": state_updated,
+                "split_into": split_into,
                 "done": done_n,
                 "total": total,
             })

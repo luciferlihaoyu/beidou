@@ -14,6 +14,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.anti_llm import detect  # noqa: E402
+from app.nightly import split_long_chapter  # noqa: E402
 from app.textlint import lint  # noqa: E402
 from app.routers.ai_factory import _hook_alerts, _parse_json, _stamp_plot_arcs  # noqa: E402
 from app.routers.ai_import import _split_chapters  # noqa: E402
@@ -183,3 +184,40 @@ class TestUsageAndNightly:
         from app.nightly import NIGHTLY_WINDOW_HOURS
 
         assert NIGHTLY_WINDOW_HOURS == (2, 3, 4)
+
+
+class TestSplitLongChapter:
+    """超长自动分章纯函数：贪心装填 + 场景符边界 + 防失控护栏。"""
+
+    # 每个重复单元 19 字（无空白）：他提着灯走进雨里，巷口的风铃响了三声。
+    UNIT = "他提着灯走进雨里，巷口的风铃响了三声。"
+
+    @classmethod
+    def _para(cls, reps: int) -> str:
+        return cls.UNIT * reps
+
+    def test_normal_greedy_split_two_parts(self):
+        # target=1000，三段各约 532 字：前两段装一桶（1064≥1000 封口），尾段一桶
+        text = "\n\n".join([self._para(28), self._para(28), self._para(28)])
+        parts = split_long_chapter(text, 1000)
+        assert len(parts) == 2
+        assert self._para(28) in parts[0] and parts[1] == self._para(28)
+
+    def test_scene_break_preferred_as_boundary(self):
+        # 桶已过半（600 ≥ 500）时遇到场景分隔符行优先封口，分隔符归入下一桶开头
+        text = "\n\n".join([self._para(32), "***", self._para(32)])
+        parts = split_long_chapter(text, 1000)
+        assert len(parts) == 2
+        assert "***" not in parts[0] and parts[1].startswith("***")
+
+    def test_gives_up_when_too_many_parts(self):
+        # target=500，十段各 500+ 字会拆出 10 桶 > 4，防失控不拆
+        text = "\n\n".join([self._para(27)] * 10)
+        parts = split_long_chapter(text, 500)
+        assert len(parts) == 1 and parts[0] == text
+
+    def test_gives_up_when_fragmented(self):
+        # 尾桶 304 字 < target*0.4（400），拆得太碎不如不拆
+        text = "\n\n".join([self._para(53), self._para(16)])
+        parts = split_long_chapter(text, 1000)
+        assert len(parts) == 1 and parts[0] == text

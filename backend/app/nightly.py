@@ -8,7 +8,9 @@ nightly_last_run（JSON），次日用户打开项目页即可看到战报。
 
 from __future__ import annotations
 
+import inspect
 import json
+import re
 from datetime import datetime, timezone
 
 from sqlalchemy import select
@@ -36,6 +38,169 @@ import httpx
 
 # 夜间执行窗口（服务器本地时区，UTC+8 部署下即凌晨）
 NIGHTLY_WINDOW_HOURS = (2, 3, 4)
+
+
+# ---------- 超长自动分章（纯函数 + 落库）----------
+
+# 场景分隔符行允许出现的符号（*** / —— / ··· / …… 这类 3+ 重复符号行）
+_SEP_CHARS = set("*-—–=~·•…_.#")
+_CN_NUM = "一二三四"
+
+
+def _is_scene_break(line: str) -> bool:
+    """场景分隔符行：整行仅含同一符号的重复（≥3 个；全角破折号/省略号 2 个即算）。"""
+    s = line.strip()
+    if len(s) < 2 or len(set(s)) != 1 or s[0] not in _SEP_CHARS:
+        return False
+    return len(s) >= 3 or s[0] in "—–…"
+
+
+def split_long_chapter(text: str, target_words: int) -> list[str]:
+    """超长章节自动拆分（纯函数）：双换行分段 + 贪心装填。
+
+    - 段落累加到当前桶，桶字数 ≥ target_words 封口开新桶
+    - 场景分隔符行优先作分桶边界：桶已过半（≥ target*0.5）时遇到就封口，
+      分隔符行归入下一桶开头
+    - 防失控：拆出份数 > 4 则不拆；拆完任一桶 < target*0.4 说明太碎，也不拆
+    - 不拆时返回单元素列表（原文）
+    """
+    whole = text.strip()
+    if not whole or target_words <= 0:
+        return [text]
+    paras = [p.strip() for p in re.split(r"\n{2,}", whole) if p.strip()]
+    if len(paras) < 2:
+        return [whole]
+    buckets: list[list[str]] = []
+    cur: list[str] = []
+    cur_words = 0
+    for para in paras:
+        if cur and _is_scene_break(para) and cur_words >= target_words * 0.5:
+            buckets.append(cur)
+            cur, cur_words = [], 0
+        cur.append(para)
+        cur_words += count_words(para)
+        if cur_words >= target_words:
+            buckets.append(cur)
+            cur, cur_words = [], 0
+    if cur:
+        buckets.append(cur)
+    parts = ["\n\n".join(b) for b in buckets]
+    if len(parts) > 4 or (
+        len(parts) > 1 and any(count_words(pt) < target_words * 0.4 for pt in parts)
+    ):
+        return [whole]
+    return parts
+
+
+async def _maybe_split_chapter(p: AiProject, novel: Novel, job: AiChapterJob, chapter: Chapter, text: str, db) -> int:
+    """超长自动分章落库：定稿正文超过 target_chapter_words*1.6 时拆分。
+
+    第一段写回原章（标题不变），后续段各建新章（同卷、sort_order 顺延）并配
+    status="done" 的 AiChapterJob；后续段只写正文+字数+FTS——摘要/状态文件/
+    关系同步由调用方对完整章统一跑（每段都跑太贵）。返回拆出的份数（1=未拆）。
+    """
+    target = p.target_chapter_words or 0
+    if target <= 0 or count_words(text) <= target * 1.6:
+        return 1
+    parts = split_long_chapter(text, target)
+    n = len(parts)
+    if n <= 1:
+        return 1
+    from .routers.ai_factory import _text_to_html  # 延迟导入避免循环
+
+    # 第一段写回原章，原 job 对应第一段
+    chapter.content = _text_to_html(parts[0])
+    chapter.word_count = count_words(chapter.content)
+    job.actual_words = chapter.word_count
+
+    # 原章之后（同卷）的章节 sort_order 依次 +n-1，给新章腾位
+    cond = (
+        Chapter.volume_id.is_(None)
+        if chapter.volume_id is None
+        else Chapter.volume_id == chapter.volume_id
+    )
+    siblings = (
+        await db.execute(
+            select(Chapter).where(
+                Chapter.novel_id == novel.id, cond, Chapter.sort_order > chapter.sort_order
+            )
+        )
+    ).scalars().all()
+    for sib in siblings:
+        sib.sort_order += n - 1
+
+    base = chapter.title.strip() or "未命名"
+    if n == 2:
+        suffixes = ["（下）"]
+    elif n == 3:
+        suffixes = ["（中）", "（下）"]
+    else:
+        suffixes = [f"·{_CN_NUM[i]}" for i in range(1, n)]  # ·二 ·三 ·四
+    now = datetime.now(timezone.utc)
+    new_ids: list[int] = []
+    for i, part in enumerate(parts[1:], start=1):
+        html = _text_to_html(part)
+        new_ch = Chapter(
+            novel_id=novel.id,
+            volume_id=chapter.volume_id,
+            title=f"{base}{suffixes[i - 1]}"[:200],
+            content=html,
+            sort_order=chapter.sort_order + i,
+            word_count=count_words(html),
+        )
+        db.add(new_ch)
+        await db.flush()  # 拿新章 id 建 job / 同步 FTS
+        new_ids.append(new_ch.id)
+        db.add(
+            AiChapterJob(
+                project_id=p.id,
+                chapter_id=new_ch.id,
+                status="done",
+                actual_words=new_ch.word_count,
+                attempt=1,
+                finished_at=now,
+            )
+        )
+    await db.commit()
+    # FTS 同步拆出的新章（原章由调用方管线统一同步；失败不影响拆分结果）
+    try:
+        from .search_fts import sync_chapter
+
+        for cid in new_ids:
+            await sync_chapter(db, cid)
+    except Exception:  # noqa: BLE001
+        pass
+    return n
+
+
+async def _generate_one_with_retry(p: AiProject, novel: Novel, job: AiChapterJob, chapter: Chapter, num: int, db, on_retry=None) -> dict:
+    """单章生成 + 失败原地重试一次。
+
+    首次异常先把 job.status 重置回 pending 并 commit（_generate_one 内部可能
+    已部分落库），再重新调用 _generate_one；on_retry 回调用于在结果/日志里
+    注明「重试中」。二次失败才标 failed，error 加「重试后仍失败：」前缀。
+    """
+    try:
+        return await _generate_one(p, novel, job, chapter, num, db)
+    except Exception as first_exc:  # noqa: BLE001  首次失败：重置状态后原地重试一次
+        job.status = "pending"
+        await db.commit()
+        if on_retry is not None:
+            res = on_retry(first_exc)
+            if inspect.isawaitable(res):
+                await res
+        try:
+            r = await _generate_one(p, novel, job, chapter, num, db)
+            r["retried"] = True
+            return r
+        except Exception as exc:  # noqa: BLE001  二次失败才放弃
+            job.status = "failed"
+            await db.commit()
+            return {
+                "title": chapter_display_title(chapter.title, num),
+                "ok": False,
+                "error": f"重试后仍失败：{exc}"[:120],
+            }
 
 
 async def _generate_one(p: AiProject, novel: Novel, job: AiChapterJob, chapter: Chapter, num: int, db) -> dict:
@@ -87,6 +252,10 @@ async def _generate_one(p: AiProject, novel: Novel, job: AiChapterJob, chapter: 
     job.actual_words = chapter.word_count
     job.finished_at = datetime.now(timezone.utc)
 
+    # 超长自动分章（定稿后）：拆出的后续段只写正文+FTS，
+    # 摘要/状态文件/关系同步仍对完整章统一跑（用 text 全文）
+    split_into = await _maybe_split_chapter(p, novel, job, chapter, text, db)
+
     # 定稿摘要（job.summary，供记忆卡）
     try:
         job.summary = (
@@ -116,14 +285,18 @@ async def _generate_one(p: AiProject, novel: Novel, job: AiChapterJob, chapter: 
     await db.commit()
 
     final_score = detect(strip_html(chapter.content))["score"]
-    return {
+    result = {
         "title": chapter_display_title(chapter.title, num),
         "ok": True,
         "words": chapter.word_count,
         "deai_score": final_score,
         "rewritten": rewritten,
         "state_updated": state_ok,
+        "split_into": split_into,
     }
+    if split_into > 1:
+        result["title"] = f"{result['title']}（过长自动拆 {split_into} 章）"
+    return result
 
 
 async def run_nightly_for_project(project_id: int, user_id: int) -> dict:
@@ -152,12 +325,12 @@ async def run_nightly_for_project(project_id: int, user_id: int) -> dict:
             if chapter is None:
                 continue
             num = number_map.get(chapter.id, 0)
-            try:
-                r = await _generate_one(p, novel, job, chapter, num, db)
-            except Exception as exc:  # noqa: BLE001  单章失败不拖垮整夜
-                job.status = "failed"
-                await db.commit()
-                r = {"title": chapter_display_title(chapter.title, num), "ok": False, "error": str(exc)[:100]}
+
+            def _note_retry(exc: Exception, _title=chapter_display_title(chapter.title, num)) -> None:
+                # 战报里注明「重试中」（retry 条目不计入 done/errors 汇总）
+                results.append({"title": _title, "ok": False, "retry": True, "error": f"首次失败，重试中：{str(exc)[:80]}"})
+
+            r = await _generate_one_with_retry(p, novel, job, chapter, num, db, on_retry=_note_retry)
             results.append(r)
             if r.get("ok") and r.get("deai_score", 100) < 60:
                 low_streak += 1
@@ -167,13 +340,15 @@ async def run_nightly_for_project(project_id: int, user_id: int) -> dict:
             elif r.get("ok"):
                 low_streak = 0
 
-        done = sum(1 for r in results if r.get("ok"))
+        finals = [r for r in results if not r.get("retry")]
+        done = sum(1 for r in finals if r.get("ok"))
         report = {
             "date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
             "done": done,
-            "total": len(results),
-            "chapters": [r for r in results if r.get("ok")],
-            "errors": [r for r in results if not r.get("ok")],
+            "total": len(finals),
+            "chapters": [r for r in finals if r.get("ok")],
+            "errors": [r for r in finals if not r.get("ok")],
+            "retries": [r for r in results if r.get("retry")],
         }
         p.nightly_last_run = json.dumps(report, ensure_ascii=False)
         await db.commit()
@@ -259,13 +434,14 @@ async def run_batch_background(project_id: int, user_id: int, count: int) -> Non
                 if chapter is None:
                     continue
                 num = number_map.get(chapter.id, 0)
-                entry["current"] = chapter_display_title(chapter.title, num)
-                try:
-                    r = await _generate_one(p, novel, job, chapter, num, db)
-                except Exception as exc:  # noqa: BLE001  单章失败继续下一章
-                    job.status = "failed"
-                    await db.commit()
-                    r = {"title": chapter_display_title(chapter.title, num), "ok": False, "error": str(exc)[:100]}
+                title = chapter_display_title(chapter.title, num)
+                entry["current"] = title
+
+                def _note_retry(exc: Exception, _title=title) -> None:
+                    # 进度里注明「重试中」（轮询可见）
+                    entry["current"] = f"{_title}（重试中：{str(exc)[:60]}）"
+
+                r = await _generate_one_with_retry(p, novel, job, chapter, num, db, on_retry=_note_retry)
                 entry["results"].append(r)
                 if r.get("ok"):
                     entry["done"] += 1
