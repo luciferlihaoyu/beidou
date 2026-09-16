@@ -6,6 +6,7 @@ import { CharacterCount } from "@tiptap/extension-character-count";
 import { Reference } from "@/extensions/Reference";
 import AIBubbleMenu from "@/components/editor/AIBubbleMenu";
 import { type EditorTheme, buildImageBackground, buildLineBackground, DEFAULT_THEME, textColorForBg } from "@/lib/editorTheme";
+import { resolveTyped } from "@/lib/punctRules";
 
 /** 章内标题大纲条目：pos 为文档绝对位置，供跳转与缩进展示 */
 export interface OutlineItem {
@@ -27,19 +28,6 @@ export interface EditorHandle {
   /** 取底层 Tiptap Editor 实例（章内搜索替换 / 光标拆分等高级操作用；销毁后返回 null） */
   getEditor: () => Editor | null;
 }
-
-/** 半角标点 → 全角（输入时自动转换 + 一键排版共用口径） */
-const HALF_TO_FULL_PUNCT: Record<string, string> = {
-  ",": "，",
-  ".": "。",
-  "!": "！",
-  "?": "？",
-  ";": "；",
-  ":": "：",
-};
-
-/** CJK 字符（汉字 + 假名 + 谚文），用于判断「中文上下文」 */
-const CJK_CHAR_RE = /[\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af]/;
 
 /** 遍历文档收集标题（pos 为文档绝对位置） */
 function collectOutline(editor: Editor): OutlineItem[] {
@@ -131,15 +119,26 @@ export default function TiptapEditor({
     content,
     editorProps: {
       attributes: { class: "prose-beidou px-10 py-8 md:px-14" },
-      // 输入时自动转标点：单字符半角标点 + 前一字符为中文 → 替换为全角。
-      // 返回 true 阻止默认输入，用 tr.insertText 一次性替换（不会递归触发本钩子，光标落在插入文本之后）
+      // 输入时自动转标点（规则统一在 lib/punctRules.ts，与「一键排版」同一口径）：
+      // 半角标点转全角、直引号按奇偶配对成 “ ”、连打三点转省略号、双连字符转破折号。
+      // 返回 true 阻止默认输入，改用 tr.insertText 一次性替换（不递归触发本钩子）
       handleTextInput: (view, from, to, text) => {
         if (!autoPunctRef.current || text.length !== 1) return false;
-        const full = HALF_TO_FULL_PUNCT[text];
-        if (!full) return false;
-        const prevChar = from > 0 ? view.state.doc.textBetween(from - 1, from) : "";
-        if (!CJK_CHAR_RE.test(prevChar)) return false;
-        view.dispatch(view.state.tr.insertText(full, from, to).scrollIntoView());
+        // 取同段上下文（供引号奇偶、省略号归并判断），不跨段落
+        const $from = view.state.doc.resolve(from);
+        const blockStart = $from.start();
+        const blockEnd = $from.end();
+        const before = view.state.doc.textBetween(Math.max(blockStart, from - 16), from);
+        const after = view.state.doc.textBetween(to, Math.min(blockEnd, to + 16));
+        const hit = resolveTyped(text, before, after);
+        if (!hit) return false;
+        if (hit.kind === "insert") {
+          view.dispatch(view.state.tr.insertText(hit.text, from, to).scrollIntoView());
+          return true;
+        }
+        // replace：回退 back 个字符后再插入（省略号要吞掉已输入的两个句点）
+        const backFrom = Math.max(blockStart, from - hit.back);
+        view.dispatch(view.state.tr.insertText(hit.text, backFrom, to).scrollIntoView());
         return true;
       },
     },

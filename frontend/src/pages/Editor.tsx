@@ -37,6 +37,11 @@ import {
   X,
   List,
   Pilcrow,
+  Bold,
+  Italic,
+  Quote,
+  MessageSquareQuote,
+  Eraser,
 } from "lucide-react";
 import { toast } from "sonner";
 import AppShell from "@/components/AppShell";
@@ -55,6 +60,7 @@ import PolishDialog from "@/components/PolishDialog";
 import QualityRadar from "@/components/QualityRadar";
 import RecycleBinView, { type RestoredPayload } from "@/components/RecycleBin";
 import { type EditorTheme, loadTheme } from "@/lib/editorTheme";
+import { normalizeParagraph } from "@/lib/punctRules";
 import SnapshotPanel from "@/components/SnapshotPanel";
 import TermsPanel from "@/components/TermsPanel";
 import TiptapEditor, { type EditorHandle, type OutlineItem } from "@/components/TiptapEditor";
@@ -151,52 +157,6 @@ function chapterToSplit(c: Chapter): WordSplit {
 // ---------- 排版与标点 ----------
 
 /** 半角标点 → 全角映射 */
-const HALF_TO_FULL_PUNCT: Record<string, string> = {
-  ",": "，",
-  ".": "。",
-  "!": "！",
-  "?": "？",
-  ";": "；",
-  ":": "：",
-};
-
-const CJK_CHAR_RE = /[\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af]/;
-
-/**
- * 单段文本排版：半角标点转全角（中文上下文）、直引号左右交替转中文引号、
- * 连续 3+ 句号转省略号、行首空格清理。
- */
-function reformatParagraphText(input: string): string {
-  let s = input.replace(/^[ \t　]+/, "");
-  s = s.replace(/\.{3,}/g, "……");
-  let dqOpen = false;
-  let sqOpen = false;
-  let out = "";
-  for (const ch of s) {
-    if (ch === '"') {
-      out += dqOpen ? "”" : "“";
-      dqOpen = !dqOpen;
-      continue;
-    }
-    if (ch === "'") {
-      out += sqOpen ? "’" : "‘";
-      sqOpen = !sqOpen;
-      continue;
-    }
-    const full = HALF_TO_FULL_PUNCT[ch];
-    if (full) {
-      const prev = out.match(/(\S)\s*$/)?.[1] ?? "";
-      if (CJK_CHAR_RE.test(prev)) {
-        out = out.replace(/[ \t]+$/, ""); // 收掉标点前多余空格
-        out += full;
-        continue;
-      }
-    }
-    out += ch;
-  }
-  return out;
-}
-
 function fmtDate(d: Date): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
@@ -206,6 +166,8 @@ function fmtDate(d: Date): string {
 type TypoFontSize = "sm" | "md" | "lg";
 type TypoLineHeight = "compact" | "normal" | "loose";
 type TypoWidth = "std" | "wide" | "full";
+
+type FormatAction = "bold" | "italic" | "quote" | "clear" | "wrapq";
 
 type TypoIndent = "none" | "two";
 type TypoParaSpacing = "tight" | "normal" | "loose";
@@ -1001,12 +963,60 @@ export default function Editor() {
     }
   }
 
+  /** 行内格式动作：作用于选区；无选区时作用于当前段落 */
+  function runFormat(action: FormatAction) {
+    const ed = editorRef.current?.getEditor();
+    if (!ed || ed.isDestroyed) return;
+    switch (action) {
+      case "bold":
+        ed.chain().focus().toggleBold().run();
+        return;
+      case "italic":
+        ed.chain().focus().toggleItalic().run();
+        return;
+      case "quote":
+        ed.chain().focus().toggleBlockquote().run();
+        return;
+      case "clear":
+        ed.chain().focus().unsetAllMarks().clearNodes().run();
+        return;
+      case "wrapq": {
+        const { from, to, empty } = ed.state.selection;
+        if (empty) {
+          // 无选区：给整段加引号（对话段落常见需求）
+          const $from = ed.state.doc.resolve(from);
+          const paraFrom = $from.start();
+          const paraTo = $from.end();
+          const para = ed.state.doc.textBetween(paraFrom, paraTo);
+          if (!para.trim()) return;
+          const wrapped = /^[“"].*[”"]$/.test(para.trim()) ? para : `“${para}”`;
+          ed.chain().focus().insertContentAt({ from: paraFrom, to: paraTo }, wrapped).run();
+          return;
+        }
+        const sel = ed.state.doc.textBetween(from, to);
+        const wrapped = /^[“"].*[”"]$/.test(sel.trim()) ? sel : `“${sel}”`;
+        ed.chain().focus().insertContentAt({ from, to }, wrapped).run();
+        return;
+      }
+    }
+  }
+
   /**
    * 一键排版：先落盘 + 自动快照（label「一键排版前」），再对当前章全文做
    * 标点全角化 / 引号配对 / 空行压缩 / 行首空格清理 / 省略号归并。
    * 逐文本块单事务替换，保留段落与标题结构（单个 undo 步可整体撤销）。
    */
-  async function runReformat() {
+  /**
+   * 章节批量变换：先落盘 + 自动快照，再逐文本块替换（单个 undo 步可整体撤销）。
+   * @param transform  单段变换；返回 null 表示「删除该空段」
+   * @param label      快照标签 / 成功提示用的动作名
+   * @param collapseEmpty 是否顺带合并多余空段（一键排版需要，段首清理不需要）
+   */
+  async function applyChapterTransform(
+    transform: (text: string) => string | null,
+    label: string,
+    collapseEmpty = false
+  ) {
     if (activeId === null) {
       toast.error("请先选择章节");
       return;
@@ -1017,11 +1027,11 @@ export default function Editor() {
     try {
       await flushSave(); // 先落盘，快照拿到的是当前编辑器状态
       await api.post(`/api/novels/${novelId}/chapters/${activeId}/snapshots`, {
-        label: "一键排版前",
+        label: `${label}前`,
       });
     } catch (err) {
       setReformatting(false);
-      toast.error(err instanceof Error ? err.message : "排版前快照失败，已中止");
+      toast.error(err instanceof Error ? err.message : "快照失败，已中止");
       return;
     }
     // 收集操作：多余空段删除（text=null）+ 文本块内容替换；按位置倒序应用到同一事务
@@ -1034,19 +1044,19 @@ export default function Editor() {
       }
       const text = node.textContent;
       if (text.trim() === "") {
-        if (prevEmpty) ops.push({ from: offset, to: offset + node.nodeSize, text: null });
+        if (collapseEmpty && prevEmpty) ops.push({ from: offset, to: offset + node.nodeSize, text: null });
         prevEmpty = true;
         return;
       }
       prevEmpty = false;
-      const next = reformatParagraphText(text);
-      if (next !== text) {
+      const next = transform(text);
+      if (next !== null && next !== text) {
         ops.push({ from: offset + 1, to: offset + node.nodeSize - 1, text: next });
       }
     });
     setReformatting(false);
     if (ops.length === 0) {
-      toast.info("没有需要调整的排版");
+      toast.info("没有需要调整的内容");
       return;
     }
     const tr = ed.state.tr;
@@ -1055,7 +1065,21 @@ export default function Editor() {
       else tr.replaceWith(op.from, op.to, ed.state.schema.text(op.text));
     }
     ed.view.dispatch(tr.scrollIntoView());
-    toast.success("排版完成（原文已快照）");
+    toast.success(`${label}完成（原文已快照，可随时撤销）`);
+  }
+
+  /** 一键排版：标点全角化 / 引号配对 / 省略号破折号归一 / 重复标点收敛 / 空行压缩 / 行首空格清理 */
+  async function runReformat() {
+    await applyChapterTransform(normalizeParagraph, "一键排版", true);
+  }
+
+  /**
+   * 段首缩进批量应用：首行缩进由 CSS 变量控制，正文里若残留手工打的
+   * 全角/半角空格会与 CSS 缩进叠加（看起来缩进了四个字）。
+   * 这里一次性清掉所有段落的行首空格，让缩进统一由排版设置驱动。
+   */
+  async function runStripIndentSpaces() {
+    await applyChapterTransform((t) => t.replace(/^[ \t\u3000]+/, ""), "清理段首空格", false);
   }
 
   /** 快照面板恢复成功后重新拉章节正文并重挂编辑器 */
@@ -2195,22 +2219,40 @@ export default function Editor() {
                     />
                 </div>
               </div>
-              {/* 标点符号快捷栏（可开合） */}
+              {/* 写作工具条（可开合）：标点组 + 行内格式组 */}
               {punctOpen && (
-                <div className="flex shrink-0 flex-wrap items-center gap-0.5 border-t border-border bg-card px-2 py-1">
-                  {PUNCTUATIONS.map((p) => (
-                    <button
-                      key={p.mark}
-                      title={p.label}
-                      className="min-w-7 rounded px-1.5 py-0.5 text-sm leading-6 text-foreground/80 transition-colors hover:bg-muted hover:text-foreground"
-                      onClick={() => editorRef.current?.insertInline(p.mark)}
-                    >
-                      {p.mark}
-                    </button>
-                  ))}
-                  <span className="ml-1 border-l border-border pl-2 text-[11px] text-muted-foreground">
-                    点击插入光标处
+                <div className="flex shrink-0 flex-wrap items-center gap-x-2 gap-y-1 border-t border-border bg-card px-2 py-1">
+                  <span className="flex flex-wrap items-center gap-0.5">
+                    {PUNCTUATIONS.map((p) => (
+                      <button
+                        key={p.mark}
+                        title={`${p.label}（插入光标处）`}
+                        className="min-w-7 rounded px-1.5 py-0.5 text-sm leading-6 text-foreground/80 transition-colors hover:bg-muted hover:text-foreground"
+                        onClick={() => editorRef.current?.insertInline(p.mark)}
+                      >
+                        {p.mark}
+                      </button>
+                    ))}
                   </span>
+                  <span className="flex items-center gap-0.5 border-l border-border pl-2">
+                    {[
+                      { key: "bold", label: "加粗", icon: <Bold className="h-3.5 w-3.5" />, title: "加粗（Ctrl/⌘+B）" },
+                      { key: "italic", label: "斜体", icon: <Italic className="h-3.5 w-3.5" />, title: "斜体（Ctrl/⌘+I）" },
+                      { key: "quote", label: "引用", icon: <Quote className="h-3.5 w-3.5" />, title: "整段转为引用块" },
+                      { key: "wrapq", label: "对话引号", icon: <MessageSquareQuote className="h-3.5 w-3.5" />, title: "给选中文字或整段加 “ ”" },
+                      { key: "clear", label: "清格式", icon: <Eraser className="h-3.5 w-3.5" />, title: "清除加粗/斜体/引用等格式" },
+                    ].map((b) => (
+                      <button
+                        key={b.key}
+                        title={b.title}
+                        className="rounded p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                        onClick={() => runFormat(b.key as FormatAction)}
+                      >
+                        {b.icon}
+                      </button>
+                    ))}
+                  </span>
+                  <span className="text-[11px] text-muted-foreground">标点插入光标处 · 格式作用于选区或整段</span>
                 </div>
               )}
               {/* 写作状态栏 */}
@@ -2409,6 +2451,9 @@ export default function Editor() {
                       <DropdownMenuItem onClick={() => void runReformat()}>
                         <PenLine className="size-3.5" />
                         一键排版（先自动快照）
+                      </DropdownMenuItem>
+                      <DropdownMenuItem disabled={reformatting} onClick={() => void runStripIndentSpaces()}>
+                        清理段首空格（配合首行缩进）
                       </DropdownMenuItem>
                       <DropdownMenuSeparator />
                       <DropdownMenuCheckboxItem
