@@ -76,11 +76,10 @@ export default function FactoryProject() {
     aiFactoryApi
       .get(projectId)
       .then((p) => {
+        // 无条件重置：切换项目/刷新时不保留旧项目的草案与书名残留
         setProject(p);
-        if (p.book_spec) {
-          setSpec(p.book_spec);
-          if (!title) setTitle(p.novel_title?.replace(/^\[AI\] /, "") ?? p.book_spec.titles?.[0] ?? "");
-        }
+        setSpec(p.book_spec ?? null);
+        setTitle(p.novel_title?.replace(/^\[AI\] /, "") ?? p.book_spec?.titles?.[0] ?? "");
       })
       .catch((e) => toast.error(e.message));
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -92,7 +91,10 @@ export default function FactoryProject() {
     try {
       const p = await fn();
       setProject(p);
-      if (p.book_spec) setSpec(p.book_spec);
+      setSpec(p.book_spec ?? null);
+      if (p.book_spec || p.novel_title) {
+        setTitle(p.novel_title?.replace(/^\[AI\] /, "") ?? p.book_spec?.titles?.[0] ?? "");
+      }
       toast.success(okMsg);
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "操作失败");
@@ -450,7 +452,13 @@ export default function FactoryProject() {
                 {busy === "export" ? "导出中…" : "导出投稿包"}
               </Button>
             </div>
-            <ChapterGenPanel project={project} onProjectChange={setProject} />
+            <ChapterGenPanel
+              project={project}
+              onProjectChange={(p) => {
+                setProject(p);
+                if (p.book_spec) setSpec(p.book_spec);
+              }}
+            />
             {project.outline?.volumes && (
               <details className="rounded-lg border border-border bg-card">
                 <summary className="cursor-pointer px-4 py-2.5 text-sm font-medium hover:text-primary">
