@@ -381,3 +381,64 @@ class TestNightlyDedup:
         assert '"date": _nightly_now()' in report_block
         assert 'datetime.now(timezone.utc).strftime("%Y-%m-%d")' not in report_block
         assert '"ts": _nightly_now().timestamp()' in report_block
+
+
+class TestDeconstructGuards:
+    """拆书端点的护栏：频率限制 + 采样保尾（天演审查标为无测试覆盖的高风险函数）。"""
+
+    def _fresh_user(self, uid: int):
+        from app.routers.ai_deconstruct import _recent_calls
+
+        _recent_calls.pop(uid, None)
+        return uid
+
+    def test_first_call_passes_second_is_429(self):
+        from fastapi import HTTPException
+
+        from app.routers.ai_deconstruct import _check_rate_limit
+
+        uid = self._fresh_user(900001)
+        _check_rate_limit(uid)  # 不抛即通过
+        import pytest
+
+        with pytest.raises(HTTPException) as ei:
+            _check_rate_limit(uid)
+        assert ei.value.status_code == 429
+
+    def test_hourly_cap(self):
+        import time
+
+        import pytest
+        from fastapi import HTTPException
+
+        from app.routers.ai_deconstruct import (
+            _RATE_LIMIT_MAX_PER_HOUR,
+            _check_rate_limit,
+            _recent_calls,
+        )
+
+        uid = self._fresh_user(900002)
+        _recent_calls[uid] = [time.time() - 600] * _RATE_LIMIT_MAX_PER_HOUR
+        with pytest.raises(HTTPException) as ei:
+            _check_rate_limit(uid)
+        assert ei.value.status_code == 429
+
+    def test_expired_records_do_not_lock_user_out(self):
+        import time
+
+        from app.routers.ai_deconstruct import _check_rate_limit, _recent_calls
+
+        uid = self._fresh_user(900003)
+        _recent_calls[uid] = [time.time() - 3700] * 99  # 一小时前的旧记录应被清理
+        _check_rate_limit(uid)  # 不应抛错
+
+    def test_sample_preserves_tail_of_client_upload(self):
+        """客户端上传「首 30 万 + 尾 6 万」时，尾部必须能进模型（曾被服务端盲截断切掉）。"""
+        from app.routers.ai_deconstruct import MAX_DECONSTRUCT_CHARS, _sample
+
+        head, tail = "甲" * 300_000, "乙" * 60_000
+        uploaded = head + "\n\n……（中间省略）……\n\n" + tail
+        assert len(uploaded) <= MAX_DECONSTRUCT_CHARS  # 硬上限必须容得下客户端采样结果
+        out = _sample(uploaded)
+        assert out.startswith("甲")
+        assert out.rstrip().endswith("乙")
