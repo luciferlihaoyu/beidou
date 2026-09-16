@@ -6,11 +6,12 @@
 
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router";
-import { Bot, FileUp, Plus, Trash2 } from "lucide-react";
+import { BookOpen, Bot, FileUp, Loader2, Plus, Trash2, Wand2 } from "lucide-react";
 import { toast } from "sonner";
 import AppShell from "@/components/AppShell";
 import ImportDialog from "@/components/ImportDialog";
-import { aiFactoryApi, type AiProject, type AiProjectCreate } from "@/lib/api";
+import { aiFactoryApi, deconstructApi, type AiProject, type AiProjectCreate, type ReferenceNote } from "@/lib/api";
+import { ReferenceFields, ReferenceUploader, trimForUpload } from "@/components/reference";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -52,6 +53,28 @@ export default function Factory() {
   const [form, setForm] = useState<AiProjectCreate>({ seed_prompt: "" });
   const [showTargets, setShowTargets] = useState(false);
   const [busy, setBusy] = useState(false);
+  // 创建路径：idea = 一句话创意；book = 先拆书学范式
+  const [mode, setMode] = useState<"idea" | "book">("idea");
+  const [refText, setRefText] = useState("");
+  const [refNote, setRefNote] = useState<ReferenceNote | null>(null);
+  const [deconstructing, setDeconstructing] = useState(false);
+
+  async function runDeconstruct() {
+    if (refText.trim().length < 200) {
+      toast.error("参考书文本太短——请上传整本 txt，或至少粘贴 200 字");
+      return;
+    }
+    setDeconstructing(true);
+    try {
+      const r = await deconstructApi.run(trimForUpload(refText), "");
+      setRefNote(r.reference);
+      toast.success("拆书完成——检查并按需修改范式，创建后即刻生效");
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "拆书失败");
+    } finally {
+      setDeconstructing(false);
+    }
+  }
 
   function load() {
     aiFactoryApi
@@ -63,17 +86,29 @@ export default function Factory() {
   useEffect(load, []);
 
   async function create() {
-    if (form.seed_prompt.trim().length < 4) {
-      toast.error("创意至少 4 个字");
-      return;
+    let seed = form.seed_prompt.trim();
+    if (seed.length < 4) {
+      if (mode === "book" && refNote) {
+        // 拆书路径：没写创意时按范式派生一个起点
+        const g = form.genre?.trim() || "小说";
+        seed = `参考${refNote.title ? `《${refNote.title}》` : "已拆解"}的写法范式，写一本全新的${g}`;
+      } else {
+        toast.error("创意至少 4 个字");
+        return;
+      }
     }
     setBusy(true);
     try {
-      const p = await aiFactoryApi.create({
-        ...form,
-        seed_prompt: form.seed_prompt.trim(),
-      });
-      toast.success("项目已创建，开始立项吧");
+      const p = await aiFactoryApi.create({ ...form, seed_prompt: seed });
+      // 拆书路径：把范式挂到新项目上（立项/设定生成时自动注入）
+      if (mode === "book" && refNote) {
+        try {
+          await deconstructApi.save(p.id, refNote);
+        } catch {
+          toast.warning("范式保存失败，可进入项目后在「拆书学习」里重新保存");
+        }
+      }
+      toast.success(mode === "book" && refNote ? "项目已创建并挂载范式，开始立项吧" : "项目已创建，开始立项吧");
       navigate(`/factory/${p.id}`);
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "创建失败");
@@ -183,11 +218,85 @@ export default function Factory() {
         <DialogContent className="sm:max-w-lg">
           <DialogHeader>
             <DialogTitle>新建 AI 项目</DialogTitle>
-            <DialogDescription>一句话创意即可启动；字数目标全部可选（软约束，不硬性截断）</DialogDescription>
+            <DialogDescription>
+              {mode === "idea"
+                ? "一句话创意即可启动；字数目标全部可选（软约束，不硬性截断）"
+                : "先拆一本参考书，学它的写法范式，再写自己的新书"}
+            </DialogDescription>
           </DialogHeader>
+
+          {/* 创建路径切换 */}
+          <div className="flex gap-2">
+            <button
+              className={`flex-1 rounded-md border px-3 py-2 text-left text-xs transition-colors ${
+                mode === "idea" ? "border-primary bg-primary/5 text-foreground" : "border-border text-muted-foreground hover:border-primary/40"
+              }`}
+              onClick={() => setMode("idea")}
+            >
+              <span className="flex items-center gap-1.5 font-medium">
+                <Bot className="h-3.5 w-3.5" />
+                从创意开始
+              </span>
+              <span className="mt-0.5 block text-[11px] text-muted-foreground">一句话点子 → AI 立项</span>
+            </button>
+            <button
+              className={`flex-1 rounded-md border px-3 py-2 text-left text-xs transition-colors ${
+                mode === "book" ? "border-primary bg-primary/5 text-foreground" : "border-border text-muted-foreground hover:border-primary/40"
+              }`}
+              onClick={() => setMode("book")}
+            >
+              <span className="flex items-center gap-1.5 font-medium">
+                <BookOpen className="h-3.5 w-3.5" />
+                拆书学习
+              </span>
+              <span className="mt-0.5 block text-[11px] text-muted-foreground">上传参考书 → 学套路写新书</span>
+            </button>
+          </div>
+
+          {mode === "book" && (
+            <div className="space-y-2 rounded-md border border-border p-3">
+              {!refNote ? (
+                <>
+                  <p className="text-[11px] leading-5 text-muted-foreground">
+                    上传一本你欣赏的书（txt，可多选拆多本），AI 提炼世界观结构、力量体系、人物配置、
+                    节奏爽点、钩子手法与避坑清单——创建项目后生成立项/设定时自动注入，
+                    人物地名全部重新原创。
+                  </p>
+                  <ReferenceUploader
+                    compact
+                    onLoaded={(text) => setRefText((prev) => (prev ? `${prev}\n\n${text}` : text))}
+                  />
+                  <textarea
+                    className="min-h-24 w-full rounded-md border border-border bg-transparent px-2.5 py-1.5 font-content text-xs leading-6"
+                    placeholder="或直接粘贴参考书正文…"
+                    value={refText}
+                    onChange={(e) => setRefText(e.target.value)}
+                  />
+                  <div className="flex items-center justify-between">
+                    <span className="text-[11px] text-muted-foreground">已备 {refText.length.toLocaleString()} 字</span>
+                    <Button size="sm" variant="outline" disabled={deconstructing} onClick={() => void runDeconstruct()}>
+                      {deconstructing ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : <Wand2 className="mr-1 h-4 w-4" />}
+                      {deconstructing ? "拆解中…" : "开始拆书"}
+                    </Button>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div className="flex items-center justify-between">
+                    <p className="text-xs font-medium text-green-600 dark:text-green-400">✓ 拆书完成（可修改）</p>
+                    <button className="text-[11px] text-muted-foreground hover:text-foreground" onClick={() => setRefNote(null)}>
+                      重新拆一本
+                    </button>
+                  </div>
+                  <ReferenceFields value={refNote} onChange={setRefNote} />
+                </>
+              )}
+            </div>
+          )}
+
           <div className="space-y-3">
             <div>
-              <Label className="text-xs">一句话创意 *</Label>
+              <Label className="text-xs">一句话创意 {mode === "book" ? "（可留空，按范式自动起头）" : "*"}</Label>
               <Textarea
                 className="mt-1 min-h-20"
                 placeholder="例：外卖员觉醒美食系统，靠一碗蛋炒饭征服修仙界"

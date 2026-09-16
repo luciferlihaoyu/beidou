@@ -18,6 +18,7 @@ import {
   X,
   Wand2,
   CloudCog,
+  Square,
 } from "lucide-react";
 import { aiFactoryApi, aiFactoryBg, aiFactoryM2, aiFactoryM3, aiFactoryM6, aiFactoryM7, aiFactoryM9, streamPost, type AiChapterJob, type AiProject, type BgBatchStatus, type HookAlert } from "@/lib/api";
 import { M3Toolbar, RetentionPanel } from "@/components/FactoryM3";
@@ -401,27 +402,45 @@ export default function ChapterGenPanel({
               {j.attempt > 1 ? ` · 第${j.attempt}次` : ""}
             </span>
             <div className="flex shrink-0 flex-wrap items-center gap-1">
-              <Button
-                variant="ghost"
-                size="sm"
-                className="h-7 px-2 text-xs"
-                onClick={() => {
-                  if (j.status === "done" || j.status === "needs_fix") setRewriteJob(j);
-                  else startGenerate(j);
-                }}
-              >
-                {j.status === "done" || j.status === "needs_fix" ? (
-                  <>
-                    <RefreshCw className="mr-1 h-3 w-3" />
-                    重写
-                  </>
-                ) : (
-                  <>
-                    <Sparkles className="mr-1 h-3 w-3" />
-                    生成
-                  </>
-                )}
-              </Button>
+              {/* 本章正在前台生成 → 显示停止（点即中止，已生成内容保留在弹窗里可定稿） */}
+              {genBusy && genJob?.id === j.id ? (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-7 px-2 text-xs text-destructive hover:text-destructive"
+                  title="停止生成（已写出的部分保留，可定稿或重新生成）"
+                  onClick={() => {
+                    abortRef.current?.abort();
+                    toast.success("已停止生成");
+                  }}
+                >
+                  <Square className="mr-1 h-3 w-3" />
+                  停止
+                </Button>
+              ) : (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-7 px-2 text-xs"
+                  disabled={genBusy}
+                  onClick={() => {
+                    if (j.status === "done" || j.status === "needs_fix") setRewriteJob(j);
+                    else startGenerate(j);
+                  }}
+                >
+                  {j.status === "done" || j.status === "needs_fix" ? (
+                    <>
+                      <RefreshCw className="mr-1 h-3 w-3" />
+                      重写
+                    </>
+                  ) : (
+                    <>
+                      <Sparkles className="mr-1 h-3 w-3" />
+                      生成
+                    </>
+                  )}
+                </Button>
+              )}
               {(j.status === "pending" || j.status === "failed") && (
                 <Button
                   variant="ghost"
@@ -521,9 +540,14 @@ export default function ChapterGenPanel({
             <p className="text-[11px] text-muted-foreground">定稿 = 写入书稿 + AI 更新前情摘要/角色状态/伏笔</p>
             <div className="flex gap-2">
               {genBusy ? (
-                <Button variant="ghost" size="sm" onClick={() => abortRef.current?.abort()}>
-                  <X className="mr-1 h-3.5 w-3.5" />
-                  停止
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="text-destructive hover:text-destructive"
+                  onClick={() => abortRef.current?.abort()}
+                >
+                  <Square className="mr-1 h-3.5 w-3.5" />
+                  停止生成
                 </Button>
               ) : (
                 <Button variant="outline" size="sm" onClick={() => genJob && startGenerate(genJob)}>
