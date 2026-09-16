@@ -107,8 +107,12 @@
   min-height: 100%;
 }
 .prose-beidou p {
-  margin: 0.55em 0;
-  text-indent: 2em;
+  /* 段间距 / 首行缩进走 CSS 变量（写作排版偏好可调，回退值与原硬编码一致） */
+  margin: var(--bd-para-spacing, 0.55em) 0;
+  text-indent: var(--bd-para-indent, 2em);
+}
+.prose-beidou {
+  text-align: var(--bd-align, left);
 }
 .prose-beidou h1,
 .prose-beidou h2,

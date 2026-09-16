@@ -95,17 +95,18 @@ export default function EditorThemeSettings({ open, onOpenChange, theme, onChang
           <div className="grid grid-cols-4 gap-2">
             {PRESETS.map((p) => {
               const isOn = theme.preset === p.id;
+              const previewLine = buildLineBackground({
+                ...DEFAULT_THEME,
+                lineType: p.lineType,
+                lineColor: p.lineColor,
+                lineSpacing: 8,
+                bgColor: p.bgColor,
+              });
               const previewStyle: React.CSSProperties = {
                 backgroundColor: p.bgColor,
-                backgroundImage: buildLineBackground({
-                  ...DEFAULT_THEME,
-                  lineType: p.lineType,
-                  lineColor: p.lineColor,
-                  lineSpacing: 8,
-                  bgColor: p.bgColor,
-                }),
-                backgroundSize:
-                  p.lineType === "lined" || p.lineType === "blank" ? "100% 8px" : undefined,
+                backgroundImage: previewLine?.image,
+                backgroundSize: previewLine?.size,
+                backgroundRepeat: previewLine?.repeat,
               };
               return (
                 <button

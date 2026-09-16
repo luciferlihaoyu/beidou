@@ -36,6 +36,7 @@ import {
   Wand2,
   X,
   List,
+  Pilcrow,
 } from "lucide-react";
 import { toast } from "sonner";
 import AppShell from "@/components/AppShell";
@@ -206,13 +207,55 @@ type TypoFontSize = "sm" | "md" | "lg";
 type TypoLineHeight = "compact" | "normal" | "loose";
 type TypoWidth = "std" | "wide" | "full";
 
+type TypoIndent = "none" | "two";
+type TypoParaSpacing = "tight" | "normal" | "loose";
+type TypoAlign = "left" | "justify";
+
 interface Typography {
   fontSize: TypoFontSize;
   lineHeight: TypoLineHeight;
   width: TypoWidth;
+  /** 首行缩进：两字符（中文惯例）/ 不缩进 */
+  paraIndent: TypoIndent;
+  /** 段间距 */
+  paraSpacing: TypoParaSpacing;
+  /** 对齐：左对齐 / 两端对齐 */
+  align: TypoAlign;
 }
 
-const DEFAULT_TYPOGRAPHY: Typography = { fontSize: "md", lineHeight: "normal", width: "std" };
+/** 常用中文标点（含成对标点的左右两半；点击插入光标处） */
+const PUNCTUATIONS: { mark: string; label: string }[] = [
+  { mark: "，", label: "逗号" },
+  { mark: "。", label: "句号" },
+  { mark: "、", label: "顿号" },
+  { mark: "？", label: "问号" },
+  { mark: "！", label: "叹号" },
+  { mark: "：", label: "冒号" },
+  { mark: "；", label: "分号" },
+  { mark: "“”", label: "双引号" },
+  { mark: "‘’", label: "单引号" },
+  { mark: "（）", label: "圆括号" },
+  { mark: "《》", label: "书名号" },
+  { mark: "【】", label: "方头括号" },
+  { mark: "——", label: "破折号" },
+  { mark: "……", label: "省略号" },
+  { mark: "·", label: "间隔号" },
+  { mark: "～", label: "波浪号" },
+];
+
+const DEFAULT_TYPOGRAPHY: Typography = {
+  fontSize: "md",
+  lineHeight: "normal",
+  width: "std",
+  paraIndent: "two",
+  paraSpacing: "normal",
+  align: "left",
+};
+
+/** 首行缩进档位 → --bd-para-indent */
+const PARA_INDENT_VAR: Record<TypoIndent, string> = { none: "0", two: "2em" };
+/** 段间距档位 → --bd-para-spacing */
+const PARA_SPACING_VAR: Record<TypoParaSpacing, string> = { tight: "0.25em", normal: "0.55em", loose: "1.1em" };
 
 /** 字号档位 → --bd-font-size */
 const FONT_SIZE_VAR: Record<TypoFontSize, string> = { sm: "1rem", md: "1.0625rem", lg: "1.25rem" };
@@ -236,6 +279,9 @@ function loadTypography(): Typography {
       fontSize: pickEnum(parsed.fontSize, ["sm", "md", "lg"], DEFAULT_TYPOGRAPHY.fontSize),
       lineHeight: pickEnum(parsed.lineHeight, ["compact", "normal", "loose"], DEFAULT_TYPOGRAPHY.lineHeight),
       width: pickEnum(parsed.width, ["std", "wide", "full"], DEFAULT_TYPOGRAPHY.width),
+      paraIndent: pickEnum(parsed.paraIndent, ["none", "two"], DEFAULT_TYPOGRAPHY.paraIndent),
+      paraSpacing: pickEnum(parsed.paraSpacing, ["tight", "normal", "loose"], DEFAULT_TYPOGRAPHY.paraSpacing),
+      align: pickEnum(parsed.align, ["left", "justify"], DEFAULT_TYPOGRAPHY.align),
     };
   } catch {
     return DEFAULT_TYPOGRAPHY;
@@ -291,6 +337,7 @@ export default function Editor() {
   const [aiOpen, setAiOpen] = useState(true);
   const [focus, setFocus] = useState(false);
   const [mobileNav, setMobileNav] = useState(false);  // 移动端目录抽屉
+  const [punctOpen, setPunctOpen] = useState(false);  // 标点符号快捷栏
   const [collapsedVols, setCollapsedVols] = useState<Set<number>>(new Set());
 
   // 章节列表状态过滤："all" 表示不过滤；"draft"/"writing"/"done" 调 GET ?status=... 拉服务端过滤后的列表
@@ -2015,6 +2062,9 @@ export default function Editor() {
             {
               "--bd-font-size": FONT_SIZE_VAR[typo.fontSize],
               "--bd-line-height": LINE_HEIGHT_VAR[typo.lineHeight],
+              "--bd-para-indent": PARA_INDENT_VAR[typo.paraIndent ?? "two"],
+              "--bd-para-spacing": PARA_SPACING_VAR[typo.paraSpacing ?? "normal"],
+              "--bd-align": typo.align ?? "left",
             } as CSSProperties
           }
         >
@@ -2145,6 +2195,24 @@ export default function Editor() {
                     />
                 </div>
               </div>
+              {/* 标点符号快捷栏（可开合） */}
+              {punctOpen && (
+                <div className="flex shrink-0 flex-wrap items-center gap-0.5 border-t border-border bg-card px-2 py-1">
+                  {PUNCTUATIONS.map((p) => (
+                    <button
+                      key={p.mark}
+                      title={p.label}
+                      className="min-w-7 rounded px-1.5 py-0.5 text-sm leading-6 text-foreground/80 transition-colors hover:bg-muted hover:text-foreground"
+                      onClick={() => editorRef.current?.insertInline(p.mark)}
+                    >
+                      {p.mark}
+                    </button>
+                  ))}
+                  <span className="ml-1 border-l border-border pl-2 text-[11px] text-muted-foreground">
+                    点击插入光标处
+                  </span>
+                </div>
+              )}
               {/* 写作状态栏 */}
               <div className="flex min-h-8 shrink-0 flex-wrap items-center justify-between gap-x-2 gap-y-1 border-t border-border bg-card px-2 py-1 text-[11px] text-muted-foreground sm:px-4 sm:py-0">
                 <span className="flex min-w-0 items-center gap-1.5">
@@ -2361,6 +2429,16 @@ export default function Editor() {
                   >
                     <NotebookText className="h-3.5 w-3.5" />
                   </Button>
+                  {/* 标点符号快捷栏：常用中文标点一键插入 */}
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className={`h-5 w-5 ${punctOpen ? "text-primary" : ""}`}
+                    title="标点符号快捷栏"
+                    onClick={() => setPunctOpen((v) => !v)}
+                  >
+                    <Pilcrow className="h-3.5 w-3.5" />
+                  </Button>
                   {/* 写作排版偏好：字号 / 行距 / 页宽 */}
                   <DropdownMenu>
                     <DropdownMenuTrigger asChild>
@@ -2407,6 +2485,46 @@ export default function Editor() {
                       ] as const).map(([value, label]) => (
                         <DropdownMenuItem key={value} onClick={() => patchTypo("width", value)}>
                           <Check className={`size-3.5 ${typo.width === value ? "" : "opacity-0"}`} />
+                          {label}
+                        </DropdownMenuItem>
+                      ))}
+                      <DropdownMenuSeparator />
+                      <DropdownMenuLabel className="px-2 py-1 text-[10px] font-normal text-muted-foreground">
+                        首行缩进
+                      </DropdownMenuLabel>
+                      {([
+                        ["two", "两字符（中文惯例）"],
+                        ["none", "不缩进"],
+                      ] as const).map(([value, label]) => (
+                        <DropdownMenuItem key={value} onClick={() => patchTypo("paraIndent", value)}>
+                          <Check className={`size-3.5 ${(typo.paraIndent ?? "two") === value ? "" : "opacity-0"}`} />
+                          {label}
+                        </DropdownMenuItem>
+                      ))}
+                      <DropdownMenuSeparator />
+                      <DropdownMenuLabel className="px-2 py-1 text-[10px] font-normal text-muted-foreground">
+                        段间距
+                      </DropdownMenuLabel>
+                      {([
+                        ["tight", "紧凑"],
+                        ["normal", "标准"],
+                        ["loose", "宽松"],
+                      ] as const).map(([value, label]) => (
+                        <DropdownMenuItem key={value} onClick={() => patchTypo("paraSpacing", value)}>
+                          <Check className={`size-3.5 ${(typo.paraSpacing ?? "normal") === value ? "" : "opacity-0"}`} />
+                          {label}
+                        </DropdownMenuItem>
+                      ))}
+                      <DropdownMenuSeparator />
+                      <DropdownMenuLabel className="px-2 py-1 text-[10px] font-normal text-muted-foreground">
+                        对齐
+                      </DropdownMenuLabel>
+                      {([
+                        ["left", "左对齐"],
+                        ["justify", "两端对齐"],
+                      ] as const).map(([value, label]) => (
+                        <DropdownMenuItem key={value} onClick={() => patchTypo("align", value)}>
+                          <Check className={`size-3.5 ${(typo.align ?? "left") === value ? "" : "opacity-0"}`} />
                           {label}
                         </DropdownMenuItem>
                       ))}

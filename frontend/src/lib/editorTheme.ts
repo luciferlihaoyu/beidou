@@ -71,28 +71,61 @@ export function saveTheme(theme: EditorTheme) {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(theme));
 }
 
-/** 生成横线 CSS background-image（多行字符串注入到 inline style） */
-export function buildLineBackground(t: EditorTheme): string {
+/** 横线/方格背景：返回可分别赋给 background-* 的图层参数
+ *
+ * 关键：不能把「位置 / 尺寸」简写（如 `linear-gradient(...) 0 0 / 28px 28px`）
+ * 塞进 backgroundImage —— 该简写只在 background 属性里合法，
+ * 赋给 background-image 会整条声明被浏览器丢弃（曾经的方格/点阵不显示就因此）。
+ * 所以这里拆成 image + size + repeat 三段。
+ */
+export interface LineBackground {
+  image: string;
+  size: string;
+  repeat: string;
+}
+
+export function buildLineBackground(t: EditorTheme): LineBackground | null {
   const s = t.lineSpacing;
   const c = t.lineColor;
   switch (t.lineType) {
     case "blank":
-      return "none";
+      return null;
     case "lined":
-      return `linear-gradient(to bottom, transparent calc(${s}px - 1px), ${c} calc(${s}px - 1px), ${c} ${s}px, transparent ${s}px)`;
+      // 一条 1px 线 + 底部留白，按 100% × s 平铺
+      return {
+        image: `linear-gradient(to bottom, transparent 0, transparent ${s - 1}px, ${c} ${s - 1}px, ${c} ${s}px, transparent ${s}px)`,
+        size: `100% ${s}px`,
+        repeat: "repeat",
+      };
     case "grid":
-      return (
-        `linear-gradient(to right, ${c} 1px, transparent 1px) 0 0 / ${s}px ${s}px,` +
-        ` linear-gradient(to bottom, ${c} 1px, transparent 1px) 0 0 / ${s}px ${s}px`
-      );
+      // 横线 + 竖线两层，各自按 s×s 平铺
+      return {
+        image: `linear-gradient(to right, ${c} 1px, transparent 1px), linear-gradient(to bottom, ${c} 1px, transparent 1px)`,
+        size: `${s}px ${s}px, ${s}px ${s}px`,
+        repeat: "repeat, repeat",
+      };
     case "dotted":
-      return `radial-gradient(circle, ${c} 1px, transparent 1.5px) 0 0 / ${s}px ${s}px`;
+      return {
+        image: `radial-gradient(circle, ${c} 1px, transparent 1.5px)`,
+        size: `${s}px ${s}px`,
+        repeat: "repeat",
+      };
     case "cross": {
-      // 田字格：每格 s x s；中间用 + 号把方块 4 等分
-      // SVG dataURL 嵌入
+      // 田字格：外框实线 + 内部虚线十字
       const inner = s / 2;
-      const svg = `<svg xmlns='http://www.w3.org/2000/svg' width='${s}' height='${s}' viewBox='0 0 ${s} ${s}'><line x1='0' y1='0' x2='${s}' y2='0' stroke='${c}' stroke-width='1'/><line x1='0' y1='${s}' x2='${s}' y2='${s}' stroke='${c}' stroke-width='1'/><line x1='0' y1='0' x2='0' y2='${s}' stroke='${c}' stroke-width='1'/><line x1='${s}' y1='0' x2='${s}' y2='${s}' stroke='${c}' stroke-width='1'/><line x1='${inner}' y1='0' x2='${inner}' y2='${s}' stroke='${c}' stroke-width='0.5' stroke-dasharray='2 2'/><line x1='0' y1='${inner}' x2='${s}' y2='${inner}' stroke='${c}' stroke-width='0.5' stroke-dasharray='2 2'/></svg>`;
-      return `url("data:image/svg+xml;utf8,${encodeURIComponent(svg)}") 0 0 / ${s}px ${s}px`;
+      const svg =
+        `<svg xmlns='http://www.w3.org/2000/svg' width='${s}' height='${s}' viewBox='0 0 ${s} ${s}'>` +
+        `<line x1='0' y1='0' x2='${s}' y2='0' stroke='${c}' stroke-width='1'/>` +
+        `<line x1='0' y1='${s}' x2='${s}' y2='${s}' stroke='${c}' stroke-width='1'/>` +
+        `<line x1='0' y1='0' x2='0' y2='${s}' stroke='${c}' stroke-width='1'/>` +
+        `<line x1='${s}' y1='0' x2='${s}' y2='${s}' stroke='${c}' stroke-width='1'/>` +
+        `<line x1='${inner}' y1='0' x2='${inner}' y2='${s}' stroke='${c}' stroke-width='0.5' stroke-dasharray='2 2'/>` +
+        `<line x1='0' y1='${inner}' x2='${s}' y2='${inner}' stroke='${c}' stroke-width='0.5' stroke-dasharray='2 2'/></svg>`;
+      return {
+        image: `url("data:image/svg+xml;utf8,${encodeURIComponent(svg)}")`,
+        size: `${s}px ${s}px`,
+        repeat: "repeat",
+      };
     }
   }
 }
