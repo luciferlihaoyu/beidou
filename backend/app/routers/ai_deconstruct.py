@@ -87,14 +87,23 @@ async def deconstruct_book(data: DeconstructIn, user: User = Depends(get_current
         raise HTTPException(400, "参考书文本太短，至少粘 200 字（建议整本或前几万字）")
     config = await _pick_config(user, db, "")
     prompt = _DECONSTRUCT_PROMPT.format(title_hint=data.title_hint or "（未提供）", text=_sample(text), schema=_REF_SCHEMA)
-    raw = await _chat_text(config, _SYSTEM, prompt, max_tokens=4000)
+    usage: dict = {}
+    raw = await _chat_text(config, _SYSTEM, prompt, max_tokens=4000, usage_sink=usage)
     try:
         ref = _parse_json(raw)
     except ValueError as e:
         raise HTTPException(502, f"AI 输出解析失败：{e}；原始输出前 200 字：{raw[:200]}") from e
     if not isinstance(ref, dict) or not (ref.get("worldview_framework") or ref.get("power_system")):
         raise HTTPException(502, "AI 输出缺少关键字段，请重试或换一段参考文本")
-    return {"reference": ref}
+    # 用量回传（拆书发生在新项目创建前，无法落到项目账上；前端可展示本次成本）
+    return {
+        "reference": ref,
+        "usage": {
+            "model": config.model,
+            "promptTokens": int(usage.get("prompt", 0) or 0),
+            "completionTokens": int(usage.get("completion", 0) or 0),
+        },
+    }
 
 
 @router.put("/projects/{project_id}/reference")

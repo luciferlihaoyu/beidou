@@ -901,7 +901,10 @@ export const REFERENCE_FIELDS: { key: keyof ReferenceNote; label: string; hint: 
 
 export const deconstructApi = {
   run: (text: string, titleHint = "") =>
-    api.post<{ reference: ReferenceNote }>("/api/ai-factory/deconstruct", { text, title_hint: titleHint }),
+    api.post<{
+      reference: ReferenceNote;
+      usage?: { model?: string; promptTokens?: number; completionTokens?: number };
+    }>("/api/ai-factory/deconstruct", { text, title_hint: titleHint }),
   save: (projectId: number, reference: ReferenceNote) =>
     api.put<{ ok: boolean; reference: ReferenceNote }>(`/api/ai-factory/projects/${projectId}/reference`, { reference }),
   clear: (projectId: number) => api.delete<{ ok: boolean }>(`/api/ai-factory/projects/${projectId}/reference`),
