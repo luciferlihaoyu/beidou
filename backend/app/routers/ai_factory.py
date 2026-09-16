@@ -154,6 +154,13 @@ _SYSTEM = (
 # ---------- 序列化 ----------
 
 
+def _reference_block(p: AiProject) -> str:
+    """拆书学习范式块（延迟导入 ai_deconstruct 避免循环依赖）。"""
+    from .ai_deconstruct import reference_prompt_block
+
+    return reference_prompt_block(p)
+
+
 def _project_out(p: AiProject, novel: Novel | None = None, chapter_count: int = 0) -> dict:
     return {
         "id": p.id,
@@ -170,6 +177,7 @@ def _project_out(p: AiProject, novel: Novel | None = None, chapter_count: int = 
         "target_volumes": p.target_volumes,
         "target_chapters": p.target_chapters,
         "outline": json.loads(p.outline_json) if p.outline_json else None,
+        "reference": json.loads(p.reference_json) if p.reference_json else None,
         "setup_llm": p.setup_llm or "",
         "outline_llm": p.outline_llm or "",
         "chapter_llm": p.chapter_llm or "",
@@ -372,6 +380,7 @@ async def init_project(
         + (f"风格要求：{p.style_notes}\n" if p.style_notes else "")
         + target_line
         + market_line
+        + _reference_block(p)
         + kept_line
         + "\n请为这个创意做小说立项，输出 JSON（只输出 JSON）：\n"
         "{\n"
@@ -485,7 +494,8 @@ async def setup_project(project_id: int, user: User = Depends(get_current_user),
 
     prompt = (
         f"小说立项信息：\n{json.dumps(spec, ensure_ascii=False, indent=2)}\n\n"
-        "请基于立项生成完整设定，输出 JSON（只输出 JSON）：\n"
+        + _reference_block(p)
+        + "请基于立项生成完整设定，输出 JSON（只输出 JSON）：\n"
         "{\n"
         '  "characters": [\n'
         "    {\"name\": \"角色名\", \"role\": \"主角/配角/反派/导师\", "

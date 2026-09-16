@@ -39,6 +39,7 @@ async def init_db():
         # AI 工厂 M5：简介/市场雷达/封面
         await _ensure_column(conn, "ai_projects", "synopsis_json", "TEXT NOT NULL DEFAULT ''")
         await _ensure_column(conn, "ai_projects", "market_json", "TEXT NOT NULL DEFAULT ''")
+        await _ensure_column(conn, "ai_projects", "reference_json", "TEXT NOT NULL DEFAULT ''")
         await _ensure_column(conn, "ai_projects", "cover_prompt", "TEXT NOT NULL DEFAULT ''")
         await _ensure_column(conn, "ai_projects", "kb_query", "TEXT NOT NULL DEFAULT ''")
         await _ensure_column(conn, "ai_projects", "platform", "TEXT NOT NULL DEFAULT ''")

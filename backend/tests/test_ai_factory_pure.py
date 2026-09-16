@@ -221,3 +221,57 @@ class TestSplitLongChapter:
         text = "\n\n".join([self._para(53), self._para(16)])
         parts = split_long_chapter(text, 1000)
         assert len(parts) == 1 and parts[0] == text
+
+
+class TestDeconstructReference:
+    """M14 拆书学习：范式笔记 → prompt 注入块。"""
+
+    def _proj(self, note):
+        import json
+
+        class P:
+            reference_json = json.dumps(note, ensure_ascii=False) if note is not None else ""
+
+        return P()
+
+    def test_empty_reference_returns_blank(self):
+        from app.routers.ai_deconstruct import reference_prompt_block
+
+        assert reference_prompt_block(self._proj(None)) == ""
+        assert reference_prompt_block(self._proj({})) == ""
+
+    def test_reference_block_contains_fields(self):
+        from app.routers.ai_deconstruct import reference_prompt_block
+
+        blk = reference_prompt_block(
+            self._proj(
+                {
+                    "title": "示例书",
+                    "worldview_framework": "宗门林立+位面晋升",
+                    "power_system": "九阶斗气",
+                    "pacing": "3章一小高潮",
+                    "character_config": [{"role": "主角", "archetype": "废柴逆袭", "traits": "家族废物"}],
+                    "hooks": ["开局退婚打脸"],
+                    "avoid": ["退婚流已用烂"],
+                    "borrow_notes": "借结构换皮",
+                }
+            )
+        )
+        for token in ("宗门林立", "九阶斗气", "废柴逆袭", "开局退婚打脸", "退婚流已用烂", "必须全新原创"):
+            assert token in blk
+
+    def test_broken_json_returns_blank(self):
+        from app.routers.ai_deconstruct import reference_prompt_block
+
+        class Bad:
+            reference_json = "{不是合法 JSON"
+
+        assert reference_prompt_block(Bad()) == ""
+
+    def test_sampling_keeps_head_and_tail(self):
+        from app.routers.ai_deconstruct import SAMPLE_CHARS, _sample
+
+        text = "甲" * 200_000 + "乙" * 100
+        out = _sample(text)
+        assert len(out) <= SAMPLE_CHARS + 20
+        assert out.startswith("甲") and out.rstrip().endswith("乙")

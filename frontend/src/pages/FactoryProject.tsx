@@ -23,6 +23,7 @@ import { toast } from "sonner";
 import AppShell from "@/components/AppShell";
 import ChapterGenPanel from "@/components/ChapterGenPanel";
 import SetupStagePanel from "@/components/SetupStagePanel";
+import DeconstructCard from "@/components/DeconstructCard";
 import ModelRouteDialog from "@/components/ModelRouteDialog";
 import { aiFactoryM5, downloadExportPack } from "@/lib/api";
 import { aiFactoryApi, type AiBookSpec, type AiProject } from "@/lib/api";
@@ -192,6 +193,17 @@ export default function FactoryProject() {
             </div>
           ))}
         </div>
+
+        {/* 拆书学习（立项阶段：学参考书的套路写新书） */}
+        {project.status === "draft" && (
+          <DeconstructCard
+            project={project}
+            onProjectChange={(p) => {
+              setProject(p);
+              if (p.book_spec) setSpec(p.book_spec);
+            }}
+          />
+        )}
 
         {/* 创意回顾 */}
         <div className="mb-5 rounded-lg border border-border bg-card p-3">

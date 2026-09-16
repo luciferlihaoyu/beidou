@@ -366,6 +366,7 @@ class AiProject(Base):
     # M5
     synopsis_json: Mapped[str] = mapped_column(Text, default="")  # 多版本简介 {short,standard,promotion,douyin}
     market_json: Mapped[str] = mapped_column(Text, default="")  # 市场调研报告（选题用）
+    reference_json: Mapped[str] = mapped_column(Text, default="")  # 拆书学习范式笔记（可编辑，注入立项/设定）
     cover_prompt: Mapped[str] = mapped_column(Text, default="")  # 封面绘图 prompt（中文描述+英文 prompt）
     kb_query: Mapped[str] = mapped_column(String(200), default="")  # 璇玑知识源检索词（空=不启用）
     platform: Mapped[str] = mapped_column(String(20), default="")  # 目标平台（敏感词词库分档）

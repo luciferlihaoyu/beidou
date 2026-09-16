@@ -441,6 +441,7 @@ export interface AiProject {
   particle_ledger: string;
   subplot_board: string;
   synopsis: AiSynopsis | null;
+  reference: ReferenceNote | null;
   market: AiMarketReport | null;
   cover_prompt: AiCoverPrompt | null;
   kb_query: string;
@@ -871,4 +872,35 @@ export const aiFactoryBg = {
     api.get<BgBatchStatus>(`/api/ai-factory/projects/${projectId}/batch-bg/status`),
   stop: (projectId: number) =>
     api.post<{ ok: boolean }>(`/api/ai-factory/projects/${projectId}/batch-bg/stop`),
+};
+
+/** 拆书学习：范式笔记（可编辑，注入立项/设定） */
+export interface ReferenceNote {
+  title?: string;
+  worldview_framework?: string;
+  power_system?: string;
+  character_config?: { role?: string; archetype?: string; traits?: string }[];
+  pacing?: string;
+  hooks?: string[];
+  voice?: string;
+  avoid?: string[];
+  borrow_notes?: string;
+}
+
+export const REFERENCE_FIELDS: { key: keyof ReferenceNote; label: string; hint: string; list?: boolean }[] = [
+  { key: "worldview_framework", label: "世界观结构", hint: "如：宗门林立+位面晋升" },
+  { key: "power_system", label: "力量体系", hint: "等级阶梯/晋升方式/代价" },
+  { key: "pacing", label: "节奏与爽点", hint: "多少章一个小高潮" },
+  { key: "voice", label: "语言调性", hint: "句长/对白比例/视角" },
+  { key: "hooks", label: "钩子手法", hint: "每行一条", list: true },
+  { key: "avoid", label: "必须避开", hint: "参考书已用烂的桥段，每行一条", list: true },
+  { key: "borrow_notes", label: "借鉴建议", hint: "借什么、换什么、怎么差异化" },
+];
+
+export const deconstructApi = {
+  run: (text: string, titleHint = "") =>
+    api.post<{ reference: ReferenceNote }>("/api/ai-factory/deconstruct", { text, title_hint: titleHint }),
+  save: (projectId: number, reference: ReferenceNote) =>
+    api.put<{ ok: boolean; reference: ReferenceNote }>(`/api/ai-factory/projects/${projectId}/reference`, { reference }),
+  clear: (projectId: number) => api.delete<{ ok: boolean }>(`/api/ai-factory/projects/${projectId}/reference`),
 };
