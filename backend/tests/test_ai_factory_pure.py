@@ -275,3 +275,48 @@ class TestDeconstructReference:
         out = _sample(text)
         assert len(out) <= SAMPLE_CHARS + 20
         assert out.startswith("甲") and out.rstrip().endswith("乙")
+
+
+class TestNightlyWindowTimezone:
+    """夜跑窗口按作者时区判定（容器多是 UTC，避免凌晨窗口跑到北京上午）。"""
+
+    def test_default_window_hours(self):
+        import os
+
+        os.environ.pop("BEIDOU_NIGHTLY_HOURS", None)
+        import importlib
+
+        from app import nightly
+
+        importlib.reload(nightly)
+        assert nightly.NIGHTLY_WINDOW_HOURS == (2, 3, 4)
+        assert nightly._nightly_now().tzinfo is not None  # 默认带时区（Asia/Shanghai）
+
+    def test_env_override_hours(self):
+        import importlib
+        import os
+
+        os.environ["BEIDOU_NIGHTLY_HOURS"] = "1,23,99,x"
+        from app import nightly
+
+        importlib.reload(nightly)
+        assert nightly.NIGHTLY_WINDOW_HOURS == (1, 23)  # 非法值被丢弃
+        os.environ.pop("BEIDOU_NIGHTLY_HOURS")
+        importlib.reload(nightly)
+
+    def test_local_and_bad_tz_fall_back(self):
+        import importlib
+        import os
+
+        from app import nightly
+
+        os.environ["BEIDOU_NIGHTLY_TZ"] = "local"
+        importlib.reload(nightly)
+        assert nightly._nightly_now().tzinfo is None  # 容器本地时间
+
+        os.environ["BEIDOU_NIGHTLY_TZ"] = "No/Such_Zone"
+        importlib.reload(nightly)
+        assert nightly._nightly_now().tzinfo is None  # 非法时区退回本地，不抛错
+
+        os.environ.pop("BEIDOU_NIGHTLY_TZ")
+        importlib.reload(nightly)

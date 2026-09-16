@@ -36,8 +36,38 @@ from .utils import chapter_display_title, order_chapters, strip_html
 
 import httpx
 
-# 夜间执行窗口（服务器本地时区，UTC+8 部署下即凌晨）
-NIGHTLY_WINDOW_HOURS = (2, 3, 4)
+# 夜间执行窗口：按「作者所在时区」判定，而不是容器时区。
+# 容器（Zeabur 等）常跑 UTC，若直接按服务器本地时区，凌晨 2-4 点会
+# 落到北京时间的上午 10-12 点——白天偷偷跑，作者一开页面就在耗算力。
+# 可用环境变量覆盖：
+#   BEIDOU_NIGHTLY_TZ=Asia/Shanghai   （默认，作者本地时区；设 "local" 用容器时区）
+#   BEIDOU_NIGHTLY_HOURS=2,3,4        （窗口内的小时，逗号分隔）
+import os as _os
+
+def _nightly_hours() -> tuple[int, ...]:
+    raw = _os.getenv("BEIDOU_NIGHTLY_HOURS", "2,3,4")
+    hours: list[int] = []
+    for part in raw.split(","):
+        part = part.strip()
+        if part.isdigit() and 0 <= int(part) <= 23:
+            hours.append(int(part))
+    return tuple(hours) or (2, 3, 4)
+
+
+NIGHTLY_WINDOW_HOURS = _nightly_hours()
+
+
+def _nightly_now() -> datetime:
+    """夜间窗口判定用的当前时间：默认按作者时区（Asia/Shanghai）。"""
+    tz_name = _os.getenv("BEIDOU_NIGHTLY_TZ", "Asia/Shanghai").strip()
+    if not tz_name or tz_name.lower() == "local":
+        return datetime.now()
+    try:
+        from zoneinfo import ZoneInfo
+
+        return datetime.now(ZoneInfo(tz_name))
+    except Exception:  # 时区库缺失或名字非法 → 退回容器本地时间，不阻断夜跑
+        return datetime.now()
 
 
 # ---------- 超长自动分章（纯函数 + 落库）----------
@@ -357,7 +387,7 @@ async def run_nightly_for_project(project_id: int, user_id: int) -> dict:
 
 async def nightly_tick() -> int:
     """后台循环一跳：夜间窗口内，给开启定时连跑且今日未跑的项目执行。返回执行项目数。"""
-    now = datetime.now()  # 服务器本地时区
+    now = _nightly_now()  # 作者时区（默认 Asia/Shanghai），可用 BEIDOU_NIGHTLY_TZ 覆盖
     if now.hour not in NIGHTLY_WINDOW_HOURS:
         return 0
     today = now.strftime("%Y-%m-%d")
