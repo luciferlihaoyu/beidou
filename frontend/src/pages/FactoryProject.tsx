@@ -150,20 +150,20 @@ export default function FactoryProject() {
       }
       actions={
         <div className="flex items-center gap-2">
-          <Button variant="outline" size="sm" className="h-8" onClick={() => setRouteOpen(true)}>
-            <Cpu className="mr-1 h-4 w-4" />
-            模型路由
+          <Button variant="outline" size="sm" className="h-8" onClick={() => setRouteOpen(true)} title="模型路由">
+            <Cpu className="h-4 w-4 sm:mr-1" />
+            <span className="hidden sm:inline">模型路由</span>
           </Button>
           {project.novel_id && (
-            <Button variant="outline" size="sm" className="h-8" onClick={() => navigate(`/novel/${project.novel_id}`)}>
-              <BookOpen className="mr-1 h-4 w-4" />
-              打开书稿
+            <Button variant="outline" size="sm" className="h-8" onClick={() => navigate(`/novel/${project.novel_id}`)} title="打开书稿">
+              <BookOpen className="h-4 w-4 sm:mr-1" />
+              <span className="hidden sm:inline">打开书稿</span>
             </Button>
           )}
         </div>
       }
     >
-      <div className="mx-auto w-full max-w-3xl p-6">
+      <div className="mx-auto w-full max-w-3xl p-4 sm:p-6">
         {/* 步骤条 */}
         <div className="mb-6 flex items-center gap-1">
           {STEPS.map((s, i) => (
@@ -180,7 +180,11 @@ export default function FactoryProject() {
                 >
                   {i < cur ? <Check className="h-3 w-3" /> : i + 1}
                 </span>
-                <span className={`text-xs ${i === cur ? "font-medium text-foreground" : "text-muted-foreground"}`}>
+                <span
+                  className={`text-xs ${i === cur ? "font-medium text-foreground" : "text-muted-foreground"} ${
+                    i === cur ? "" : "hidden sm:inline"
+                  }`}
+                >
                   {s.label}
                 </span>
               </div>
@@ -345,7 +349,7 @@ export default function FactoryProject() {
                         }}
                       />
                     </div>
-                    <div className="grid grid-cols-2 gap-3">
+                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                       {specField("genre", "类型")}
                       {specField("tone", "基调")}
                       {specField("time", "时代背景")}

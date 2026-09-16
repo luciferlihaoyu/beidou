@@ -223,7 +223,7 @@ export default function SetupStagePanel({ project, busy, onRun, onOutline }: Pro
               </button>
             </div>
             <div className="space-y-2.5">
-              <div className="grid grid-cols-2 gap-2">
+              <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
                 <Input placeholder="角色名" value={editingChar.name ?? ""} onChange={(e) => setEditingChar({ ...editingChar, name: e.target.value })} />
                 <Input placeholder="身份（主角/配角/反派…）" value={editingChar.role ?? ""} onChange={(e) => setEditingChar({ ...editingChar, role: e.target.value })} />
               </div>
@@ -256,7 +256,7 @@ export default function SetupStagePanel({ project, busy, onRun, onOutline }: Pro
               </button>
             </div>
             <div className="space-y-2.5">
-              <div className="grid grid-cols-2 gap-2">
+              <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
                 <Input placeholder="分类（力量体系/地理/势力…）" value={editingWorld.category ?? ""} onChange={(e) => setEditingWorld({ ...editingWorld, category: e.target.value })} />
                 <Input placeholder="条目标题" value={editingWorld.title ?? ""} onChange={(e) => setEditingWorld({ ...editingWorld, title: e.target.value })} />
               </div>

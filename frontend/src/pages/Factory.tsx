@@ -195,7 +195,7 @@ export default function Factory() {
                 onChange={(e) => setForm({ ...form, seed_prompt: e.target.value })}
               />
             </div>
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
               <div>
                 <Label className="text-xs">类型偏好</Label>
                 <Input
@@ -222,7 +222,7 @@ export default function Factory() {
               {showTargets ? "收起字数目标" : "设置字数目标（可选）"}
             </button>
             {showTargets && (
-              <div className="grid grid-cols-2 gap-3 rounded-md border border-border p-3">
+              <div className="grid grid-cols-1 gap-3 rounded-md border border-border p-3 sm:grid-cols-2">
                 <div>
                   <Label className="text-xs">总字数</Label>
                   <Input

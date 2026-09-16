@@ -35,6 +35,7 @@ import {
   Trash2,
   Wand2,
   X,
+  List,
 } from "lucide-react";
 import { toast } from "sonner";
 import AppShell from "@/components/AppShell";
@@ -289,6 +290,7 @@ export default function Editor() {
   const [saveState, setSaveState] = useState<SaveState>("saved");
   const [aiOpen, setAiOpen] = useState(true);
   const [focus, setFocus] = useState(false);
+  const [mobileNav, setMobileNav] = useState(false);  // 移动端目录抽屉
   const [collapsedVols, setCollapsedVols] = useState<Set<number>>(new Set());
 
   // 章节列表状态过滤："all" 表示不过滤；"draft"/"writing"/"done" 调 GET ?status=... 拉服务端过滤后的列表
@@ -1664,8 +1666,18 @@ export default function Editor() {
             disabled={activeId === null}
             onClick={openSaveSnapshotDialog}
           >
-            <BookmarkPlus className="mr-1 h-4 w-4" />
-            保存存稿点
+            <BookmarkPlus className="h-4 w-4 sm:mr-1" />
+            <span className="hidden sm:inline">保存存稿点</span>
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-8 lg:hidden"
+            title="目录"
+            onClick={() => setMobileNav((v) => !v)}
+          >
+            <List className="h-4 w-4 sm:mr-1" />
+            <span className="hidden sm:inline">目录</span>
           </Button>
           <Button
             variant="ghost"
@@ -1677,15 +1689,22 @@ export default function Editor() {
               setFocus(true);
             }}
           >
-            <Maximize2 className="mr-1 h-4 w-4" />
-            专注
+            <Maximize2 className="h-4 w-4 sm:mr-1" />
+            <span className="hidden sm:inline">专注</span>
           </Button>
         </>
       }
     >
       <div className="relative flex h-full">
         {/* 章节栏 */}
-        <aside className={`w-60 shrink-0 flex-col border-r border-border bg-card ${focus ? "hidden" : "flex"}`}>
+        {mobileNav && (
+          <div className="absolute inset-0 z-20 bg-black/30 lg:hidden" onClick={() => setMobileNav(false)} />
+        )}
+        <aside
+          className={`w-60 shrink-0 flex-col border-r border-border bg-card max-lg:absolute max-lg:z-30 max-lg:h-full max-lg:shadow-xl ${
+            focus ? "hidden" : "flex"
+          } ${mobileNav ? "" : "max-lg:hidden"}`}
+        >
           <div className="flex h-11 items-center justify-between border-b border-border px-3">
             <span className="text-xs font-medium text-muted-foreground">目录</span>
             <div className="flex items-center">
@@ -2127,7 +2146,7 @@ export default function Editor() {
                 </div>
               </div>
               {/* 写作状态栏 */}
-              <div className="flex h-8 shrink-0 items-center justify-between border-t border-border bg-card px-4 text-[11px] text-muted-foreground">
+              <div className="flex min-h-8 shrink-0 flex-wrap items-center justify-between gap-x-2 gap-y-1 border-t border-border bg-card px-2 py-1 text-[11px] text-muted-foreground sm:px-4 sm:py-0">
                 <span className="flex min-w-0 items-center gap-1.5">
                   <Button
                     variant="ghost"
@@ -2421,7 +2440,7 @@ export default function Editor() {
 
         {/* 右栏：AI / 知识舱 tab 切换 */}
         {aiOpen && !focus && (
-          <aside className="flex w-80 shrink-0 flex-col border-l border-border">
+          <aside className="flex w-80 shrink-0 flex-col border-l border-border max-lg:absolute max-lg:right-0 max-lg:z-30 max-lg:h-full max-lg:w-[88vw] max-lg:shadow-xl">
             <div className="flex h-9 shrink-0 items-center gap-1 border-b border-border bg-card px-2 text-[11px]">
               <button
                 className={`rounded px-2 py-0.5 ${rightTab === "ai" ? "bg-primary/10 font-medium text-primary" : "text-muted-foreground hover:text-foreground"}`}

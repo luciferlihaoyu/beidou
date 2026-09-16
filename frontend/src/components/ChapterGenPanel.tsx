@@ -387,7 +387,7 @@ export default function ChapterGenPanel({
         {jobs.map((j) => (
           <div
             key={j.id}
-            className="flex items-center gap-3 border-b border-border bg-card px-3 py-2 text-sm last:border-b-0"
+            className="flex flex-wrap items-center gap-2 border-b border-border bg-card px-3 py-2 text-sm last:border-b-0 sm:gap-3"
           >
             {JOB_STATUS[j.status]?.icon}
             <div className="min-w-0 flex-1">
@@ -400,7 +400,7 @@ export default function ChapterGenPanel({
               {j.actual_words > 0 ? `${j.actual_words.toLocaleString()} 字` : ""}
               {j.attempt > 1 ? ` · 第${j.attempt}次` : ""}
             </span>
-            <div className="flex shrink-0 items-center gap-1">
+            <div className="flex shrink-0 flex-wrap items-center gap-1">
               <Button
                 variant="ghost"
                 size="sm"
