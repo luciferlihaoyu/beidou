@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router";
-import { BookOpen, MoreHorizontal, PenLine, Plus, Trash2 } from "lucide-react";
+import { BookOpen, Bot, MoreHorizontal, PenLine, Plus, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import AppShell from "@/components/AppShell";
 import { api, type Novel } from "@/lib/api";
@@ -339,8 +339,21 @@ export default function Bookshelf() {
                       </DropdownMenuContent>
                     </DropdownMenu>
                   </div>
-                  <p className="mt-1 text-xs text-muted-foreground">
-                    {[novel.author, novel.genre, novel.status].filter(Boolean).join(" · ")}
+                  <p className="mt-1 flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
+                    <span>{[novel.author, novel.genre, novel.status].filter(Boolean).join(" · ")}</span>
+                    {novel.ai_project_id ? (
+                      <button
+                        className="inline-flex items-center gap-0.5 rounded bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium text-primary transition-colors hover:bg-primary/20"
+                        title="这是 AI 工厂生成的小说，点此回到 AI 工厂项目"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          navigate(`/factory/${novel.ai_project_id}`);
+                        }}
+                      >
+                        <Bot className="h-3 w-3" />
+                        AI 工厂
+                      </button>
+                    ) : null}
                   </p>
                   <p className="mt-3 line-clamp-2 min-h-10 flex-1 text-sm leading-5 text-muted-foreground">
                     {novel.description || "还没有简介。"}

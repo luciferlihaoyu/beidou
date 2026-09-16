@@ -141,6 +141,8 @@ export interface Novel {
   chapter_count: number;
   total_words: number;
   updated_at: string;
+  /** AI 工厂项目 id（非空 = AI 工厂生成的小说） */
+  ai_project_id?: number | null;
 }
 
 export interface DailyStat {

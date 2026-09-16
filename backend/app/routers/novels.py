@@ -5,7 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import get_db
 from ..deps import get_current_user, get_owned_novel
-from ..models import Chapter, Novel, User
+from ..models import Chapter, Novel, User, AiProject
 
 router = APIRouter(prefix="/api/novels", tags=["novels"])
 
@@ -34,6 +34,8 @@ class NovelOut(BaseModel):
     chapter_count: int = 0
     total_words: int = 0
     updated_at: object = None
+    # AI 工厂项目 id（非空 = 这本是 AI 工厂生成的小说，可从书架直接跳回项目）
+    ai_project_id: int | None = None
 
     model_config = {"from_attributes": True}
 
@@ -48,11 +50,15 @@ async def _with_stats(db: AsyncSession, novels: list[Novel]) -> list[NovelOut]:
         .group_by(Chapter.novel_id)
     )
     stats = {row[0]: (row[1], row[2]) for row in result.all()}
+    # AI 工厂生成的小说：回填项目 id，供书架「跳回 AI 工厂」使用
+    proj_result = await db.execute(select(AiProject.novel_id, AiProject.id).where(AiProject.novel_id.in_(ids)))
+    projects = {row[0]: row[1] for row in proj_result.all() if row[0] is not None}
     out = []
     for n in novels:
         item = NovelOut.model_validate(n)
         item.chapter_count, item.total_words = stats.get(n.id, (0, 0))
         item.updated_at = n.updated_at
+        item.ai_project_id = projects.get(n.id)
         out.append(item)
     return out
 
