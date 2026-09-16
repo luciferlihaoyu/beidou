@@ -194,8 +194,8 @@ export default function FactoryProject() {
           ))}
         </div>
 
-        {/* 拆书学习（立项阶段：学参考书的套路写新书） */}
-        {project.status === "draft" && (
+        {/* 拆书学习（立项/设定阶段：学参考书的套路写新书） */}
+        {(project.status === "draft" || project.status === "setup") && (
           <DeconstructCard
             project={project}
             onProjectChange={(p) => {
