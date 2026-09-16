@@ -224,7 +224,7 @@ function WorldviewTab({ novelId }: { novelId: number }) {
         <DialogContent className="sm:max-w-md">
           <DialogHeader><DialogTitle>{editing ? "编辑条目" : "新建条目"}</DialogTitle></DialogHeader>
           <div className="space-y-4">
-            <div className="grid grid-cols-3 gap-4">
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
               <div className="space-y-2">
                 <Label>分类</Label>
                 <Select value={form.category} onValueChange={(v) => setForm({ ...form, category: v })}>
@@ -316,7 +316,7 @@ function ForeshadowingTab({ novelId }: { novelId: number }) {
         <DialogContent className="sm:max-w-md">
           <DialogHeader><DialogTitle>{editing ? "编辑伏笔" : "新建伏笔"}</DialogTitle></DialogHeader>
           <div className="space-y-4">
-            <div className="grid grid-cols-3 gap-4">
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
               <div className="space-y-2">
                 <Label>状态</Label>
                 <Select value={form.status} onValueChange={(v) => setForm({ ...form, status: v })}>

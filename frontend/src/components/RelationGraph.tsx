@@ -260,7 +260,8 @@ export default function RelationGraph({ novelId }: { novelId: number }) {
       {/* 关系列表（删除入口，比点边可靠） */}
       {relations.length > 0 && (
         <div className="mt-4 overflow-hidden rounded-lg border border-border">
-          <table className="w-full text-sm">
+          <div className="w-full overflow-x-auto">
+          <table className="w-full min-w-[420px] text-sm">
             <thead>
               <tr className="border-b border-border bg-muted/50 text-left text-xs text-muted-foreground">
                 <th className="px-3 py-2 font-medium">起点</th>
@@ -298,6 +299,7 @@ export default function RelationGraph({ novelId }: { novelId: number }) {
               ))}
             </tbody>
           </table>
+          </div>
         </div>
       )}
 
