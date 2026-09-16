@@ -15,6 +15,8 @@ import {
   Sparkles,
   Trash2,
   Upload,
+  ArrowLeft,
+  FolderTree,
 } from "lucide-react";
 import { toast } from "sonner";
 import AppShell from "@/components/AppShell";
@@ -70,6 +72,8 @@ export default function Library({ novelId }: { novelId?: number }) {
   const [folders, setFolders] = useState<LibraryFolder[]>([]);
   const [items, setItems] = useState<LibraryItem[]>([]);
   const [selectedFolder, setSelectedFolder] = useState<number | "all" | "unfiled">("all");
+  // 移动端布局：目录树抽屉 + 「列表 ←→ 编辑区」二级导航（小屏容不下三栏）
+  const [mobileFolders, setMobileFolders] = useState(false);
   const [expanded, setExpanded] = useState<Set<number>>(new Set());
   const [q, setQ] = useState("");
   const [active, setActive] = useState<LibraryItem | null>(null);
@@ -479,8 +483,19 @@ export default function Library({ novelId }: { novelId?: number }) {
       }
     >
       <div className="flex h-full">
-        {/* 目录树 */}
-        <aside className="flex w-52 shrink-0 flex-col border-r border-border bg-card">
+        {/* 移动端目录抽屉遮罩 */}
+        {mobileFolders && (
+          <div
+            className="fixed inset-0 z-30 bg-black/30 lg:hidden"
+            onClick={() => setMobileFolders(false)}
+          />
+        )}
+        {/* 目录树（小屏为覆盖式抽屉） */}
+        <aside
+          className={`flex w-52 shrink-0 flex-col border-r border-border bg-card max-lg:fixed max-lg:inset-y-0 max-lg:left-0 max-lg:z-40 max-lg:shadow-xl ${
+            mobileFolders ? "" : "max-lg:hidden"
+          }`}
+        >
           <div className="flex h-10 shrink-0 items-center justify-between border-b border-border px-3">
             <span className="text-xs font-medium text-muted-foreground">目录</span>
             <button
@@ -515,17 +530,31 @@ export default function Library({ novelId }: { novelId?: number }) {
           </ScrollArea>
         </aside>
 
-        {/* 条目列表 */}
-        <section className="flex w-64 shrink-0 flex-col border-r border-border">
+        {/* 条目列表（小屏：未选中条目时全宽，选中后让位给编辑区） */}
+        <section
+          className={`flex w-64 shrink-0 flex-col border-r border-border max-lg:w-full max-lg:border-r-0 ${
+            active ? "max-lg:hidden" : ""
+          }`}
+        >
           <div className="shrink-0 border-b border-border p-2">
-            <div className="relative">
-              <Search className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
-              <Input
-                value={q}
-                onChange={(e) => setQ(e.target.value)}
-                placeholder="搜索标题 / 内容 / 标签"
-                className="h-8 pl-8 text-xs"
-              />
+            <div className="flex items-center gap-2">
+              {/* 小屏：打开目录抽屉（三栏在手机上放不下） */}
+              <button
+                className="shrink-0 rounded p-1.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground lg:hidden"
+                title="选择目录"
+                onClick={() => setMobileFolders(true)}
+              >
+                <FolderTree className="h-4 w-4" />
+              </button>
+              <div className="relative min-w-0 flex-1">
+                <Search className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+                <Input
+                  value={q}
+                  onChange={(e) => setQ(e.target.value)}
+                  placeholder="搜索标题 / 内容 / 标签"
+                  className="h-8 pl-8 text-xs"
+                />
+              </div>
             </div>
           </div>
           <ScrollArea className="min-h-0 flex-1">
@@ -570,8 +599,10 @@ export default function Library({ novelId }: { novelId?: number }) {
           </ScrollArea>
         </section>
 
-        {/* 编辑区 */}
-        <section className="flex min-w-0 flex-1 flex-col bg-card">
+        {/* 编辑区（小屏：仅在选中条目后显示） */}
+        <section
+          className={`flex min-w-0 flex-1 flex-col bg-card ${active ? "" : "max-lg:hidden"}`}
+        >
           {!isEditing && !active ? (
             <div className="flex h-full flex-col items-center justify-center text-xs leading-6 text-muted-foreground">
               <LibraryBig className="mb-3 h-8 w-8 text-primary/30" strokeWidth={1.2} />
@@ -582,6 +613,13 @@ export default function Library({ novelId }: { novelId?: number }) {
           ) : (
             <>
               <div className="flex shrink-0 items-center gap-2 border-b border-border px-4 py-2.5">
+                <button
+                  className="rounded p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground lg:hidden"
+                  title="返回条目列表"
+                  onClick={() => setActive(null)}
+                >
+                  <ArrowLeft className="h-4 w-4" />
+                </button>
                 <Input
                   value={draft.title}
                   onChange={(e) => {
@@ -740,9 +778,9 @@ export default function Library({ novelId }: { novelId?: number }) {
               正在读取璇玑…
             </div>
           ) : (
-            <div className="flex min-h-0 flex-1 gap-3">
-              {/* 文档列表 */}
-              <ScrollArea className="w-64 shrink-0 rounded-md border border-border">
+            <div className="flex min-h-0 flex-1 flex-col gap-3 lg:flex-row">
+              {/* 文档列表（小屏改为上方横向列表，避免双栏在手机上互相挤压） */}
+              <ScrollArea className="max-h-40 w-full shrink-0 rounded-md border border-border lg:max-h-none lg:w-64">
                 <div className="p-1.5">
                   {xjDocs.length === 0 && (
                     <p className="px-2 py-8 text-center text-xs text-muted-foreground">没有文档</p>

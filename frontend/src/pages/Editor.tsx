@@ -2033,9 +2033,11 @@ export default function Editor() {
           )}
         </aside>
 
-        {/* 标题大纲栏（专注模式下隐藏，与章节栏一致） */}
+        {/* 标题大纲栏（专注模式下隐藏，与章节栏一致）；小屏为覆盖式抽屉，不挤压正文 */}
         {outlineOpen && !focus && (
-          <aside className="flex w-52 shrink-0 flex-col border-r border-border bg-card">
+          <>
+            <div className="fixed inset-0 z-30 bg-black/30 lg:hidden" onClick={() => setOutlineOpen(false)} />
+            <aside className="flex w-52 shrink-0 flex-col border-r border-border bg-card max-lg:fixed max-lg:inset-y-0 max-lg:left-0 max-lg:z-40 max-lg:shadow-xl">
             <div className="flex h-11 items-center justify-between border-b border-border px-3">
               <span className="text-xs font-medium text-muted-foreground">大纲</span>
               <Button
@@ -2076,6 +2078,7 @@ export default function Editor() {
               )}
             </ScrollArea>
           </aside>
+          </>
         )}
 
         {/* 写作区 */}
@@ -2410,7 +2413,7 @@ export default function Editor() {
                   <Button
                     variant="ghost"
                     size="icon"
-                    className="h-5 w-5"
+                    className="h-7 w-7 sm:h-5 sm:w-5"
                     title="品质雷达（句长/对话比/段落健康，本地分析）"
                     onClick={() => {
                       setQualityText(editorRef.current?.getText() ?? "");
@@ -2436,7 +2439,7 @@ export default function Editor() {
                       <Button
                         variant="ghost"
                         size="icon"
-                        className="h-5 w-5"
+                        className="h-7 w-7 sm:h-5 sm:w-5"
                         title="排版与标点"
                         disabled={activeId === null || reformatting}
                       >
@@ -2487,7 +2490,7 @@ export default function Editor() {
                   {/* 写作排版偏好：字号 / 行距 / 页宽 */}
                   <DropdownMenu>
                     <DropdownMenuTrigger asChild>
-                      <Button variant="ghost" size="icon" className="h-5 w-5" title="写作排版">
+                      <Button variant="ghost" size="icon" className="h-7 w-7 sm:h-5 sm:w-5" title="写作排版">
                         <Settings2 className="h-3.5 w-3.5" />
                       </Button>
                     </DropdownMenuTrigger>
