@@ -5,10 +5,10 @@
  * 生成立项草案与设定时自动注入（借结构，人物地名全部换新）。
  */
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { BookOpen, Eraser, Loader2, Save, Sparkles, Wand2 } from "lucide-react";
-import { deconstructApi, type AiProject, type ReferenceNote } from "@/lib/api";
+import { aiFactoryApi, deconstructApi, type AiProject, type ReferenceNote } from "@/lib/api";
 import { ReferenceFields, ReferenceUploader, trimForUpload } from "@/components/reference";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -28,6 +28,22 @@ export default function DeconstructCard({
   const [ref, setRef] = useState<ReferenceNote | null>(project.reference ?? null);
 
   const has = !!(ref && (ref.worldview_framework || ref.power_system || ref.pacing));
+
+  // 项目被外部刷新（如他处保存/清空范式）时同步卡片显示；用引用比较避免覆盖用户正在编辑的内容
+  const lastProjectRef = useRef<unknown>(project.reference);
+  useEffect(() => {
+    if (project.reference !== lastProjectRef.current) {
+      lastProjectRef.current = project.reference;
+      setRef(project.reference ?? null);
+    }
+  }, [project.reference]);
+
+  /** 从待拆文本中精确撤回某文件贡献的正文（同步判定，供上传器决定是否移除 chip） */
+  function removeChunk(chunk: string): boolean {
+    if (!text.includes(chunk)) return false;
+    setText(text.replace(chunk, "").replace(/\n{3,}/g, "\n\n").trim());
+    return true;
+  }
 
   async function runDeconstruct() {
     if (text.trim().length < 200) {
@@ -52,7 +68,6 @@ export default function DeconstructCard({
     try {
       await deconstructApi.save(project.id, ref);
       // 保存后刷新项目（让 reference 进入项目状态）
-      const { aiFactoryApi } = await import("@/lib/api");
       onProjectChange(await aiFactoryApi.get(project.id));
       toast.success("范式已保存——生成立项草案和设定时会自动注入");
     } catch (e) {
@@ -66,7 +81,6 @@ export default function DeconstructCard({
     if (!confirm("清空范式笔记？此后立项/设定不再注入参考范式。")) return;
     try {
       await deconstructApi.clear(project.id);
-      const { aiFactoryApi } = await import("@/lib/api");
       setRef(null);
       onProjectChange(await aiFactoryApi.get(project.id));
       toast.success("已清空范式笔记");
@@ -107,7 +121,9 @@ export default function DeconstructCard({
               />
 
               <ReferenceUploader
-                onLoaded={(chunk) => setText((prev) => (prev ? `${prev}\n\n${chunk}` : chunk))}
+                onAdd={(chunk) => setText((prev) => (prev ? `${prev}\n\n${chunk}` : chunk))}
+                onRemove={removeChunk}
+                onClearAll={() => setText("")}
               />
 
               <textarea
@@ -139,7 +155,17 @@ export default function DeconstructCard({
                   清空范式
                 </button>
                 <div className="flex gap-2">
-                  <Button variant="ghost" size="sm" className="h-7 text-xs" onClick={() => setRef(null)}>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-7 text-xs"
+                    title="清空范式与已读入的参考文本，重新开始"
+                    onClick={() => {
+                      setRef(null);
+                      setText("");
+                      setHint("");
+                    }}
+                  >
                     <Sparkles className="mr-1 h-3 w-3" />
                     重新拆一本
                   </Button>

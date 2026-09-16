@@ -29,13 +29,18 @@ export async function decodeTextFile(file: File): Promise<string> {
   }
 }
 
-/** 读取多个文件并拼成一份文本（每个文件前加《文件名》标记） */
+/** 单个文件的读入结果（chunk 是该文件贡献的正文，删除时要按它精确撤回） */
+export interface LoadedFile {
+  name: string;
+  chunk: string;
+}
+
+/** 读取多个文件（每个文件前加《文件名》标记） */
 export async function readFilesToText(
   list: FileList | null
-): Promise<{ text: string; names: string[] } | null> {
+): Promise<LoadedFile[] | null> {
   if (!list || list.length === 0) return null;
-  const chunks: string[] = [];
-  const names: string[] = [];
+  const loaded: LoadedFile[] = [];
   for (const f of Array.from(list)) {
     if (f.size > MAX_FILE_BYTES) {
       toast.error(`《${f.name}》超过 12MB，请拆分后再传`);
@@ -43,14 +48,12 @@ export async function readFilesToText(
     }
     try {
       const content = (await decodeTextFile(f)).replace(/\r\n?/g, "\n");
-      chunks.push(`《${f.name.replace(/\.(txt|md|text)$/i, "")}》\n${content}`);
-      names.push(f.name);
+      loaded.push({ name: f.name, chunk: `《${f.name.replace(/\.(txt|md|text)$/i, "")}》\n${content}` });
     } catch {
       toast.error(`《${f.name}》读取失败`);
     }
   }
-  if (chunks.length === 0) return null;
-  return { text: chunks.join("\n\n"), names };
+  return loaded.length ? loaded : null;
 }
 
 /** 超长文本按首尾采样（服务端还会再采样一次） */
@@ -60,22 +63,44 @@ export function trimForUpload(full: string): string {
 }
 
 export function ReferenceUploader({
-  onLoaded,
+  onAdd,
+  onRemove,
+  onClearAll,
   compact = false,
 }: {
-  onLoaded: (text: string, names: string[]) => void;
+  /** 追加一批文件正文（父组件把它拼进待拆文本） */
+  onAdd: (text: string) => void;
+  /** 请求从待拆文本中撤回某个文件贡献的正文；返回 false 表示已被手动改动、撤不回来 */
+  onRemove: (chunk: string) => boolean;
+  /** 清空待拆文本（连同文件列表） */
+  onClearAll: () => void;
   compact?: boolean;
 }) {
   const fileRef = useRef<HTMLInputElement | null>(null);
-  const [files, setFiles] = useState<string[]>([]);
+  const [files, setFiles] = useState<LoadedFile[]>([]);
   const [dragging, setDragging] = useState(false);
 
   async function handle(list: FileList | null) {
-    const r = await readFilesToText(list);
-    if (!r) return;
-    setFiles((prev) => [...prev, ...r.names]);
-    onLoaded(r.text, r.names);
-    toast.success(`已读取 ${r.names.length} 个文件`);
+    const loaded = await readFilesToText(list);
+    if (!loaded) return;
+    setFiles((prev) => [...prev, ...loaded]);
+    onAdd(loaded.map((f) => f.chunk).join("\n\n"));
+    toast.success(`已读取 ${loaded.length} 个文件`);
+  }
+
+  /** 删除某个文件：只有正文成功撤回才移除 chip，避免「界面说删了、实际还在送模型」 */
+  function removeAt(i: number) {
+    const target = files[i];
+    if (!onRemove(target.chunk)) {
+      toast.error(`《${target.name}》的正文已被手动修改，无法自动撤回——请在文本框里手动删减`);
+      return;
+    }
+    setFiles((prev) => prev.filter((_, j) => j !== i));
+  }
+
+  function clearAll() {
+    setFiles([]);
+    onClearAll();
   }
 
   return (
@@ -120,18 +145,23 @@ export function ReferenceUploader({
       {files.length > 0 && (
         <div className="flex flex-wrap items-center gap-1.5">
           {files.map((f, i) => (
-            <span key={i} className="flex items-center gap-1 rounded bg-muted px-1.5 py-0.5 text-[11px]">
-              {f}
+            <span key={`${f.name}-${i}`} className="flex items-center gap-1 rounded bg-muted px-1.5 py-0.5 text-[11px]">
+              {f.name}
               <button
+                title="移除该文件（连同已读入的正文）"
                 className="text-muted-foreground hover:text-destructive"
-                onClick={() => setFiles((prev) => prev.filter((_, j) => j !== i))}
+                onClick={() => removeAt(i)}
               >
                 <X className="h-3 w-3" />
               </button>
             </span>
           ))}
-          <button className="text-[11px] text-muted-foreground hover:text-foreground" onClick={() => setFiles([])}>
-            清空列表
+          <button
+            className="text-[11px] text-muted-foreground hover:text-foreground"
+            title="清空已读入的正文（含手动粘贴的部分）"
+            onClick={clearAll}
+          >
+            清空文本
           </button>
         </div>
       )}

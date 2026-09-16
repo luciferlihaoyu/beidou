@@ -13,7 +13,9 @@
 from __future__ import annotations
 
 import json
+import time
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -26,7 +28,11 @@ from .ai_factory import _SYSTEM, _chat_text, _get_project, _parse_json, _pick_co
 
 router = APIRouter(prefix="/api/ai-factory", tags=["ai-factory"])
 
-MAX_DECONSTRUCT_CHARS = 300_000
+# 硬上限：只为挡住超大请求体（一份完整长篇约 1-3M 字）。采样交给 _sample，
+# 绝不能在这里先盲截断——此前 `text[:300_000]` 会把客户端特意附在尾部的
+# 6 万字（后期节奏/烂尾段）整段切掉，之后 _sample 再取的「尾」其实是开头的中段，
+# 与「首尾兼顾」的设计意图相悖。
+MAX_DECONSTRUCT_CHARS = 2_000_000
 SAMPLE_CHARS = 60_000  # 送模型的采样长度（首 4 万 + 尾 2 万，兼顾开篇与后期节奏）
 
 _REF_SCHEMA = """{
@@ -60,8 +66,26 @@ _DECONSTRUCT_PROMPT = """你在为一位网文作者做「拆书学习」——�
 """
 
 
+# 频率限制：拆书是单次 6 万字级 + 4000 tokens 的重调用，防止误点/脚本刷。
+# 进程内计数即可（本服务单实例部署，不做分布式限流）。
+_RATE_LIMIT_SECONDS = 10  # 两次拆书最小间隔
+_RATE_LIMIT_MAX_PER_HOUR = 30
+_recent_calls: dict[int, list[float]] = {}
+
+
+def _check_rate_limit(user_id: int) -> None:
+    now = time.time()
+    calls = [t for t in _recent_calls.get(user_id, []) if now - t < 3600]
+    if calls and now - calls[-1] < _RATE_LIMIT_SECONDS:
+        raise HTTPException(429, f"拆书请求太频繁，请等 {_RATE_LIMIT_SECONDS} 秒后再试")
+    if len(calls) >= _RATE_LIMIT_MAX_PER_HOUR:
+        raise HTTPException(429, f"每小时最多拆书 {_RATE_LIMIT_MAX_PER_HOUR} 次，请稍后再试")
+    calls.append(now)
+    _recent_calls[user_id] = calls
+
+
 class DeconstructIn(BaseModel):
-    text: str = Field(min_length=200)
+    text: str = Field(min_length=200, max_length=MAX_DECONSTRUCT_CHARS)  # 超限直接 422，不进采样
     title_hint: str = Field(default="", max_length=100)
 
 
@@ -82,13 +106,20 @@ def _sample(text: str) -> str:
 @router.post("/deconstruct")
 async def deconstruct_book(data: DeconstructIn, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     """拆书学习：参考书文本 → 范式笔记 JSON（不落库，前端确认后可保存到项目）。"""
-    text = data.text[:MAX_DECONSTRUCT_CHARS]
+    text = data.text
     if len(text.strip()) < 200:
         raise HTTPException(400, "参考书文本太短，至少粘 200 字（建议整本或前几万字）")
+    _check_rate_limit(user.id)
     config = await _pick_config(user, db, "")
     prompt = _DECONSTRUCT_PROMPT.format(title_hint=data.title_hint or "（未提供）", text=_sample(text), schema=_REF_SCHEMA)
     usage: dict = {}
-    raw = await _chat_text(config, _SYSTEM, prompt, max_tokens=4000, usage_sink=usage)
+    try:
+        raw = await _chat_text(config, _SYSTEM, prompt, max_tokens=4000, usage_sink=usage)
+    except httpx.TimeoutException as e:
+        # 上游超时（_chat_text 内部 180s）——裸 500 会让前端只看到「请求失败 (500)」
+        raise HTTPException(504, "AI 接口超时（180 秒未返回），请重试或换一段更短的参考文本") from e
+    except httpx.HTTPError as e:
+        raise HTTPException(502, f"AI 接口请求失败：{e}") from e
     try:
         ref = _parse_json(raw)
     except ValueError as e:

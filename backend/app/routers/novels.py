@@ -40,7 +40,7 @@ class NovelOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
-async def _with_stats(db: AsyncSession, novels: list[Novel]) -> list[NovelOut]:
+async def _with_stats(db: AsyncSession, novels: list[Novel], user_id: int) -> list[NovelOut]:
     if not novels:
         return []
     ids = [n.id for n in novels]
@@ -51,7 +51,11 @@ async def _with_stats(db: AsyncSession, novels: list[Novel]) -> list[NovelOut]:
     )
     stats = {row[0]: (row[1], row[2]) for row in result.all()}
     # AI 工厂生成的小说：回填项目 id，供书架「跳回 AI 工厂」使用
-    proj_result = await db.execute(select(AiProject.novel_id, AiProject.id).where(AiProject.novel_id.in_(ids)))
+    proj_result = await db.execute(
+        select(AiProject.novel_id, AiProject.id).where(
+            AiProject.novel_id.in_(ids), AiProject.user_id == user_id
+        )
+    )
     projects = {row[0]: row[1] for row in proj_result.all() if row[0] is not None}
     out = []
     for n in novels:
@@ -69,7 +73,7 @@ async def list_novels(user: User = Depends(get_current_user), db: AsyncSession =
     if user.role != "admin":
         query = query.where(Novel.user_id == user.id)
     result = await db.execute(query)
-    return await _with_stats(db, list(result.scalars().all()))
+    return await _with_stats(db, list(result.scalars().all()), user.id)
 
 
 @router.post("", response_model=NovelOut)
@@ -83,7 +87,7 @@ async def create_novel(data: NovelIn, user: User = Depends(get_current_user), db
 
 @router.get("/{novel_id}", response_model=NovelOut)
 async def get_novel(novel: Novel = Depends(get_owned_novel), db: AsyncSession = Depends(get_db)):
-    return (await _with_stats(db, [novel]))[0]
+    return (await _with_stats(db, [novel], novel.user_id))[0]
 
 
 @router.put("/{novel_id}", response_model=NovelOut)
@@ -96,7 +100,7 @@ async def update_novel(
         setattr(novel, key, value)
     await db.commit()
     await db.refresh(novel)
-    return (await _with_stats(db, [novel]))[0]
+    return (await _with_stats(db, [novel], novel.user_id))[0]
 
 
 class GoalIn(BaseModel):

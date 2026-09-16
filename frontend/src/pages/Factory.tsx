@@ -264,7 +264,13 @@ export default function Factory() {
                   </p>
                   <ReferenceUploader
                     compact
-                    onLoaded={(text) => setRefText((prev) => (prev ? `${prev}\n\n${text}` : text))}
+                    onAdd={(text) => setRefText((prev) => (prev ? `${prev}\n\n${text}` : text))}
+                    onRemove={(chunk) => {
+                      if (!refText.includes(chunk)) return false;
+                      setRefText(refText.replace(chunk, "").replace(/\n{3,}/g, "\n\n").trim());
+                      return true;
+                    }}
+                    onClearAll={() => setRefText("")}
                   />
                   <textarea
                     className="min-h-24 w-full rounded-md border border-border bg-transparent px-2.5 py-1.5 font-content text-xs leading-6"

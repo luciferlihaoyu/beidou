@@ -373,7 +373,12 @@ async def run_nightly_for_project(project_id: int, user_id: int) -> dict:
         finals = [r for r in results if not r.get("retry")]
         done = sum(1 for r in finals if r.get("ok"))
         report = {
-            "date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+            # 日期必须与判定侧（nightly_tick 的 _nightly_now，默认作者时区）同一时钟。
+            # 历史 bug：此处曾写 UTC 日期而判定侧读作者时区日期——窗口 2-4 点 CST
+            # 对应 UTC 前一天 18-20 点，存进去的日期恒为「昨天」，判重永远失效，
+            # tick 每 30 分钟一跳会把整晚的 pending 章节全部跑完（节流形同虚设）。
+            "date": _nightly_now().strftime("%Y-%m-%d"),
+            "ts": _nightly_now().timestamp(),
             "done": done,
             "total": len(finals),
             "chapters": [r for r in finals if r.get("ok")],
@@ -383,6 +388,41 @@ async def run_nightly_for_project(project_id: int, user_id: int) -> dict:
         p.nightly_last_run = json.dumps(report, ensure_ascii=False)
         await db.commit()
         return report
+
+
+# 两次夜跑之间的最小间隔：小于它即视为「同一晚已经跑过」（窗口 2-4 点共 3 小时，
+# 留足 20 小时意味着「今晚跑过就不会在明晚之前再跑」）。用时间戳判定而非日期字符串，
+# 这样既不受时区影响，也能兼容历史上按 UTC 写入日期的旧战报。
+NIGHTLY_MIN_INTERVAL_SECONDS = 20 * 3600
+
+
+def _already_ran_this_night(last_run: str | None, now: datetime, today: str) -> bool:
+    """判断本项目在本次夜间窗口内是否已经跑过。
+
+    1) 有 ts（新格式）→ 距上次 < 20 小时即视为已跑
+    2) 无 ts（历史数据）→ 日期等于「今天」或「昨天」即视为已跑
+       （历史写入用 UTC，窗口内会写成作者时区的昨天，故必须一并认）
+    """
+    if not last_run:
+        return False
+    try:
+        data = json.loads(last_run)
+    except (json.JSONDecodeError, TypeError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    ts = data.get("ts")
+    if isinstance(ts, (int, float)):
+        return (now.timestamp() - float(ts)) < NIGHTLY_MIN_INTERVAL_SECONDS
+    date = data.get("date")
+    if not isinstance(date, str):
+        return False
+    if date == today:
+        return True
+    try:
+        return (datetime.strptime(today, "%Y-%m-%d") - datetime.strptime(date, "%Y-%m-%d")).days <= 1
+    except ValueError:
+        return False
 
 
 async def nightly_tick() -> int:
@@ -399,12 +439,8 @@ async def nightly_tick() -> int:
         )
         todo = []
         for p in projects:
-            if p.nightly_last_run:
-                try:
-                    if json.loads(p.nightly_last_run).get("date") == today:
-                        continue  # 今日已跑
-                except (json.JSONDecodeError, TypeError):
-                    pass
+            if _already_ran_this_night(p.nightly_last_run, now, today):
+                continue
             todo.append((p.id, p.user_id))
     n = 0
     for project_id, user_id in todo:

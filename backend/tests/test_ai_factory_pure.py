@@ -320,3 +320,64 @@ class TestNightlyWindowTimezone:
 
         os.environ.pop("BEIDOU_NIGHTLY_TZ")
         importlib.reload(nightly)
+
+
+class TestNightlyDedup:
+    """夜跑判重：修 Critical（写入侧曾用 UTC 日期，判定侧用作者时区日期 → 判重永远失效）。
+
+    契约：同一晚窗口内多次 tick 只能跑一次；次日窗口必须能再跑。
+    """
+
+    def _now(self, hour=3, tz="Asia/Shanghai"):
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+
+        return datetime(2026, 9, 17, hour, 0, tzinfo=ZoneInfo(tz))
+
+    def test_same_night_repeat_blocked_by_ts(self):
+        from app.nightly import _already_ran_this_night
+
+        now = self._now(3)
+        last = json.dumps({"date": "2026-09-17", "ts": now.timestamp() - 1800})  # 半小时前
+        assert _already_ran_this_night(last, now, "2026-09-17") is True
+
+    def test_next_night_allowed_by_ts(self):
+        from app.nightly import _already_ran_this_night
+
+        now = self._now(3)
+        last = json.dumps({"date": "2026-09-16", "ts": now.timestamp() - 24 * 3600})
+        assert _already_ran_this_night(last, now, "2026-09-17") is False
+
+    def test_legacy_utc_date_within_window_blocked(self):
+        """历史数据（无 ts，按 UTC 写的日期）：窗口内跑过后，后续 tick 必须判为已跑。
+
+        这是被修复的原始 bug：2 点 CST = 前一天 18 点 UTC，写入 date=昨天，
+        而判定侧算 today=今天，旧实现直接漏判 → 每 30 分钟重复跑。
+        """
+        from app.nightly import _already_ran_this_night
+
+        now = self._now(3)
+        assert _already_ran_this_night(json.dumps({"date": "2026-09-16"}), now, "2026-09-17") is True
+
+    def test_legacy_old_date_allowed(self):
+        from app.nightly import _already_ran_this_night
+
+        now = self._now(3)
+        assert _already_ran_this_night(json.dumps({"date": "2026-09-14"}), now, "2026-09-17") is False
+
+    def test_garbage_and_empty_are_not_treated_as_ran(self):
+        from app.nightly import _already_ran_this_night
+
+        now = self._now(3)
+        for bad in (None, "", "{不是JSON", "[]", json.dumps({"date": 123})):
+            assert _already_ran_this_night(bad, now, "2026-09-17") is False
+
+    def test_write_side_uses_author_timezone_date(self):
+        """写入侧的日期必须与判定侧同源：断言代码里不再出现 datetime.now(timezone.utc) 写 date。"""
+        from pathlib import Path
+
+        src = Path("app/nightly.py").read_text(encoding="utf-8")
+        report_block = src[src.index("report = {"): src.index("report = {") + 400]
+        assert '"date": _nightly_now()' in report_block
+        assert 'datetime.now(timezone.utc).strftime("%Y-%m-%d")' not in report_block
+        assert '"ts": _nightly_now().timestamp()' in report_block
