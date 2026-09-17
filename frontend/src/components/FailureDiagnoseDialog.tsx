@@ -7,7 +7,7 @@
 
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
-import { AlertTriangle, CloudCog, Loader2, RefreshCw, Settings2 } from "lucide-react";
+import { AlertTriangle, CloudCog, Loader2, RefreshCw, Settings2, Trash2 } from "lucide-react";
 import { aiFactoryFailApi, type AiChapterJob, type JobDiagnosis } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import {
@@ -47,6 +47,20 @@ export default function FailureDiagnoseDialog({
       .finally(() => setLoading(false));
   }, [open, job, projectId]);
 
+  async function removeJob() {
+    if (!job) return;
+    setRetrying(true);
+    try {
+      await aiFactoryFailApi.deleteJob(projectId, job.id);
+      toast.success("任务已删除——可在章节列表为对应章节重建任务");
+      onOpenChange(false);
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "删除失败");
+    } finally {
+      setRetrying(false);
+    }
+  }
+
   async function retry() {
     if (!job) return;
     setRetrying(true);
@@ -85,7 +99,24 @@ export default function FailureDiagnoseDialog({
 
         {!loading && data && (
           <div className="space-y-3 text-sm">
-            {data.reason ? (
+            {data.orphan && (
+              <div className="rounded-md border border-amber-500/40 bg-amber-500/5 p-3">
+                <p className="font-medium text-amber-600 dark:text-amber-400">任务已失去关联章节</p>
+                <p className="mt-1 text-xs leading-5 text-muted-foreground">{data.orphan_hint}</p>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="mt-2 h-7 text-xs"
+                  disabled={retrying}
+                  onClick={() => void removeJob()}
+                >
+                  <Trash2 className="mr-1 h-3 w-3" />
+                  删除这个任务
+                </Button>
+              </div>
+            )}
+
+            {!data.orphan && data.reason ? (
               <div className="rounded-md border border-destructive/40 bg-destructive/5 p-3">
                 <p className="font-medium text-destructive">{data.reason.title}</p>
                 <p className="mt-1 flex items-start gap-1.5 text-xs leading-5 text-muted-foreground">
@@ -99,7 +130,7 @@ export default function FailureDiagnoseDialog({
                   </pre>
                 </details>
               </div>
-            ) : (
+            ) : data.orphan ? null : (
               <div className="rounded-md border border-border p-3 text-xs text-muted-foreground">
                 这个任务没有失败记录（可能尚未生成，或失败原因产生于本功能上线之前）。
                 直接重试即可；若再次失败，这里会显示具体原因。

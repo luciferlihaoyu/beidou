@@ -929,6 +929,8 @@ export interface JobDiagnosis {
   context_chars: number;
   context_tokens_est: number;
   context_error: string;
+  orphan: boolean;
+  orphan_hint: string;
   own_configs: { chapter_llm: string; summary_llm: string; review_llm: string };
 }
 
@@ -941,6 +943,9 @@ export const aiFactoryFailApi = {
     ),
   diagnose: (projectId: number, jobId: number) =>
     api.get<JobDiagnosis>(`/api/ai-factory/projects/${projectId}/jobs/${jobId}/diagnose`),
+  /** 删除任务（清理失去关联章节、永远生成不了的死结任务） */
+  deleteJob: (projectId: number, jobId: number) =>
+    api.delete<{ ok: boolean }>(`/api/ai-factory/projects/${projectId}/jobs/${jobId}`),
   /** 一键重试全部失败章节（后台执行） */
   retryFailed: (projectId: number, count = 3) =>
     api.post<{ queued: number; job_ids: number[] }>(

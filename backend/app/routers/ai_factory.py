@@ -1079,10 +1079,20 @@ async def diagnose_job(
                 ctx_error = f"{exc.__class__.__name__}: {exc}"[:200]
 
     info = classify_failure(job.last_error)
+    # 失去关联章节的任务（章节被删过 → FK ondelete SET NULL）永远生成不了：
+    # generate 端点会直接 404「章节任务不存在」，这是用户完全没有出路的死结。
+    orphan = job.chapter_id is None
     return {
         "status": job.status,
         "attempt": job.attempt,
         "last_error": job.last_error,
+        "orphan": orphan,
+        "orphan_hint": (
+            "该任务已失去关联章节（原章节可能被删除或重建过），因此每次生成都会 404。"
+            "重试没用——请删除这个任务，再在章节列表里为对应章节重新建任务。"
+            if orphan
+            else ""
+        ),
         "reason": info.as_dict() if job.last_error else None,
         # 中文按 ~1.5 字/token 粗估，只作量级参考
         "context_chars": ctx_chars,
@@ -1094,6 +1104,23 @@ async def diagnose_job(
             "review_llm": p.review_llm or "(跟随默认)",
         },
     }
+
+
+@router.delete("/projects/{project_id}/jobs/{job_id}")
+async def delete_job(
+    project_id: int,
+    job_id: int,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """删除章节任务（用于清理失去关联章节、永远无法生成的死结任务）。"""
+    p = await _get_project(project_id, user, db)
+    job = await db.get(AiChapterJob, job_id)
+    if job is None or job.project_id != p.id:
+        raise HTTPException(404, "章节任务不存在")
+    await db.delete(job)
+    await db.commit()
+    return {"ok": True}
 
 
 class RetryFailedIn(BaseModel):
