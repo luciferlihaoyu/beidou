@@ -19,9 +19,11 @@ import {
   Wand2,
   CloudCog,
   Square,
+  AlertTriangle,
 } from "lucide-react";
-import { aiFactoryApi, aiFactoryBg, aiFactoryM2, aiFactoryM3, aiFactoryM6, aiFactoryM7, aiFactoryM9, streamPost, type AiChapterJob, type AiProject, type BgBatchStatus, type HookAlert } from "@/lib/api";
+import { aiFactoryApi, aiFactoryBg, aiFactoryFailApi, aiFactoryM2, aiFactoryM3, aiFactoryM6, aiFactoryM7, aiFactoryM9, streamPost, type AiChapterJob, type AiProject, type BgBatchStatus, type HookAlert } from "@/lib/api";
 import { M3Toolbar, RetentionPanel } from "@/components/FactoryM3";
+import FailureDiagnoseDialog from "@/components/FailureDiagnoseDialog";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -73,6 +75,9 @@ export default function ChapterGenPanel({
 
   // ---------- 后台连跑状态轮询 ----------
   const [bg, setBg] = useState<BgBatchStatus | null>(null);
+  const [diagJob, setDiagJob] = useState<AiChapterJob | null>(null);
+  const failedJobs = jobs.filter((j) => j.status === "failed");
+  const [retryBusy, setRetryBusy] = useState(false);
   const bgWasRunning = useRef(false);
   useEffect(() => {
     let timer: ReturnType<typeof setInterval> | null = null;
@@ -137,9 +142,29 @@ export default function ChapterGenPanel({
       ctrl.signal
     )
       .catch((e) => {
-        if (!ctrl.signal.aborted) toast.error(e instanceof Error ? e.message : "生成失败");
+        if (ctrl.signal.aborted) return;
+        const msg = e instanceof Error ? e.message : "生成失败";
+        toast.error(msg);
+        // 把失败原因回写服务端：SSE 的错误只有前端看得到，不回写就只剩「失败」二字
+        void aiFactoryFailApi
+          .markFailed(project.id, job.id, msg)
+          .then(() => loadJobs())
+          .catch(() => {});
       })
       .finally(() => setGenBusy(false));
+  }
+
+  async function retryAllFailed() {
+    setRetryBusy(true);
+    try {
+      const r = await aiFactoryFailApi.retryFailed(project.id, 3);
+      toast.success(`已排入后台重试 ${r.queued} 章——进度见顶部状态卡`);
+      loadJobs();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "重试失败");
+    } finally {
+      setRetryBusy(false);
+    }
   }
 
   async function finalize() {
@@ -288,6 +313,26 @@ export default function ChapterGenPanel({
             （输入 {(project.tokens_prompt / 1000).toFixed(1)}K / 输出 {(project.tokens_completion / 1000).toFixed(1)}K，含估算）
           </p>
         )}
+        {failedJobs.length > 0 && (
+          <div className="mb-2 flex items-center justify-between gap-2 rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-xs">
+            <span className="flex items-center gap-1.5 text-destructive">
+              <AlertTriangle className="h-3.5 w-3.5" />
+              {failedJobs.length} 章生成失败——点每行的「为什么失败」看原因
+            </span>
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-7 text-xs"
+              disabled={retryBusy}
+              title="后台依次重试失败章节（一次最多 3 章，避免额度和上下文一起打满）"
+              onClick={() => void retryAllFailed()}
+            >
+              {retryBusy ? <Loader2 className="mr-1 h-3 w-3 animate-spin" /> : <RefreshCw className="mr-1 h-3 w-3" />}
+              重试失败章节
+            </Button>
+          </div>
+        )}
+
         {/* 后台连跑状态（窗口可关，这里实时可见） */}
         {bg && (bg.running || bg.results.length > 0) && (
           <div className="rounded-md border border-sky-500/30 bg-sky-500/5 px-3 py-2 text-xs">
@@ -439,6 +484,18 @@ export default function ChapterGenPanel({
                       生成
                     </>
                   )}
+                </Button>
+              )}
+              {j.status === "failed" && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-7 px-2 text-xs text-destructive"
+                  title={j.last_error || "查看失败原因与诊断"}
+                  onClick={() => setDiagJob(j)}
+                >
+                  <AlertTriangle className="mr-1 h-3 w-3" />
+                  为什么失败
                 </Button>
               )}
               {(j.status === "pending" || j.status === "failed") && (
@@ -626,6 +683,14 @@ export default function ChapterGenPanel({
           setRewriteJob(null);
           loadJobs();
         }}
+      />
+
+      <FailureDiagnoseDialog
+        open={!!diagJob}
+        onOpenChange={(v) => !v && setDiagJob(null)}
+        projectId={project.id}
+        job={diagJob}
+        onRetry={(j) => startGenerate(j)}
       />
     </div>
   );

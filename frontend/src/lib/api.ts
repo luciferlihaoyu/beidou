@@ -509,6 +509,8 @@ export interface AiChapterJob {
   review_score: number | null;
   summary: string;
   finished_at: string | null;
+  last_error?: string;
+  last_error_code?: string;
 }
 
 export const aiFactoryM2 = {
@@ -908,4 +910,41 @@ export const deconstructApi = {
   save: (projectId: number, reference: ReferenceNote) =>
     api.put<{ ok: boolean; reference: ReferenceNote }>(`/api/ai-factory/projects/${projectId}/reference`, { reference }),
   clear: (projectId: number) => api.delete<{ ok: boolean }>(`/api/ai-factory/projects/${projectId}/reference`),
+};
+
+/** 章节生成失败：分类后的「病因 + 怎么办」 */
+export interface FailureReason {
+  code: string;
+  title: string;
+  hint: string;
+  raw: string;
+}
+
+/** 单章诊断结果（为什么失败 / 本次上下文规模） */
+export interface JobDiagnosis {
+  status: string;
+  attempt: number;
+  last_error: string;
+  reason: FailureReason | null;
+  context_chars: number;
+  context_tokens_est: number;
+  context_error: string;
+  own_configs: { chapter_llm: string; summary_llm: string; review_llm: string };
+}
+
+export const aiFactoryFailApi = {
+  /** 前台流式生成失败时回写原因（否则服务端只剩一个 status=failed） */
+  markFailed: (projectId: number, jobId: number, error: string) =>
+    api.post<{ ok: boolean; reason: FailureReason }>(
+      `/api/ai-factory/projects/${projectId}/jobs/${jobId}/fail`,
+      { error }
+    ),
+  diagnose: (projectId: number, jobId: number) =>
+    api.get<JobDiagnosis>(`/api/ai-factory/projects/${projectId}/jobs/${jobId}/diagnose`),
+  /** 一键重试全部失败章节（后台执行） */
+  retryFailed: (projectId: number, count = 3) =>
+    api.post<{ queued: number; job_ids: number[] }>(
+      `/api/ai-factory/projects/${projectId}/retry-failed`,
+      { count }
+    ),
 };

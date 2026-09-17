@@ -402,6 +402,10 @@ class AiChapterJob(Base):
     retention_json: Mapped[str] = mapped_column(Text, default="")  # 追读力提取 JSON：hooks/cool_points（M3）
     actual_words: Mapped[int] = mapped_column(default=0)
     attempt: Mapped[int] = mapped_column(default=0)
+    # 最近一次失败原因（原始错误 + 分类码），供前端显示可操作的提示；
+    # 此前只存 status="failed"，失败原因随进程丢失，用户只看到「失败」两个字
+    last_error: Mapped[str] = mapped_column(Text, default="")
+    last_error_code: Mapped[str] = mapped_column(String(30), default="")
     created_at: Mapped[datetime] = mapped_column(default=utcnow)
     finished_at: Mapped[datetime | None] = mapped_column(nullable=True)
 

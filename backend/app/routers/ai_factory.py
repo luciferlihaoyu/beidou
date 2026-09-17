@@ -25,6 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import get_db
 from ..deps import get_ai_config, get_current_user
+from ..failure_kinds import classify_failure
 from ..models import AIConfig, AiChapterJob, AiProject, Chapter, Character, IntegrationConfig, Novel, User, Volume, WorldviewEntry
 
 router = APIRouter(prefix="/api/ai-factory", tags=["ai-factory"])
@@ -1017,6 +1018,131 @@ async def generate_chapter(
         "对话生动，章末留钩子。严格遵守角色卡与状态文件的一致性。"
     )
     return await _stream_openai(config, [{"role": "system", "content": system}, {"role": "user", "content": context}])
+
+
+class FailIn(BaseModel):
+    error: str = Field(default="", max_length=2000)
+
+
+@router.post("/projects/{project_id}/jobs/{job_id}/fail")
+async def mark_job_failed(
+    project_id: int,
+    job_id: int,
+    data: FailIn,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """前台流式生成失败时由前端回写原因。
+
+    SSE 的错误事件只有前端能看到，若不回写，服务端只剩一个 status=failed，
+    用户事后完全无法知道失败原因（本次修复的核心问题）。
+    """
+    p = await _get_project(project_id, user, db)
+    job = await db.get(AiChapterJob, job_id)
+    if job is None or job.project_id != p.id:
+        raise HTTPException(404, "章节任务不存在")
+    info = classify_failure(data.error)
+    job.status = "failed"
+    job.last_error = (data.error or "")[:2000]
+    job.last_error_code = info.code
+    await db.commit()
+    return {"ok": True, "reason": info.as_dict()}
+
+
+@router.get("/projects/{project_id}/jobs/{job_id}/diagnose")
+async def diagnose_job(
+    project_id: int,
+    job_id: int,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """诊断本章为什么失败/该改什么：失败分类 + 本次会送出的上下文规模。
+
+    上下文规模很有用——后期章节失败常因上下文膨胀，这里直接给出字符数与
+    估算 token，用户不用猜。
+    """
+    p = await _get_project(project_id, user, db)
+    job = await db.get(AiChapterJob, job_id)
+    if job is None or job.project_id != p.id:
+        raise HTTPException(404, "章节任务不存在")
+
+    ctx_chars = 0
+    ctx_error = ""
+    if p.novel_id is not None and job.chapter_id is not None:
+        chapter = await db.get(Chapter, job.chapter_id)
+        novel = await db.get(Novel, p.novel_id)
+        if chapter is not None and novel is not None:
+            try:
+                ctx = await _assemble_context(p, novel, chapter, job, db)
+                ctx_chars = len(ctx)
+            except Exception as exc:  # noqa: BLE001  诊断本身不该抛错
+                ctx_error = f"{exc.__class__.__name__}: {exc}"[:200]
+
+    info = classify_failure(job.last_error)
+    return {
+        "status": job.status,
+        "attempt": job.attempt,
+        "last_error": job.last_error,
+        "reason": info.as_dict() if job.last_error else None,
+        # 中文按 ~1.5 字/token 粗估，只作量级参考
+        "context_chars": ctx_chars,
+        "context_tokens_est": int(ctx_chars / 1.5),
+        "context_error": ctx_error,
+        "own_configs": {
+            "chapter_llm": p.chapter_llm or "(跟随默认)",
+            "summary_llm": p.summary_llm or "(跟随默认)",
+            "review_llm": p.review_llm or "(跟随默认)",
+        },
+    }
+
+
+class RetryFailedIn(BaseModel):
+    count: int = Field(default=3, ge=1, le=20)  # 本次最多重试几章
+
+
+class RetryFailedOut(BaseModel):
+    queued: int
+    job_ids: list[int]
+
+
+@router.post("/projects/{project_id}/retry-failed", response_model=RetryFailedOut)
+async def retry_failed_jobs(
+    project_id: int,
+    data: RetryFailedIn,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """一键重试全部失败章节（后台执行，可关页面）。
+
+    count 限制本次重试上限，避免几十章一起把额度和上下文都打满。
+    """
+    from ..nightly import start_batch_background
+
+    p = await _get_project(project_id, user, db)
+    jobs = (
+        (
+            await db.execute(
+                select(AiChapterJob)
+                .where(AiChapterJob.project_id == p.id, AiChapterJob.status == "failed")
+                .order_by(AiChapterJob.id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if not jobs:
+        raise HTTPException(400, "没有失败的章节需要重试")
+    limit = max(1, min(data.count or 3, 20))
+    picked = [j for j in jobs if j.chapter_id][:limit]
+    if not picked:
+        raise HTTPException(400, "失败章节缺少关联章节，无法重试")
+    for j in picked:
+        j.status = "pending"
+        j.last_error = ""
+        j.last_error_code = ""
+    await db.commit()
+    status = await start_batch_background(p.id, p.user_id, len(picked), [j.id for j in picked])
+    return {"queued": len(picked), "job_ids": [j.id for j in picked], **({"status": status} if status else {})}
 
 
 class FinalizeIn(BaseModel):

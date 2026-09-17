@@ -224,12 +224,19 @@ async def _generate_one_with_retry(p: AiProject, novel: Novel, job: AiChapterJob
             r["retried"] = True
             return r
         except Exception as exc:  # noqa: BLE001  二次失败才放弃
+            from .failure_kinds import classify_failure
+
+            reason = f"重试后仍失败：{exc.__class__.__name__}: {exc}"[:2000]
             job.status = "failed"
+            # 落库失败原因：否则用户事后只看到 status=failed，无从判断该改什么
+            job.last_error = reason
+            job.last_error_code = classify_failure(reason).code
             await db.commit()
             return {
                 "title": chapter_display_title(chapter.title, num),
                 "ok": False,
-                "error": f"重试后仍失败：{exc}"[:120],
+                "error": reason[:120],
+                "reason_code": job.last_error_code,
             }
 
 
@@ -262,7 +269,16 @@ async def _generate_one(p: AiProject, novel: Novel, job: AiChapterJob, chapter: 
     if len(text) < 100:
         job.status = "failed"
         await db.commit()
-        return {"title": chapter_display_title(chapter.title, num), "ok": False, "error": "生成内容过短"}
+        job.status = "failed"
+        job.last_error = "模型返回内容过短（不足 200 字）"
+        job.last_error_code = "empty_output"
+        await db.commit()
+        return {
+            "title": chapter_display_title(chapter.title, num),
+            "ok": False,
+            "error": "生成内容过短",
+            "reason_code": "empty_output",
+        }
 
     # AI 味检测 + 自动改写（与 batch_run 同阈值）
     report = detect(text)
@@ -499,7 +515,7 @@ async def run_batch_background(project_id: int, user_id: int, count: int, job_id
             low_streak = 0
             for job in pending:
                 if entry.get("stop_requested"):
-                    entry["results"].append({"ok": False, "error": "已手动停止"})
+                    entry["results"].append({"ok": False, "error": "已手动停止", "reason_code": "stopped"})
                     break
                 chapter = await db.get(Chapter, job.chapter_id)
                 if chapter is None:

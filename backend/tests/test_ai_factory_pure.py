@@ -442,3 +442,84 @@ class TestDeconstructGuards:
         out = _sample(uploaded)
         assert out.startswith("甲")
         assert out.rstrip().endswith("乙")
+
+
+class TestFailureClassification:
+    """失败分类：把上游报错翻译成「病因 + 怎么办」（此前只存 status=failed，用户无从判断）。"""
+
+    def _c(self, raw):
+        from app.failure_kinds import classify_failure
+
+        return classify_failure(raw)
+
+    def test_auth(self):
+        for raw in ("AI 接口返回 401: invalid api key", "403 forbidden", "Unauthorized"):
+            info = self._c(raw)
+            assert info.code == "auth", raw
+            assert "API Key" in info.hint
+
+    def test_quota(self):
+        for raw in ("AI 接口返回 429: rate limit exceeded", "insufficient balance", "402"):
+            assert self._c(raw).code == "quota", raw
+
+    def test_context_too_long(self):
+        raw = "AI 接口返回 400: This model's maximum context length is 8192 tokens"
+        info = self._c(raw)
+        assert info.code == "context_too_long"
+        assert "上下文" in info.hint
+
+    def test_model_not_found(self):
+        assert self._c("AI 接口返回 404: model not found").code == "model_not_found"
+
+    def test_timeout_and_network(self):
+        assert self._c("httpx.TimeoutException: timed out").code == "timeout"
+        assert self._c("无法连接 AI 接口: ConnectError").code == "network"
+
+    def test_empty_and_json_and_gate(self):
+        assert self._c("模型返回内容过短（不足 200 字）").code == "empty_output"
+        assert self._c("AI 输出解析失败：Expecting value").code == "bad_json"
+        assert self._c("质量门禁：连续 2 章 AI 味 <60，提前收工").code == "quality_gate"
+
+    def test_unknown_is_safe(self):
+        info = self._c("某种没见过的错误")
+        assert info.code == "unknown"
+        assert info.title and info.hint
+        assert self._c(None).code == "unknown"  # 不抛异常
+        assert len(self._c("x" * 5000).as_dict()["raw"]) == 1000  # 截断，避免落库过大
+
+    def test_every_kind_has_title_and_hint(self):
+        from app.failure_kinds import KINDS
+
+        for code, (title, hint) in KINDS.items():
+            assert title and hint, code
+
+
+class TestOpenApiAndRoutes:
+    """OpenAPI 必须能生成：`from __future__ import annotations` 会把未导入的类型
+    变成字符串，NameError 被推迟到 openapi() 才暴露（本次真实踩到过——新端点用了
+    未导入的 BgStartIn，import 全绿但 openapi() 抛 class-not-fully-defined）。"""
+
+    def test_openapi_generates(self):
+        from app.main import app
+
+        schema = app.openapi()
+        assert len(schema["paths"]) > 50
+
+    def test_failure_endpoints_registered(self):
+        from app.main import app
+
+        paths = app.openapi()["paths"]
+        assert "/api/ai-factory/projects/{project_id}/jobs/{job_id}/fail" in paths
+        assert "/api/ai-factory/projects/{project_id}/jobs/{job_id}/diagnose" in paths
+        assert "/api/ai-factory/projects/{project_id}/retry-failed" in paths
+
+    def test_retry_failed_rejects_out_of_range_count(self):
+        import pytest
+        from pydantic import ValidationError
+
+        from app.routers.ai_factory import RetryFailedIn
+
+        assert RetryFailedIn().count == 3
+        for bad in (0, 21):
+            with pytest.raises(ValidationError):
+                RetryFailedIn(count=bad)
