@@ -523,3 +523,106 @@ class TestOpenApiAndRoutes:
         for bad in (0, 21):
             with pytest.raises(ValidationError):
                 RetryFailedIn(count=bad)
+
+
+class TestConnectionTestParsing:
+    """模型「测试连接」的响应解析与失败映射。
+
+    此前直接 `resp.json()["choices"][0]["message"]["content"]` —— 上游返回
+    {"error": ...}（却带 200）、缺 choices、或推理模型 content 为空时都会 500。
+    这里用假 httpx client 覆盖这些形状（不联网）。
+    """
+
+    class _Resp:
+        def __init__(self, status_code, payload=None, text=""):
+            self.status_code = status_code
+            self._payload = payload
+            self.text = text or (str(payload) if payload is not None else "")
+
+        def json(self):
+            if self._payload is None:
+                raise ValueError("not json")
+            return self._payload
+
+    def _call(self, resp, monkeypatch):
+        import asyncio
+
+        import httpx
+
+        import app.routers.ai as ai
+
+        class FakeClient:
+            def __init__(self, *a, **k):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return False
+
+            async def post(self, *a, **k):
+                if isinstance(resp, Exception):
+                    raise resp
+                return resp
+
+        monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+        return asyncio.run(ai.test_connection(ai.TestIn(base_url="https://x/v1", api_key="k", model="m"), None))
+
+    def test_success_reports_model_and_latency(self, monkeypatch):
+        r = self._call(
+            self._Resp(200, {"model": "gpt-x", "choices": [{"message": {"content": "连接成功"}}]}),
+            monkeypatch,
+        )
+        assert r["ok"] is True
+        assert r["model"] == "gpt-x"
+        assert r["reply"] == "连接成功"
+        assert isinstance(r["latency_ms"], int) and r["latency_ms"] >= 0
+
+    def test_reasoning_model_empty_content_falls_back(self, monkeypatch):
+        r = self._call(
+            self._Resp(200, {"choices": [{"message": {"content": "", "reasoning_content": "思考中"}}]}),
+            monkeypatch,
+        )
+        assert r["reply"] == "思考中"
+
+    def test_error_payload_with_200_is_502_with_hint(self, monkeypatch):
+        import pytest
+        from fastapi import HTTPException
+
+        with pytest.raises(HTTPException) as ei:
+            self._call(self._Resp(200, {"error": {"message": "model not found"}}), monkeypatch)
+        assert ei.value.status_code == 502
+        assert "模型列表" in ei.value.detail  # 分类器把 model not found 归到「模型名不对」并给建议
+
+    def test_missing_choices_and_empty_content(self, monkeypatch):
+        import pytest
+        from fastapi import HTTPException
+
+        with pytest.raises(HTTPException):
+            self._call(self._Resp(200, {"model": "m"}), monkeypatch)
+        with pytest.raises(HTTPException) as ei:
+            self._call(self._Resp(200, {"choices": [{"message": {"content": ""}}]}), monkeypatch)
+        assert "空" in ei.value.detail and "模型名" in ei.value.detail
+
+    def test_status_codes_map_to_clear_errors(self, monkeypatch):
+        import pytest
+        from fastapi import HTTPException
+
+        cases = {401: 401, 403: 401, 404: 404, 429: 429, 500: 502}
+        for code, expect in cases.items():
+            with pytest.raises(HTTPException) as ei:
+                self._call(self._Resp(code, text="x"), monkeypatch)
+            assert ei.value.status_code == expect, code
+
+    def test_timeout_and_network(self, monkeypatch):
+        import httpx
+        import pytest
+        from fastapi import HTTPException
+
+        with pytest.raises(HTTPException) as ei:
+            self._call(httpx.TimeoutException("t"), monkeypatch)
+        assert ei.value.status_code == 504
+        with pytest.raises(HTTPException) as ei2:
+            self._call(httpx.ConnectError("c"), monkeypatch)
+        assert ei2.value.status_code == 502

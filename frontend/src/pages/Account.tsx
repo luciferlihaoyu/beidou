@@ -51,6 +51,7 @@ export default function Account() {
   const [editing, setEditing] = useState<AIConfig | null>(null);
   const [form, setForm] = useState<ConfigForm>(emptyConfig);
   const [testing, setTesting] = useState(false);
+  const [testingId, setTestingId] = useState<number | null>(null);
   const [models, setModels] = useState<string[]>([]);
   const [modelsLoading, setModelsLoading] = useState(false);
   const [pw, setPw] = useState({ old_password: "", new_password: "", confirm: "" });
@@ -228,6 +229,27 @@ export default function Account() {
     }
   }
 
+  /** 列表里直接测某个已保存配置：不必打开编辑弹窗，改完就能验 */
+  async function testSavedConfig(c: AIConfig) {
+    setTestingId(c.id);
+    const t = toast.loading(`正在测试「${c.name}」…`);
+    try {
+      const r = await api.post<{ reply: string; model: string; latency_ms: number }>(
+        `/api/ai/configs/${c.id}/test`,
+        {}
+      );
+      toast.success(
+        `「${c.name}」连接成功：${r.model} · ${r.latency_ms} ms · 回复「${r.reply.slice(0, 12)}」`,
+        { id: t }
+      );
+    } catch (e) {
+      // 后端已把失败分类成「病因 + 建议」，这里原样呈现
+      toast.error((e as Error).message, { id: t, duration: 12000 });
+    } finally {
+      setTestingId(null);
+    }
+  }
+
   async function test() {
     const key = form.api_key.trim();
     setTesting(true);
@@ -236,16 +258,21 @@ export default function Account() {
         // 编辑已有配置且未重填 Key：直接用服务端保存的 Key 测试
         if (!editing) return toast.error("请先填写 API Key");
         if (!editing.has_key) return toast.error("该配置尚未保存 Key，请先填写");
-        const r = await api.post<{ reply: string }>(`/api/ai/configs/${editing.id}/test`, {});
-        toast.success(`连接成功（使用已保存的 Key）：${r.reply.slice(0, 30)}`);
+        const r = await api.post<{ reply: string; model: string; latency_ms: number }>(
+          `/api/ai/configs/${editing.id}/test`,
+          {}
+        );
+        toast.success(
+          `连接成功（已保存的 Key）：${r.model} · ${r.latency_ms} ms · 回复「${r.reply.slice(0, 12)}」`
+        );
         return;
       }
-      const result = await api.post<{ reply: string }>("/api/ai/test", {
+      const result = await api.post<{ reply: string; model: string; latency_ms: number }>("/api/ai/test", {
         base_url: form.base_url,
         api_key: key,
         model: form.model,
       });
-      toast.success(`连接成功：${result.reply.slice(0, 30)}`);
+      toast.success(`连接成功：${result.model} · ${result.latency_ms} ms · 回复「${result.reply.slice(0, 12)}」`);
     } catch (e) {
       toast.error((e as Error).message);
     } finally {
@@ -378,6 +405,18 @@ export default function Account() {
                         <DropdownMenuItem onClick={() => void fetchModelsForConfig(c)}>
                           <Sparkles className="mr-2 h-4 w-4" />
                           获取可用模型
+                        </DropdownMenuItem>
+                        <DropdownMenuItem
+                          disabled={!c.has_key || testingId === c.id}
+                          title={c.has_key ? "用已保存的 Key 发一次最小请求" : "该配置还没有保存 Key"}
+                          onClick={() => void testSavedConfig(c)}
+                        >
+                          {testingId === c.id ? (
+                            <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                          ) : (
+                            <Plug className="mr-2 h-4 w-4" />
+                          )}
+                          测试连接
                         </DropdownMenuItem>
                         <DropdownMenuItem
                           className="text-destructive"

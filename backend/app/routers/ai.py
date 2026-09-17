@@ -2,6 +2,8 @@
 
 import json
 
+import time
+
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
@@ -196,7 +198,13 @@ class TestIn(BaseModel):
 
 @router.post("/test")
 async def test_connection(data: TestIn, user: User = Depends(get_current_user)):
-    """测试接口连通性（非流式，限制输出长度）。地址带 /v1 后缀也没关系，会自动规范化。"""
+    """测试接口连通性（非流式，限制输出长度）。地址带 /v1 后缀也没关系，会自动规范化。
+
+    失败时给出可操作提示（复用 failure_kinds 分类），成功时回报模型名与耗时——
+    只回一句「连接成功」不足以判断配置是否真的可用。
+    """
+    from ..failure_kinds import classify_failure
+
     url = _normalize_base(data.base_url) + "/v1/chat/completions"
     payload = {
         "model": data.model,
@@ -204,19 +212,61 @@ async def test_connection(data: TestIn, user: User = Depends(get_current_user)):
         "max_tokens": 32,
         "stream": False,
     }
+
+    def fail(status: int, raw: str) -> HTTPException:
+        info = classify_failure(raw)
+        extra = f"\n建议：{info.hint}" if info.code != "unknown" else ""
+        return HTTPException(status, f"{raw}{extra}")
+
+    started = time.monotonic()
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.post(url, json=payload, headers={"Authorization": f"Bearer {data.api_key}"})
+    except httpx.TimeoutException:
+        raise fail(504, f"连接超时（30 秒未响应）：{url}")
     except httpx.HTTPError as exc:
-        raise HTTPException(400, f"无法连接: {exc.__class__.__name__}")
+        raise fail(502, f"无法连接 {url}：{exc.__class__.__name__}")
+    elapsed_ms = int((time.monotonic() - started) * 1000)
+
     if resp.status_code == 401 or resp.status_code == 403:
-        raise HTTPException(400, "API Key 无效或没有权限（401/403）")
+        raise fail(401, f"API Key 无效或没有权限（{resp.status_code}）")
     if resp.status_code == 404:
-        raise HTTPException(400, f"接口路径不存在（404）：{url}，请检查 Base URL 是否正确")
+        raise fail(404, f"接口路径不存在（404）：{url}，请检查 Base URL 是否正确")
+    if resp.status_code == 429:
+        raise fail(429, f"触发限流或额度不足（429）：{resp.text[:200]}")
     if resp.status_code != 200:
-        raise HTTPException(400, f"接口返回 {resp.status_code}: {resp.text[:200]}")
-    content = resp.json()["choices"][0]["message"]["content"]
-    return {"ok": True, "reply": content}
+        raise fail(502, f"接口返回 {resp.status_code}: {resp.text[:200]}")
+
+    # 健壮解析：上游可能返回 {"error": ...}（却带 200）、缺 choices、或推理模型的
+    # content 为空而把正文放在 reasoning_content 里——直接取键会 500。
+    try:
+        body = resp.json()
+    except ValueError:
+        raise fail(502, f"接口返回的不是 JSON：{resp.text[:200]}")
+    if isinstance(body, dict) and body.get("error"):
+        err = body["error"]
+        msg = err if isinstance(err, str) else json.dumps(err, ensure_ascii=False)
+        raise fail(502, f"接口返回错误：{msg[:200]}")
+    choices = body.get("choices") if isinstance(body, dict) else None
+    if not choices:
+        raise fail(502, f"响应里没有 choices 字段：{json.dumps(body, ensure_ascii=False)[:200]}")
+    message = choices[0].get("message") or {}
+    content = (message.get("content") or "").strip()
+    if not content:
+        # 推理模型（如 deepseek-reasoner）有时 content 为空，正文在 reasoning_content
+        content = (message.get("reasoning_content") or "").strip()
+    if not content:
+        raise fail(
+            502,
+            "接口连通但返回内容为空——该模型可能不支持此调用方式，或已被供应商下架，"
+            "请确认模型名是否正确",
+        )
+    return {
+        "ok": True,
+        "reply": content[:200],
+        "model": body.get("model") or data.model,
+        "latency_ms": elapsed_ms,
+    }
 
 
 class ModelsIn(BaseModel):
