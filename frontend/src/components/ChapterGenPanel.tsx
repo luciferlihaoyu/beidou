@@ -20,6 +20,7 @@ import {
   CloudCog,
   Square,
   AlertTriangle,
+  Unlock,
 } from "lucide-react";
 import { aiFactoryApi, aiFactoryBg, aiFactoryFailApi, aiFactoryM2, aiFactoryM3, aiFactoryM6, aiFactoryM7, aiFactoryM9, streamPost, type AiChapterJob, type AiProject, type BgBatchStatus, type HookAlert } from "@/lib/api";
 import { M3Toolbar, RetentionPanel } from "@/components/FactoryM3";
@@ -38,6 +39,8 @@ import { Textarea } from "@/components/ui/textarea";
 const JOB_STATUS: Record<string, { label: string; icon: React.ReactNode }> = {
   pending: { label: "待生成", icon: <Circle className="h-3.5 w-3.5 text-muted-foreground" /> },
   writing: { label: "生成中", icon: <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" /> },
+  // 卡死（点停止/关页面/重启导致的中断）：不再显示无尽转圈，改显示中断态
+  stuck: { label: "已中断", icon: <AlertTriangle className="h-3.5 w-3.5 text-amber-500" /> },
   done: { label: "已定稿", icon: <CheckCircle2 className="h-3.5 w-3.5 text-green-500" /> },
   needs_fix: { label: "待修复", icon: <FileEdit className="h-3.5 w-3.5 text-amber-500" /> },
   failed: { label: "失败", icon: <X className="h-3.5 w-3.5 text-destructive" /> },
@@ -77,6 +80,7 @@ export default function ChapterGenPanel({
   const [bg, setBg] = useState<BgBatchStatus | null>(null);
   const [diagJob, setDiagJob] = useState<AiChapterJob | null>(null);
   const failedJobs = jobs.filter((j) => j.status === "failed");
+  const stuckJobs = jobs.filter((j) => j.stuck);
   const [retryBusy, setRetryBusy] = useState(false);
   const bgWasRunning = useRef(false);
   useEffect(() => {
@@ -122,6 +126,19 @@ export default function ChapterGenPanel({
     }
   }
 
+  function stopGenerate(job: AiChapterJob) {
+    abortRef.current?.abort();
+    // 只 abort fetch 的话，服务端的 StreamingResponse 被取消后没人把 job.status
+    // 从 writing 改回去 → 这一行永远转圈、停不掉也看不到内容。所以主动解锁。
+    aiFactoryFailApi
+      .resetJob(project.id, job.id)
+      .then(() => {
+        toast.success("已停止并解锁该章——可重新生成");
+        loadJobs();
+      })
+      .catch((e) => toast.error(e instanceof Error ? e.message : "停止失败"));
+  }
+
   function startGenerate(job: AiChapterJob, instruction = "") {
     abortRef.current?.abort();
     const ctrl = new AbortController();
@@ -152,6 +169,29 @@ export default function ChapterGenPanel({
           .catch(() => {});
       })
       .finally(() => setGenBusy(false));
+  }
+
+  async function unlockJob(j: AiChapterJob) {
+    try {
+      await aiFactoryFailApi.resetJob(project.id, j.id);
+      toast.success(`已解锁「${j.chapter_title}」——现在可以重新生成`);
+      loadJobs();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "解锁失败");
+    }
+  }
+
+  async function unlockAllStuck() {
+    const targets = stuckJobs;
+    if (targets.length === 0) return;
+    try {
+      await Promise.all(targets.map((j) => aiFactoryFailApi.resetJob(project.id, j.id)));
+      toast.success(`已解锁 ${targets.length} 章——现在都可以重新生成`);
+      loadJobs();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "解锁失败");
+      loadJobs();
+    }
   }
 
   async function retryAllFailed() {
@@ -313,6 +353,25 @@ export default function ChapterGenPanel({
             （输入 {(project.tokens_prompt / 1000).toFixed(1)}K / 输出 {(project.tokens_completion / 1000).toFixed(1)}K，含估算）
           </p>
         )}
+        {stuckJobs.length > 0 && (
+          <div className="mb-2 flex items-center justify-between gap-2 rounded-md border border-amber-500/40 bg-amber-500/5 px-3 py-2 text-xs">
+            <span className="flex items-center gap-1.5 text-amber-600 dark:text-amber-400">
+              <AlertTriangle className="h-3.5 w-3.5" />
+              {stuckJobs.length} 章生成中断（停在「生成中」过久，通常是你点过停止、关过页面或服务重启）
+            </span>
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-7 text-xs"
+              title="把这些任务全部解锁回「待生成」"
+              onClick={() => void unlockAllStuck()}
+            >
+              <Unlock className="mr-1 h-3 w-3" />
+              全部解锁（{stuckJobs.length}）
+            </Button>
+          </div>
+        )}
+
         {failedJobs.length > 0 && (
           <div className="mb-2 flex items-center justify-between gap-2 rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-xs">
             <span className="flex items-center gap-1.5 text-destructive">
@@ -435,9 +494,18 @@ export default function ChapterGenPanel({
             key={j.id}
             className="flex flex-wrap items-center gap-2 border-b border-border bg-card px-3 py-2 text-sm last:border-b-0 sm:gap-3"
           >
-            {JOB_STATUS[j.status]?.icon}
+            <span title={j.stuck ? `${j.last_error || "生成中断"}` : JOB_STATUS[j.status]?.label}>
+              {j.stuck ? JOB_STATUS.stuck.icon : JOB_STATUS[j.status]?.icon}
+            </span>
             <div className="min-w-0 flex-1">
-              <div className="truncate font-medium">{j.chapter_title}</div>
+              <div className="flex items-center gap-1.5">
+                <span className="truncate font-medium">{j.chapter_title}</span>
+                {j.stuck && (
+                  <span className="shrink-0 rounded bg-amber-500/15 px-1.5 py-0.5 text-[10px] text-amber-600 dark:text-amber-400">
+                    生成中断{j.stuck_minutes ? ` · ${j.stuck_minutes} 分钟` : ""}
+                  </span>
+                )}
+              </div>
               <div className="truncate text-xs text-muted-foreground" title={j.outline}>
                 {j.outline || "（无大纲）"}
               </div>
@@ -453,11 +521,8 @@ export default function ChapterGenPanel({
                   variant="ghost"
                   size="sm"
                   className="h-7 px-2 text-xs text-destructive hover:text-destructive"
-                  title="停止生成（已写出的部分保留，可定稿或重新生成）"
-                  onClick={() => {
-                    abortRef.current?.abort();
-                    toast.success("已停止生成");
-                  }}
+                  title="停止生成（已写出的部分保留；同时解锁该章，不必删任务重建）"
+                  onClick={() => stopGenerate(j)}
                 >
                   <Square className="mr-1 h-3 w-3" />
                   停止
@@ -484,6 +549,18 @@ export default function ChapterGenPanel({
                       生成
                     </>
                   )}
+                </Button>
+              )}
+              {j.stuck && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-7 px-2 text-xs text-amber-600 dark:text-amber-400"
+                  title={j.last_error || "生成中断，点此解锁后重新生成"}
+                  onClick={() => void unlockJob(j)}
+                >
+                  <Unlock className="mr-1 h-3 w-3" />
+                  解锁
                 </Button>
               )}
               {j.status === "failed" && (
@@ -573,7 +650,14 @@ export default function ChapterGenPanel({
       <RetentionPanel projectId={project.id} />
 
       {/* 流式生成弹窗 */}
-      <Dialog open={genJob !== null} onOpenChange={(v) => !v && (abortRef.current?.abort(), setGenJob(null))}>
+      <Dialog open={genJob !== null} onOpenChange={(v) => {
+        if (!v) {
+          // 关弹窗时若还在生成，同样要解锁服务端状态，否则留下一行永远转圈
+          if (genBusy && genJob) stopGenerate(genJob);
+          else abortRef.current?.abort();
+          setGenJob(null);
+        }
+      }}>
         <DialogContent className="flex max-h-[85vh] flex-col sm:max-w-2xl">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
@@ -601,7 +685,7 @@ export default function ChapterGenPanel({
                   variant="outline"
                   size="sm"
                   className="text-destructive hover:text-destructive"
-                  onClick={() => abortRef.current?.abort()}
+                  onClick={() => genJob && stopGenerate(genJob)}
                 >
                   <Square className="mr-1 h-3.5 w-3.5" />
                   停止生成

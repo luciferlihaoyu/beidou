@@ -17,7 +17,7 @@ from sqlalchemy import select
 
 from .anti_llm import ANTI_LLM_RULES, detect, deflavor_rewrite_prompt
 from .db import SessionLocal
-from .models import AiChapterJob, AiProject, Chapter, Novel, Volume
+from .models import AiChapterJob, AiProject, Chapter, Novel, Volume, utcnow
 from .routers.ai_factory import (
     _SYSTEM,
     _assemble_context,
@@ -249,6 +249,7 @@ async def _generate_one(p: AiProject, novel: Novel, job: AiChapterJob, chapter: 
     summary_llm = await _pick_config(user, db, p.summary_llm)
 
     job.status = "writing"
+    job.started_at = utcnow()
     job.attempt += 1
     await db.commit()
 

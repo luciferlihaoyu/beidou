@@ -41,6 +41,7 @@ async def init_db():
         await _ensure_column(conn, "ai_projects", "market_json", "TEXT NOT NULL DEFAULT ''")
         await _ensure_column(conn, "ai_projects", "reference_json", "TEXT NOT NULL DEFAULT ''")
         # M15：章节任务失败原因（此前只存 status=failed，原因随进程丢失）
+        await _ensure_column(conn, "ai_chapter_jobs", "started_at", "DATETIME")
         await _ensure_column(conn, "ai_chapter_jobs", "last_error", "TEXT NOT NULL DEFAULT ''")
         await _ensure_column(conn, "ai_chapter_jobs", "last_error_code", "VARCHAR(30) NOT NULL DEFAULT ''")
         await _ensure_column(conn, "ai_projects", "cover_prompt", "TEXT NOT NULL DEFAULT ''")

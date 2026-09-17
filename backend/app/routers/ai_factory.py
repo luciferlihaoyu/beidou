@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import datetime, timezone
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
@@ -26,7 +27,19 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..db import get_db
 from ..deps import get_ai_config, get_current_user
 from ..failure_kinds import classify_failure
-from ..models import AIConfig, AiChapterJob, AiProject, Chapter, Character, IntegrationConfig, Novel, User, Volume, WorldviewEntry
+from ..models import (
+    AIConfig,
+    AiChapterJob,
+    AiProject,
+    Chapter,
+    Character,
+    IntegrationConfig,
+    Novel,
+    User,
+    Volume,
+    WorldviewEntry,
+    utcnow,
+)
 
 router = APIRouter(prefix="/api/ai-factory", tags=["ai-factory"])
 
@@ -701,7 +714,27 @@ async def list_jobs(project_id: int, user: User = Depends(get_current_user), db:
     chapter_map = {c.id: c for c in chapters}
     # 按章节显示顺序排
     jobs.sort(key=lambda j: number_map.get(j.chapter_id or 0, 99999))
-    return [_job_out(j, chapter_map.get(j.chapter_id), number_map.get(j.chapter_id or 0, 0)) for j in jobs]
+    # 打开列表即顺手解锁卡死任务：否则这些行会永远转圈，用户束手无策
+    now = utcnow()
+    swept = await _sweep_stuck_jobs(db, p.id, now)
+    if swept:
+        jobs = (
+            (await db.execute(select(AiChapterJob).where(AiChapterJob.project_id == p.id)))
+            .scalars()
+            .all()
+        )
+        jobs.sort(key=lambda j: number_map.get(j.chapter_id or 0, 99999))
+    out = []
+    for j in jobs:
+        item = _job_out(j, chapter_map.get(j.chapter_id), number_map.get(j.chapter_id or 0, 0))
+        item["stuck"] = job_is_stuck(j.status, j.started_at, now, active=j.id in ACTIVE_JOBS)
+        item["stuck_minutes"] = (
+            int((as_utc(now) - as_utc(j.started_at)).total_seconds() // 60)  # type: ignore[operator]
+            if j.started_at and j.status == "writing"
+            else 0
+        )
+        out.append(item)
+    return out
 
 
 # ================= 伏笔台账章龄追踪 + 统一状态文件更新 =================
@@ -1008,6 +1041,7 @@ async def generate_chapter(
 
     job.status = "writing"
     job.attempt += 1
+    job.started_at = utcnow()  # 供卡死判定
     await db.commit()
 
     from .ai import _stream_openai
@@ -1017,7 +1051,10 @@ async def generate_chapter(
         + "你正在执行整章正文写作任务。要求：中文网文风格，段落短小（手机阅读友好），"
         "对话生动，章末留钩子。严格遵守角色卡与状态文件的一致性。"
     )
-    return await _stream_openai(config, [{"role": "system", "content": system}, {"role": "user", "content": context}])
+    resp = await _stream_openai(config, [{"role": "system", "content": system}, {"role": "user", "content": context}])
+    # 包一层登记：客户端一断开就注销，避免自动解锁误伤正在生成的章节
+    resp.body_iterator = _track_active_stream(resp, job.id)
+    return resp
 
 
 class FailIn(BaseModel):
@@ -1104,6 +1141,125 @@ async def diagnose_job(
             "review_llm": p.review_llm or "(跟随默认)",
         },
     }
+
+
+# 本进程内正在流式生成的任务（job_id → 开始时间）。自动解锁必须避开它们：
+# 一个长章节在慢模型上可能跑十几分钟，那不是卡死。
+ACTIVE_JOBS: dict[int, float] = {}
+
+
+async def _track_active_stream(inner, job_id: int):
+    """包一层流式响应：生成期间登记，无论正常结束、报错还是客户端断开都注销。"""
+    import time as _time
+
+    ACTIVE_JOBS[job_id] = _time.time()
+    try:
+        async for chunk in inner.body_iterator:
+            yield chunk
+    finally:
+        ACTIVE_JOBS.pop(job_id, None)
+
+
+# 生成中断判定：任务停在 writing 超过这个时长即认为「卡死」。
+# 中断来源：用户点停止后前端 abort（服务端的 StreamingResponse 被取消，
+# 不会有人把状态改回去）、浏览器关闭、部署重启、后台任务崩溃。
+STUCK_MINUTES = 15
+
+
+def as_utc(dt: datetime | None) -> datetime | None:
+    """把数据库读回的时间补成带时区的 UTC。
+
+    SQLite 的 DATETIME 不带时区，读回来是 naive；而 utcnow() 是 aware，
+    两者直接相减会 TypeError（实测：会让章节列表 500）。统一按 UTC 处理。
+    """
+    if dt is None:
+        return None
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+
+
+def job_is_stuck(
+    status: str,
+    started_at: datetime | None,
+    now: datetime,
+    minutes: int = STUCK_MINUTES,
+    active: bool = False,
+) -> bool:
+    """status=writing 且已超过 minutes 没有推进 → 卡死（取消/断连/重启）。
+
+    active=True 表示本进程正持有该任务的流式连接，永远不算卡死。
+    """
+    if active or status != "writing" or started_at is None:
+        return False
+    started = as_utc(started_at)
+    current = as_utc(now)
+    assert started is not None and current is not None
+    return (current - started).total_seconds() > minutes * 60
+
+
+async def _sweep_stuck_jobs(db: AsyncSession, project_id: int, now: datetime) -> int:
+    """把卡死的任务自动解锁回 pending，避免界面永远转圈。
+
+    只处理本进程之外确实没在跑的任务：后台连跑会在 BG_TASKS 登记，
+    登记中的项目跳过（它自己在推进）。
+    """
+    from ..nightly import BG_TASKS
+
+    jobs = (
+        (
+            await db.execute(
+                select(AiChapterJob).where(
+                    AiChapterJob.project_id == project_id, AiChapterJob.status == "writing"
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    swept = 0
+    for j in jobs:
+        if not job_is_stuck(j.status, j.started_at, now, active=j.id in ACTIVE_JOBS):
+            continue
+        bg = BG_TASKS.get(project_id)
+        if bg and bg.get("running"):
+            continue  # 后台连跑在推进，交给它
+        j.status = "pending"
+        # started_at 为空的老数据（本字段上线前遗留）算作卡死，理由写清楚
+        j.last_error = (
+            "生成中断：任务停在「生成中」超过 "
+            f"{STUCK_MINUTES} 分钟（常见于点了停止、关闭页面、部署重启或后台任务崩溃）。"
+            "已自动解锁，可直接重新生成。"
+        )
+        j.last_error_code = "interrupted"
+        j.started_at = None
+        swept += 1
+    if swept:
+        await db.commit()
+    return swept
+
+
+@router.post("/projects/{project_id}/jobs/{job_id}/reset")
+async def reset_job(
+    project_id: int,
+    job_id: int,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """手动解锁卡死/放弃中的任务：把状态置回 pending，并记下中断原因。
+
+    此前没有任何接口能把 writing 改回去——一旦中断（停止、关页面、重启），
+    这一行就永远转圈，既停不掉也看不到内容，只能删任务重建。
+    """
+    p = await _get_project(project_id, user, db)
+    job = await db.get(AiChapterJob, job_id)
+    if job is None or job.project_id != p.id:
+        raise HTTPException(404, "章节任务不存在")
+    job.status = "pending"
+    job.started_at = None
+    if not job.last_error:
+        job.last_error = "已手动解锁（生成中断：点过停止、关闭页面或服务重启）"
+        job.last_error_code = "interrupted"
+    await db.commit()
+    return {"ok": True, "status": job.status}
 
 
 @router.delete("/projects/{project_id}/jobs/{job_id}")
@@ -1237,7 +1393,7 @@ async def finalize_chapter(
     except Exception:  # noqa: BLE001
         pass
 
-    from datetime import datetime, timezone
+    from datetime import datetime, timezone, timezone
 
     job.status = "done"
     job.actual_words = chapter.word_count

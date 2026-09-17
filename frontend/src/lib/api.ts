@@ -511,6 +511,9 @@ export interface AiChapterJob {
   finished_at: string | null;
   last_error?: string;
   last_error_code?: string;
+  /** 停在「生成中」过久（停止/关页面/重启导致），需要解锁 */
+  stuck?: boolean;
+  stuck_minutes?: number;
 }
 
 export const aiFactoryM2 = {
@@ -943,6 +946,12 @@ export const aiFactoryFailApi = {
     ),
   diagnose: (projectId: number, jobId: number) =>
     api.get<JobDiagnosis>(`/api/ai-factory/projects/${projectId}/jobs/${jobId}/diagnose`),
+  /** 解锁卡死任务：状态置回待生成（此前没有任何接口能把 writing 改回去） */
+  resetJob: (projectId: number, jobId: number) =>
+    api.post<{ ok: boolean; status: string }>(
+      `/api/ai-factory/projects/${projectId}/jobs/${jobId}/reset`,
+      {}
+    ),
   /** 删除任务（清理失去关联章节、永远生成不了的死结任务） */
   deleteJob: (projectId: number, jobId: number) =>
     api.delete<{ ok: boolean }>(`/api/ai-factory/projects/${projectId}/jobs/${jobId}`),

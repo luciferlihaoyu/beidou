@@ -626,3 +626,250 @@ class TestConnectionTestParsing:
         with pytest.raises(HTTPException) as ei2:
             self._call(httpx.ConnectError("c"), monkeypatch)
         assert ei2.value.status_code == 502
+
+
+class TestRuntimeNamesResolve:
+    """模块能 import 不等于运行时名字可用。
+
+    `from __future__ import annotations` 会把函数/变量注解变成字符串，未导入的
+    名字不会在 import 时报错，只在真正执行到那一行才 NameError（本次真实踩到：
+    ai_factory 用了没导入的 utcnow；此前还有未导入的 BgStartIn 只在 openapi()
+    时炸）。这里静态扫全部生成/写入路径涉及的模块，确保没有「用了没 import」的名字。
+    """
+
+    def _missing(self, module_name: str, names: list[str]):
+        import importlib
+
+        mod = importlib.import_module(module_name)
+        return [n for n in names if not hasattr(mod, n)]
+
+    def test_ai_factory_has_runtime_helpers(self):
+        assert self._missing("app.routers.ai_factory", ["utcnow", "classify_failure"]) == []
+
+    def test_nightly_has_runtime_helpers(self):
+        # classify_failure 在 nightly 里是函数内延迟导入（运行时可用），只查 utcnow
+        assert self._missing("app.nightly", ["utcnow"]) == []
+
+    def test_ast_scan_finds_undefined_globals_in_generation_paths(self):
+        """AST 扫描：函数体里用到的全局名必须能在模块命名空间解析（只查已知的高危名）。"""
+        import ast
+        import importlib
+        from pathlib import Path
+
+        watched = {"utcnow", "BgStartIn", "classify_failure", "json", "time", "httpx"}
+        problems = []
+        for path in ("app/routers/ai_factory.py", "app/nightly.py", "app/routers/ai.py"):
+            tree = ast.parse(Path(path).read_text(encoding="utf-8"))
+            used = {
+                node.id
+                for node in ast.walk(tree)
+                if isinstance(node, ast.Name) and node.id in watched
+            }
+            # 函数内延迟导入也算「已导入」（如 nightly 的 classify_failure）
+            local_imports = set()
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    local_imports.update(a.asname or a.name.split(".")[0] for a in node.names)
+                elif isinstance(node, ast.ImportFrom):
+                    local_imports.update(a.asname or a.name for a in node.names)
+            mod = importlib.import_module(path.replace("/", ".").removesuffix(".py"))
+            for name in sorted(used):
+                if name in local_imports:
+                    continue
+                if not hasattr(mod, name):
+                    problems.append(f"{path}: {name}")
+        assert problems == [], f"用了但未导入：{problems}"
+
+
+class TestStuckJobRecovery:
+    """卡死任务判定与解锁（症状：一直转圈、停不掉、看不到内容、没原因）。
+
+    根因：点停止时前端只是 abort 了 fetch，服务端的 StreamingResponse 被取消，
+    没有任何人把 job.status 从 writing 改回去；而系统此前没有任何解锁接口。
+    """
+
+    def _now(self):
+        from app.models import utcnow
+
+        return utcnow()
+
+    def test_fresh_writing_is_not_stuck(self):
+        from app.routers.ai_factory import job_is_stuck
+
+        now = self._now()
+        assert job_is_stuck("writing", now, now) is False  # 刚开始，绝不能误判
+
+    def test_old_writing_is_stuck(self):
+        from datetime import timedelta
+
+        from app.routers.ai_factory import STUCK_MINUTES, job_is_stuck
+
+        now = self._now()
+        old = now - timedelta(minutes=STUCK_MINUTES + 1)
+        assert job_is_stuck("writing", old, now) is True
+
+    def test_boundary_is_not_stuck(self):
+        from datetime import timedelta
+
+        from app.routers.ai_factory import STUCK_MINUTES, job_is_stuck
+
+        now = self._now()
+        assert job_is_stuck("writing", now - timedelta(minutes=STUCK_MINUTES), now) is False
+
+    def test_non_writing_status_never_stuck(self):
+        from datetime import timedelta
+
+        from app.routers.ai_factory import job_is_stuck
+
+        now = self._now()
+        old = now - timedelta(hours=5)
+        for st in ("pending", "done", "failed", "needs_fix", "reviewing"):
+            assert job_is_stuck(st, old, now) is False, st
+
+    def test_missing_started_at_is_not_flagged(self):
+        """老数据没有 started_at：靠纯函数判不出来，由 _sweep 另作处理，不能误报。"""
+        from app.routers.ai_factory import job_is_stuck
+
+        assert job_is_stuck("writing", None, self._now()) is False
+
+    def test_sweep_resets_stuck_and_keeps_active(self):
+        """自动清理：卡死的回到 pending，正常推进的不动。"""
+        import asyncio
+        from datetime import timedelta
+
+        from sqlalchemy import select
+
+        from app.db import SessionLocal
+        from app.models import AiChapterJob, utcnow
+        from app.routers.ai_factory import STUCK_MINUTES, _sweep_stuck_jobs
+
+        from app.db import init_db
+
+        asyncio.run(init_db())  # 本文件其余用例是纯函数，这里首次需要表
+
+        async def run():
+            async with SessionLocal() as db:
+                now = utcnow()
+                stuck = AiChapterJob(
+                    project_id=999_999, status="writing", started_at=now - timedelta(minutes=STUCK_MINUTES + 5)
+                )
+                active = AiChapterJob(project_id=999_999, status="writing", started_at=now)
+                db.add_all([stuck, active])
+                await db.commit()
+                await db.refresh(stuck)
+                await db.refresh(active)
+                n = await _sweep_stuck_jobs(db, 999_999, now)
+                assert n == 1
+                rows = (
+                    (await db.execute(select(AiChapterJob).where(AiChapterJob.project_id == 999_999)))
+                    .scalars()
+                    .all()
+                )
+                by_id = {r.id: r for r in rows}
+                assert by_id[stuck.id].status == "pending"
+                assert by_id[stuck.id].last_error_code == "interrupted"
+                assert "生成中断" in by_id[stuck.id].last_error
+                assert by_id[active.id].status == "writing"  # 正在跑的不许动
+                for r in rows:  # 清理测试数据
+                    await db.delete(r)
+                await db.commit()
+
+        asyncio.run(run())
+
+
+class TestActiveStreamNotStuck:
+    """正在生成的章节不许被自动解锁误杀（长章节在慢模型上可能跑十几分钟）。"""
+
+    def _now(self):
+        from app.models import utcnow
+
+        return utcnow()
+
+    def test_active_job_never_stuck(self):
+        from datetime import timedelta
+
+        from app.routers.ai_factory import job_is_stuck
+
+        now = self._now()
+        old = now - timedelta(hours=2)
+        assert job_is_stuck("writing", old, now) is True
+        assert job_is_stuck("writing", old, now, active=True) is False
+
+    def test_tracker_registers_and_clears(self):
+        import asyncio
+
+        from app.routers.ai_factory import ACTIVE_JOBS, _track_active_stream
+
+        class FakeResp:
+            def __init__(self, chunks):
+                self.body_iterator = self._gen(chunks)
+
+            async def _gen(self, chunks):
+                for c in chunks:
+                    yield c
+
+        async def run():
+            seen_during = []
+            async for _ in _track_active_stream(FakeResp(["a", "b"]), 4242):
+                seen_during.append(4242 in ACTIVE_JOBS)
+            return seen_during
+
+        seen = asyncio.run(run())
+        assert seen == [True, True]  # 流式期间登记可见
+        assert 4242 not in ACTIVE_JOBS  # 结束后必须注销
+
+    def test_tracker_clears_on_error(self):
+        """流中途抛错也要注销，否则该任务永远不被判定为卡死。"""
+        import asyncio
+
+        from app.routers.ai_factory import ACTIVE_JOBS, _track_active_stream
+
+        class Boom:
+            def __init__(self):
+                self.body_iterator = self._gen()
+
+            async def _gen(self):
+                yield "x"
+                raise RuntimeError("断开")
+
+        async def run():
+            try:
+                async for _ in _track_active_stream(Boom(), 4343):
+                    pass
+            except RuntimeError:
+                pass
+
+        asyncio.run(run())
+        assert 4343 not in ACTIVE_JOBS
+
+    def test_sweep_skips_active(self):
+        """sweep 对登记中的任务必须跳过。"""
+        import asyncio
+        from datetime import timedelta
+
+        from app.db import SessionLocal, init_db
+        from app.models import AiChapterJob, utcnow
+        from app.routers.ai_factory import ACTIVE_JOBS, STUCK_MINUTES, _sweep_stuck_jobs
+
+        asyncio.run(init_db())
+
+        async def run():
+            async with SessionLocal() as db:
+                now = utcnow()
+                j = AiChapterJob(
+                    project_id=999_998, status="writing", started_at=now - timedelta(minutes=STUCK_MINUTES + 30)
+                )
+                db.add(j)
+                await db.commit()
+                await db.refresh(j)
+                ACTIVE_JOBS[j.id] = 1.0  # 假装本进程正在跑它
+                try:
+                    assert await _sweep_stuck_jobs(db, 999_998, now) == 0
+                    await db.refresh(j)
+                    assert j.status == "writing"
+                finally:
+                    ACTIVE_JOBS.pop(j.id, None)
+                    await db.delete(j)
+                    await db.commit()
+
+        asyncio.run(run())

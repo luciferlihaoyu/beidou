@@ -406,6 +406,9 @@ class AiChapterJob(Base):
     # 此前只存 status="failed"，失败原因随进程丢失，用户只看到「失败」两个字
     last_error: Mapped[str] = mapped_column(Text, default="")
     last_error_code: Mapped[str] = mapped_column(String(30), default="")
+    # 进入 writing 的时刻：用于判定任务是否「卡死」（中断的生成此前永远停在
+    # writing，界面一直转圈且无法解锁，用户既停不掉也看不到原因）
+    started_at: Mapped[datetime | None] = mapped_column(nullable=True)
     created_at: Mapped[datetime] = mapped_column(default=utcnow)
     finished_at: Mapped[datetime | None] = mapped_column(nullable=True)
 
