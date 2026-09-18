@@ -63,6 +63,9 @@ export default function AIPanel({
     return raw ? Number(raw) : null;
   });
   const [skill, setSkill] = useState<SkillCard | null>(null); // 挂接到下一条消息的技能卡
+  const [docsOpen, setDocsOpen] = useState(false);
+  // 本次要加载的参考文件；null = 交给后端按任务关键词自动挑选
+  const [docPick, setDocPick] = useState<Record<string, boolean> | null>(null);
   const [continuePickerOpen, setContinuePickerOpen] = useState(false); // 续写档位选择器
   const abortRef = useRef<AbortController | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -97,20 +100,40 @@ export default function AIPanel({
 
   function stageSkill(s: SkillCard) {
     setSkill(s);
+    setDocPick(null); // 换卡即回到「自动挑选」
+    setDocsOpen(false);
     setSkillsOpen(false);
     inputRef.current?.focus();
+  }
+
+  /** 该卡可注入的参考文件（脚本不可执行，单独展示） */
+  function pickableDocs(s: SkillCard | null) {
+    return (s?.docs ?? []).filter((d) => d.kind !== "scripts");
   }
 
   function send() {
     const text = input.trim() || (skill ? `请运用「${skill.name}」技能开始工作。` : "");
     if (!text || busy) return;
     const slug = skill?.slug;
+    const docs = docPick
+      ? Object.entries(docPick)
+          .filter(([, on]) => on)
+          .map(([rel]) => rel)
+      : undefined;
     const echo = skill ? `【技能卡 · ${skill.name}】${input.trim() ? `\n${input.trim()}` : ""}` : text;
     setInput("");
     setSkill(null);
+    setDocPick(null);
+    setDocsOpen(false);
     void run(
       "/api/ai/chat",
-      { novel_id: novelId, chapter_id: chapterId, message: text, skill: slug ?? undefined },
+      {
+        novel_id: novelId,
+        chapter_id: chapterId,
+        message: text,
+        skill: slug ?? undefined,
+        skill_docs: docs,
+      },
       echo
     );
   }
@@ -427,19 +450,98 @@ export default function AIPanel({
 
       <div className="shrink-0 border-t border-border p-3">
         {skill && (
-          <div className="mb-2 flex items-center gap-1.5">
-            <span className="flex items-center gap-1 rounded-full border border-primary/40 bg-primary/10 px-2 py-0.5 text-xs text-primary">
-              <Wand2 className="h-3 w-3" />
-              {skill.name}
-              <button
-                className="ml-0.5 rounded-full p-0.5 transition-colors hover:bg-primary/20"
-                title="移除技能卡"
-                onClick={() => setSkill(null)}
-              >
-                <X className="h-3 w-3" />
-              </button>
-            </span>
-            <span className="text-[11px] text-muted-foreground">将按技能手册执行</span>
+          <div className="mb-2 space-y-1.5">
+            <div className="flex flex-wrap items-center gap-1.5">
+              <span className="flex items-center gap-1 rounded-full border border-primary/40 bg-primary/10 px-2 py-0.5 text-xs text-primary">
+                <Wand2 className="h-3 w-3" />
+                {skill.name}
+                <button
+                  className="ml-0.5 rounded-full p-0.5 transition-colors hover:bg-primary/20"
+                  title="移除技能卡"
+                  onClick={() => {
+                    setSkill(null);
+                    setDocPick(null);
+                    setDocsOpen(false);
+                  }}
+                >
+                  <X className="h-3 w-3" />
+                </button>
+              </span>
+              {pickableDocs(skill).length > 0 && (
+                <button
+                  className="flex items-center gap-0.5 rounded-full border border-border px-2 py-0.5 text-[11px] text-muted-foreground transition-colors hover:bg-accent"
+                  title="查看/指定本次加载的参考文件"
+                  onClick={() => setDocsOpen((v) => !v)}
+                >
+                  参考
+                  {docPick
+                    ? ` ${Object.values(docPick).filter(Boolean).length}/${pickableDocs(skill).length}`
+                    : " 自动"}
+                  <ChevronDown className={`h-3 w-3 transition-transform ${docsOpen ? "rotate-180" : ""}`} />
+                </button>
+              )}
+              <span className="text-[11px] text-muted-foreground">将按技能手册执行</span>
+            </div>
+            {docsOpen && (
+              <div className="rounded-md border border-border bg-muted/30 p-2 text-[11px]">
+                <div className="mb-1 flex items-start justify-between gap-2">
+                  <span className="text-muted-foreground">
+                    只勾你要用的检查清单；<span className="text-foreground">不勾是「自动」</span>
+                    ——后端按你这条消息里的关键词挑（说「黄金三章」就只带开篇那份，省 token）。
+                    手动勾选后只加载勾选项。
+                  </span>
+                  {docPick && (
+                    <button
+                      className="shrink-0 text-primary hover:underline"
+                      onClick={() => setDocPick(null)}
+                    >
+                      恢复自动
+                    </button>
+                  )}
+                </div>
+                <div className="space-y-0.5">
+                  {pickableDocs(skill).map((d) => {
+                    const core = (skill.core_docs ?? []).includes(d.rel);
+                    const on = docPick ? !!docPick[d.rel] : core;
+                    return (
+                      <label
+                        key={d.rel}
+                        className="flex items-start gap-1.5 rounded px-1 py-0.5 hover:bg-accent/50"
+                      >
+                        <input
+                          type="checkbox"
+                          className="mt-[2px] h-3 w-3 shrink-0 accent-primary"
+                          checked={core || on}
+                          disabled={core}
+                          onChange={(e) => {
+                            const base = docPick ?? {};
+                            setDocPick({ ...base, [d.rel]: e.target.checked });
+                          }}
+                        />
+                        <span className="min-w-0 flex-1">
+                          <span className="text-foreground">{d.title}</span>
+                          <span className="ml-1 text-muted-foreground">
+                            {d.kind === "assets" ? "模板" : "清单"} · {d.chars.toLocaleString()} 字
+                          </span>
+                          {core && <span className="ml-1 text-primary">必载</span>}
+                        </span>
+                      </label>
+                    );
+                  })}
+                </div>
+                {(skill.docs ?? []).some((d) => d.kind === "scripts") && (
+                  <div className="mt-1 border-t border-border pt-1 leading-relaxed text-muted-foreground">
+                    附带脚本（
+                    {(skill.docs ?? [])
+                      .filter((d) => d.kind === "scripts")
+                      .map((d) => d.rel.split("/").pop())
+                      .join("、")}
+                    ）在当前环境不可执行，AI 会直接读正文分析、不会假装跑过脚本；其中文风指纹与
+                    节奏扫描已能由服务端实测，数据随请求自动附上。
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         )}
         <div className="flex items-end gap-2">

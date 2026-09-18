@@ -385,6 +385,8 @@ class ChatIn(BaseModel):
     chapter_id: int | None = None
     config_id: int | None = None
     skill: str | None = Field(default=None, max_length=60)  # 技能卡 slug，挂接到本轮对话
+    # 技能卡要加载的参考文件（rel 路径）；留空 = 按本轮任务关键词自动选择
+    skill_docs: list[str] | None = Field(default=None, max_length=40)
 
 
 @router.get("/history")
@@ -441,14 +443,17 @@ async def chat(data: ChatIn, user: User = Depends(get_current_user), db: AsyncSe
     context = await _novel_context(novel, db, data.chapter_id)
     system = SYSTEM_PROMPT + "\n\n" + context
     if data.skill:
-        from .skills import get_card
+        # 技能卡：注入工作手册 + 按维度加载的参考文件全文 + 服务端工具实测数据。
+        # 此前只注入 SKILL.md 正文，卡里「按速查表加载 references/xxx.md」这一步
+        # 在 web 应用里从未真正发生（模型看不到磁盘），参考清单形同不存在。
+        from .skills import card_block, get_card, novel_texts, tool_output_for
 
         card = get_card(data.skill)
         if card is None:
             raise HTTPException(404, "技能卡不存在")
-        system += (
-            f"\n\n当前对话挂接了技能卡「{card['name']}」。以下是其完整工作手册，"
-            "在本轮对话中请严格遵循其中的流程与标准执行：\n\n---\n" + card["body"] + "\n---"
+        tool_out = tool_output_for(data.skill, await novel_texts(db, novel.id))
+        system += "\n\n" + card_block(
+            data.skill, task=data.message, requested=data.skill_docs, tool_output=tool_out
         )
     messages = [{"role": "system", "content": system}]
     messages += [{"role": m.role, "content": m.content} for m in history]

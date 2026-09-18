@@ -268,6 +268,15 @@ export interface AIConfig {
   has_key: boolean;
 }
 
+/** 技能卡包内的参考文件（references/assets 会注入 prompt，scripts 在当前环境不可执行） */
+export interface SkillDoc {
+  rel: string;
+  title: string;
+  kind: "references" | "assets" | "scripts";
+  chars: number;
+  executable: boolean | null;
+}
+
 export interface SkillCard {
   slug: string;
   name: string;
@@ -275,6 +284,9 @@ export interface SkillCard {
   category_label: string;
   brief: string;
   description: string;
+  docs?: SkillDoc[];
+  /** 卡手册里声明「必须加载」的文件，用户不能取消 */
+  core_docs?: string[];
 }
 
 export interface LibraryFolder {
