@@ -29,6 +29,13 @@ import {
   FIT_LABELS,
   buildLineBackground,
   saveTheme,
+  GRID_MODE_LABELS,
+  GRID_MIN,
+  GRID_MAX,
+  inPaperMode,
+  isGridLine,
+  paperMetrics,
+  type GridMode,
 } from "@/lib/editorTheme";
 
 interface Props {
@@ -36,11 +43,23 @@ interface Props {
   onOpenChange: (v: boolean) => void;
   theme: EditorTheme;
   onChange: (t: EditorTheme) => void;
+  /** 真实排版变量（--bd-font-size / --bd-line-height / --bd-line-box）。
+   *  不传则预览走兜底 35px，与正文区不一致——「预览看着对、正文不对」就是这么来的。 */
+  previewVars?: Record<string, string>;
 }
 
 const MAX_IMG_BYTES = 4 * 1024 * 1024; // 4MB base64
 
-export default function EditorThemeSettings({ open, onOpenChange, theme, onChange }: Props) {
+export default function EditorThemeSettings({
+  open,
+  onOpenChange,
+  theme,
+  onChange,
+  previewVars,
+}: Props) {
+  const paper = inPaperMode(theme);
+  const gridLine = isGridLine(theme.lineType);
+  const metrics = paperMetrics(theme.gridSize);
   const fileRef = useRef<HTMLInputElement | null>(null);
 
   function patch(p: Partial<EditorTheme>) {
@@ -108,7 +127,10 @@ export default function EditorThemeSettings({ open, onOpenChange, theme, onChang
                 backgroundSize: previewLine?.size,
                 backgroundRepeat: previewLine?.repeat,
                 backgroundPosition: previewLine?.position,
-              };
+                // 小色块没有正文内边距：把相位补偿归零，否则方格纸/田字格预设块会被推成空白
+                "--bd-pad-x": "0px",
+                "--bd-pad-y": "0px",
+              } as React.CSSProperties;
               return (
                 <button
                   key={p.id}
@@ -125,7 +147,10 @@ export default function EditorThemeSettings({ open, onOpenChange, theme, onChang
                     (isOn ? "border-primary ring-2 ring-primary/30" : "border-border hover:border-primary/40")
                   }
                 >
-                  <div className="h-12 w-full rounded" style={previewStyle} />
+                  <div
+                    className="h-12 w-full rounded"
+                    style={{ ...previewStyle, ...(previewVars as React.CSSProperties) }}
+                  />
                   <div className="mt-1 text-center text-[11px]">{p.label}</div>
                 </button>
               );
@@ -154,6 +179,58 @@ export default function EditorThemeSettings({ open, onOpenChange, theme, onChang
               </button>
             ))}
           </div>
+          {gridLine && (
+            <div className="mt-3 rounded-md border border-border bg-muted/30 p-2.5">
+              <div className="flex flex-wrap items-center gap-1.5">
+                <span className="text-[11px] text-muted-foreground">格子对齐</span>
+                <div className="inline-flex overflow-hidden rounded-md border border-border text-xs">
+                  {(
+                    [
+                      ["paper", GRID_MODE_LABELS.paper],
+                      ["flow", GRID_MODE_LABELS.flow],
+                    ] as [GridMode, string][]
+                  ).map(([mode, label]) => (
+                    <button
+                      key={mode}
+                      className={
+                        "px-2 py-0.5 transition-colors " +
+                        (theme.gridMode === mode
+                          ? "bg-primary/10 font-medium text-primary"
+                          : "text-muted-foreground hover:bg-muted")
+                      }
+                      onClick={() => patch({ gridMode: mode })}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              {paper ? (
+                <>
+                  <p className="mt-2 text-[11px] leading-5 text-muted-foreground">
+                    正方形格、<span className="text-foreground">一字一格</span>：格边长同时决定字号与行高
+                    （当前 字号 {metrics.fontSize}px · 行距 1.0），段间距自动归零——真稿纸没有段间距，
+                    这样每一行都严格落在格上。改格边长即整体缩放，竖线永远卡在字与字之间。
+                    <span className="text-muted-foreground">此时的字号/行距档位被接管，切回「跟随文字」即还原。</span>
+                  </p>
+                  <Label className="mt-2 block text-xs">格边长（{theme.gridSize}px）</Label>
+                  <input
+                    type="range"
+                    min={GRID_MIN}
+                    max={GRID_MAX}
+                    value={theme.gridSize}
+                    onChange={(e) => patch({ gridSize: Number(e.target.value) })}
+                    className="mt-1 w-full"
+                  />
+                </>
+              ) : (
+                <p className="mt-2 text-[11px] leading-5 text-muted-foreground">
+                  格宽 = 一个字的宽度、格高 = 行框高度：<span className="text-foreground">竖线对字、横线对行</span>，
+                  保留你自己的字号与行距（格子是长方形，不是正方形稿纸）。
+                </p>
+              )}
+            </div>
+          )}
         </section>
 
         {/* 横线颜色 / 间距 / 背景色 */}
@@ -206,7 +283,9 @@ export default function EditorThemeSettings({ open, onOpenChange, theme, onChang
               {(theme.lineSpacingMode ?? "auto") === "auto" ? (
                 <div className="mt-2">
                   <p className="text-[11px] leading-5 text-muted-foreground">
-                    横线/方格按「字号 × 行距」自动平铺，始终落在每行文字下方；改排版即跟着变。
+                    横线按「字号 × 行距」自动平铺，始终落在每行文字下方；竖线（方格/田字格）按
+                    <span className="text-foreground">一个字宽</span>平铺，永远卡在字与字之间。线还会自动补偿
+                    正文内边距，改字号/行距/页宽即跟着变——下面的微调只是「再挪半像素」的细活。
                   </p>
                   <Label className="mt-2 block text-xs">
                     线位微调（{theme.lineOffset ?? 0}px，只挪相位不改间距）

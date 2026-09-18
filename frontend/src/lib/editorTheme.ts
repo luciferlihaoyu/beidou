@@ -22,6 +22,43 @@ export type BgImageFit = "cover" | "contain" | "tile";
 /** 横线间距来源：auto = 跟随排版的「字号 × 行距」，manual = 固定像素 */
 export type LineSpacingMode = "auto" | "manual";
 
+/** 方格/田字格的格子对齐方式
+ *
+ * - paper（稿纸格）：格边长 = 字号 = 行高 → 正方形格，**一字一格**
+ * - flow（跟随文字）：格宽 = 1 个字宽（1em）、格高 = 行框高 → 竖线卡在字与字之间
+ *
+ * 为什么 paper 必须让字号等于格边长：竖线要严丝合缝落在**每个字之间**，格宽就得
+ * 恰好等于字符前进宽度（CJK 为 1em）。若格宽比字宽留内边距（如格 28px、字 23px），
+ * 字每走 23px、格每走 28px，两个边界会一路漂移，几格之后竖线就穿到字中间了。
+ * 所以真稿纸只有一种解：格边长 = 字号、行距 = 1（字挨字、行挨行，靠格子给分隔感）。
+ */
+export type GridMode = "paper" | "flow";
+
+export const GRID_MIN = 16;
+export const GRID_MAX = 40;
+export const DEFAULT_GRID_SIZE = 24;
+
+export const GRID_MODE_LABELS: Record<GridMode, string> = {
+  paper: "稿纸格（字入格）",
+  flow: "跟随文字",
+};
+
+/** 稿纸模式的排版推导：字号 = 格边长、行高 = 1（行框 = 格边长） */
+export function paperMetrics(gridSize: number): { fontSize: number; lineHeight: number; lineBox: number } {
+  const size = Math.min(GRID_MAX, Math.max(GRID_MIN, Math.round(gridSize || DEFAULT_GRID_SIZE)));
+  return { fontSize: size, lineHeight: 1, lineBox: size };
+}
+
+/** 该线型是否带格子（需要「格子对齐方式」） */
+export function isGridLine(lineType: LineType): boolean {
+  return lineType === "grid" || lineType === "cross";
+}
+
+/** 当前是否处于「稿纸格」模式（只有方格/田字格才有意义） */
+export function inPaperMode(t: EditorTheme): boolean {
+  return isGridLine(t.lineType) && t.gridMode === "paper";
+}
+
 export interface EditorTheme {
   lineType: LineType;
   lineColor: string;
@@ -35,6 +72,10 @@ export interface EditorTheme {
   bgImageOpacity: number;
   bgImageBlur: number;
   bgImageFit: BgImageFit;
+  /** 格子对齐方式（只对方格/田字格有效）：稿纸格 = 字入格，跟随文字 = 竖线按字宽 */
+  gridMode: GridMode;
+  /** 稿纸格的格边长（px）= 该模式下的字号与行高 */
+  gridSize: number;
   /** 主题预设：选了预设就批量改 lineColor/bgColor，但用户能微调 */
   preset: string;
 }
@@ -50,6 +91,9 @@ export const DEFAULT_THEME: EditorTheme = {
   bgImageOpacity: 0.5,
   bgImageBlur: 0,
   bgImageFit: "cover",
+  // 选了方格/田字格就默认给真稿纸观感（一字一格）；想保留自己的字号行距就切「跟随文字」
+  gridMode: "paper",
+  gridSize: DEFAULT_GRID_SIZE,
   preset: "default",
 };
 
@@ -73,7 +117,14 @@ export function loadTheme(): EditorTheme {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return DEFAULT_THEME;
     const obj = JSON.parse(raw);
-    return { ...DEFAULT_THEME, ...obj };
+    const merged = { ...DEFAULT_THEME, ...obj } as EditorTheme;
+    // 旧版本存的主题没有这两个字段（或值被改坏）→ 回退默认，避免格子尺寸变成 NaN
+    merged.gridMode = merged.gridMode === "flow" || merged.gridMode === "paper" ? merged.gridMode : "paper";
+    const size = Number(merged.gridSize);
+    merged.gridSize = Number.isFinite(size)
+      ? Math.min(GRID_MAX, Math.max(GRID_MIN, Math.round(size)))
+      : DEFAULT_GRID_SIZE;
+    return merged;
   } catch {
     return DEFAULT_THEME;
   }
@@ -102,14 +153,38 @@ export interface LineBackground {
  *  用 CSS 变量而不是 JS 计算，排版一改线就跟着改，无需重新渲染。 */
 const LINE_BOX = "var(--bd-line-box, 35px)";
 
+/** 一个字宽（CJK 全角字前进宽度 = 1em = 字号）。「跟随文字」模式的竖线按它平铺，
+ *  这样竖线永远卡在字与字之间，不会随字滚到中间。 */
+const FONT_W = "var(--bd-font-size, 17px)";
+
+/** 正文内边距（由 .prose-beidou 的 CSS 变量提供，与背景相位同源）。
+ *  背景画在外层滚动容器上，而文字被内边距推开——必须把相位补上这层内边距，
+ *  否则线整体偏移一个内边距：横线糊在字顶、竖线整体平移。 */
+const PAD_X = "var(--bd-pad-x, 2.5rem)";
+const PAD_Y = "var(--bd-pad-y, 2rem)";
+
 export function buildLineBackground(t: EditorTheme): LineBackground | null {
   const manual = t.lineSpacingMode === "manual";
   const s = t.lineSpacing; // 手动模式的像素间距
   // 自动模式：间距 = 行框高度（与文字严格同周期）；线画在每个重复单元的底部，
   // 即「每行文字的基线下方」，所以字变大小、行距变松紧，线都贴在字下方合适距离。
   const periodY = manual ? `${s}px` : LINE_BOX;
-  const position = manual ? undefined : `0 ${t.lineOffset || 0}px`;
+  // 相位 = 文字原点：内边距补偿 + 用户微调（手动模式不补，保持老行为不变）
+  const autoPosition =
+    t.lineOffset === 0 ? `${PAD_X} ${PAD_Y}` : `${PAD_X} calc(${PAD_Y} + ${t.lineOffset}px)`;
+  const position = manual ? undefined : autoPosition;
   const c = t.lineColor;
+
+  // 格子 tile（只对方格/田字格有意义）：
+  // - 稿纸格：格边长 = 字号（Editor.tsx 在稿纸模式下把字号/行高吸附到格边长）
+  //   → 正方形格、一字一格，竖线严丝合缝落在字间；
+  // - 跟随文字：格宽 = 1 个字宽、格高 = 行框高 → 竖线对字、横线对行（矩形格）；
+  // - 手动：两向都用固定像素（与排版无关，用户自己对齐）。
+  const g = `${Math.min(GRID_MAX, Math.max(GRID_MIN, Math.round(t.gridSize || DEFAULT_GRID_SIZE)))}px`;
+  const paperCell = inPaperMode(t);
+  const cellSize = manual ? `${s}px ${s}px` : paperCell ? `${g} ${g}` : `${FONT_W} ${LINE_BOX}`;
+  // 稿纸格同样要补内边距（否则整块格子相对文字平移）；但不需要相位微调——格边长即排版，本就严丝合缝
+  const cellPosition = paperCell ? `${PAD_X} ${PAD_Y}` : position;
 
   switch (t.lineType) {
     case "blank":
@@ -125,14 +200,20 @@ export function buildLineBackground(t: EditorTheme): LineBackground | null {
         position,
       };
     case "grid":
-      // 横线 + 竖线两层；单元格边长 = 行框高度（方形格），两层各自平铺
+      // 横线 + 竖线两层：竖线每「一个字宽」一根（卡在字间），横线每「一个行框」一根
       return {
         image: manual
           ? `linear-gradient(to right, ${c} 1px, transparent 1px), linear-gradient(to bottom, transparent 0, transparent ${s - 1}px, ${c} ${s - 1}px, ${c} ${s}px, transparent ${s}px)`
           : `linear-gradient(to right, ${c} 0 1px, transparent 1px 100%), linear-gradient(to bottom, transparent 0 calc(100% - 1px), ${c} calc(100% - 1px) 100%)`,
-        size: manual ? `${s}px ${s}px, ${s}px ${s}px` : `${LINE_BOX} ${LINE_BOX}, 100% ${LINE_BOX}`,
+        // 稿纸格两层都用字面格边长：格子的方正不依赖 --bd-line-box 是否同步，
+        // 少一处「变量没跟上就变成矩形」的耦合
+        size: manual
+          ? `${cellSize}, ${cellSize}`
+          : paperCell
+            ? `${cellSize}, 100% ${g}`
+            : `${cellSize}, 100% ${periodY}`,
         repeat: "repeat, repeat",
-        position,
+        position: cellPosition,
       };
     case "dotted":
       // 点落在每行文字下方（自动模式取底部）
@@ -164,9 +245,9 @@ export function buildLineBackground(t: EditorTheme): LineBackground | null {
           `<line x1='0' y1='50' x2='100' y2='50' stroke='${c}' stroke-width='0.5' stroke-dasharray='2 2' vector-effect='non-scaling-stroke'/></svg>`;
       return {
         image: `url("data:image/svg+xml;utf8,${encodeURIComponent(svg)}")`,
-        size: manual ? `${s}px ${s}px` : `${LINE_BOX} ${LINE_BOX}`,
+        size: cellSize,
         repeat: "repeat",
-        position,
+        position: cellPosition,
       };
     }
     default:

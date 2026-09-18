@@ -118,7 +118,8 @@ export default function TiptapEditor({
     ],
     content,
     editorProps: {
-      attributes: { class: "prose-beidou px-10 py-8 md:px-14" },
+      // 内边距由 .prose-beidou 的 CSS 变量提供（--bd-pad-x/y），与背景线相位同源
+      attributes: { class: "prose-beidou" },
       // 输入时自动转标点（规则统一在 lib/punctRules.ts，与「一键排版」同一口径）：
       // 半角标点转全角、直引号按奇偶配对成 “ ”、连打三点转省略号、双连字符转破折号。
       // 返回 true 阻止默认输入，改用 tr.insertText 一次性替换（不递归触发本钩子）

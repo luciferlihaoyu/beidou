@@ -94,12 +94,25 @@
 }
 
 /* ---------- TipTap 编辑器排版契约 ---------- */
+/* 正文内边距：**必须**走 CSS 变量，因为背景横线/方格画在外层滚动容器上，
+ * 它的相位要按同一组变量补偿内边距（否则线整体偏移一个内边距：
+ * 横线糊在字顶、竖线平移——「线不跟字」的真凶）。两边共用同一个源，就不会再漂移。 */
+.bd-writing-area {
+  --bd-pad-x: 2.5rem;
+  --bd-pad-y: 2rem;
+}
+@media (min-width: 768px) {
+  .bd-writing-area {
+    --bd-pad-x: 3.5rem;
+  }
+}
 .prose-beidou {
   font-family: "Noto Serif SC", "Source Han Serif SC", "Songti SC", "STSong",
     "SimSun", serif;
   /* 字号 / 行距走 CSS 变量，供写作排版偏好注入（回退值与原硬编码一致） */
   font-size: var(--bd-font-size, 1.0625rem);
   line-height: var(--bd-line-height, 2.05);
+  padding: var(--bd-pad-y, 2rem) var(--bd-pad-x, 2.5rem);
   /* A3：颜色继承容器（TiptapEditor 按主题背景亮度注入 textColorForBg），
      避免暗色模式/夜读主题下「亮底浅字」不可读 */
   color: inherit;

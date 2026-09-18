@@ -59,7 +59,14 @@ import ExportDialog from "@/components/ExportDialog";
 import PolishDialog from "@/components/PolishDialog";
 import QualityRadar from "@/components/QualityRadar";
 import RecycleBinView, { type RestoredPayload } from "@/components/RecycleBin";
-import { type EditorTheme, loadTheme } from "@/lib/editorTheme";
+import {
+  type EditorTheme,
+  GRID_MAX,
+  GRID_MIN,
+  inPaperMode,
+  loadTheme,
+  paperMetrics,
+} from "@/lib/editorTheme";
 import { normalizeParagraph } from "@/lib/punctRules";
 import SnapshotPanel from "@/components/SnapshotPanel";
 import TermsPanel from "@/components/TermsPanel";
@@ -568,6 +575,16 @@ export default function Editor() {
   const [theme, setTheme] = useState<EditorTheme>(() => loadTheme());
   const [themeOpen, setThemeOpen] = useState(false);
 
+  // 稿纸格模式：字号与行高由「格边长」吸附（一字一格、正方形格）。
+  // 注意这里只影响**渲染**，不改写用户存的排版偏好——切回「跟随文字」立刻还原。
+  const paperMode = inPaperMode(theme);
+  const paperM = paperMetrics(theme.gridSize);
+  const fontVar = paperMode ? `${paperM.fontSize}px` : FONT_SIZE_VAR[typo.fontSize];
+  const lineHeightRatio = paperMode ? paperM.lineHeight : LINE_HEIGHT_VAR[typo.lineHeight];
+  const lineBoxVar = paperMode
+    ? `${paperM.lineBox}px`
+    : "calc(var(--bd-font-size) * var(--bd-line-height))";
+
   // 废纸篓
   const [recycleOpen, setRecycleOpen] = useState(false);
 
@@ -784,6 +801,22 @@ export default function Editor() {
     el.addEventListener("wheel", onWheel, { passive: false });
     return () => el.removeEventListener("wheel", onWheel);
   }, []);
+  // 稿纸格模式下同上快捷键改「格边长」：此时字号由格子决定，改字号档位没有视觉效果
+  useEffect(() => {
+    const el = writingAreaRef.current;
+    if (!el || !paperMode) return;
+    const onWheel = (e: WheelEvent) => {
+      if (!(e.ctrlKey || e.metaKey)) return;
+      e.preventDefault();
+      const step = e.deltaY < 0 ? 1 : -1;
+      setTheme((prev) => ({
+        ...prev,
+        gridSize: Math.min(GRID_MAX, Math.max(GRID_MIN, prev.gridSize + step)),
+      }));
+    };
+    el.addEventListener("wheel", onWheel, { passive: false });
+    return () => el.removeEventListener("wheel", onWheel);
+  }, [paperMode]);
 
   const totalWords = useMemo(
     () => chapters.reduce((sum, c) => sum + c.word_count, 0),
@@ -2084,15 +2117,16 @@ export default function Editor() {
         {/* 写作区 */}
         <div
           ref={writingAreaRef}
-          className="relative flex min-w-0 flex-1 flex-col bg-background"
+          className="bd-writing-area relative flex min-w-0 flex-1 flex-col bg-background"
           style={
             {
-              "--bd-font-size": FONT_SIZE_VAR[typo.fontSize],
-              "--bd-line-height": LINE_HEIGHT_VAR[typo.lineHeight],
+              "--bd-font-size": fontVar,
+              "--bd-line-height": String(lineHeightRatio),
               // 一行文字的实际行框高度：横线/方格按它平铺，线才能始终落在字下方
-              "--bd-line-box": "calc(var(--bd-font-size) * var(--bd-line-height))",
+              "--bd-line-box": lineBoxVar,
               "--bd-para-indent": PARA_INDENT_VAR[typo.paraIndent ?? "two"],
-              "--bd-para-spacing": PARA_SPACING_VAR[typo.paraSpacing ?? "normal"],
+              // 稿纸格模式段间距归零：真稿纸没有段间距，且首段上外边距会顶下 0.55em 破坏行行对齐
+              "--bd-para-spacing": paperMode ? "0" : PARA_SPACING_VAR[typo.paraSpacing ?? "normal"],
               "--bd-align": typo.align ?? "left",
             } as CSSProperties
           }
@@ -2497,6 +2531,18 @@ export default function Editor() {
                       </Button>
                     </DropdownMenuTrigger>
                     <DropdownMenuContent align="end" className="w-36">
+                      {paperMode && (
+                        <>
+                          <DropdownMenuLabel className="px-2 py-1 text-[10px] font-normal leading-relaxed text-muted-foreground">
+                            稿纸格模式
+                            <br />
+                            字号 {paperM.fontSize}px · 行距 1.0
+                            <br />
+                            由格边长决定（写作区主题里可改）
+                          </DropdownMenuLabel>
+                          <DropdownMenuSeparator />
+                        </>
+                      )}
                       <DropdownMenuLabel className="px-2 py-1 text-[10px] font-normal text-muted-foreground">
                         字号
                       </DropdownMenuLabel>
@@ -2505,7 +2551,11 @@ export default function Editor() {
                         ["md", "中"],
                         ["lg", "大"],
                       ] as const).map(([value, label]) => (
-                        <DropdownMenuItem key={value} onClick={() => patchTypo("fontSize", value)}>
+                        <DropdownMenuItem
+                          key={value}
+                          disabled={paperMode}
+                          onClick={() => patchTypo("fontSize", value)}
+                        >
                           <Check className={`size-3.5 ${typo.fontSize === value ? "" : "opacity-0"}`} />
                           {label}
                         </DropdownMenuItem>
@@ -2519,7 +2569,11 @@ export default function Editor() {
                         ["normal", "标准"],
                         ["loose", "宽松"],
                       ] as const).map(([value, label]) => (
-                        <DropdownMenuItem key={value} onClick={() => patchTypo("lineHeight", value)}>
+                        <DropdownMenuItem
+                          key={value}
+                          disabled={paperMode}
+                          onClick={() => patchTypo("lineHeight", value)}
+                        >
                           <Check className={`size-3.5 ${typo.lineHeight === value ? "" : "opacity-0"}`} />
                           {label}
                         </DropdownMenuItem>
@@ -2692,7 +2746,20 @@ export default function Editor() {
         />
 
         {/* 写作区主题（横线 + 背景图） */}
-        <EditorThemeSettings open={themeOpen} onOpenChange={setThemeOpen} theme={theme} onChange={setTheme} />
+        <EditorThemeSettings
+          open={themeOpen}
+          onOpenChange={setThemeOpen}
+          theme={theme}
+          onChange={setTheme}
+          previewVars={{
+            "--bd-font-size": fontVar,
+            "--bd-line-height": String(lineHeightRatio),
+            "--bd-line-box": lineBoxVar,
+            // 预览块自己没有内边距，把相位补偿归零——否则小色块会被推开一大截、看着像空的
+            "--bd-pad-x": "0px",
+            "--bd-pad-y": "0px",
+          }}
+        />
 
         {/* B4 自定义导出（按卷/选章） */}
         <ExportDialog
