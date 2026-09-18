@@ -795,13 +795,20 @@ export const xuanjiApi = {
 };
 
 // ---------- 平台敏感词 + 去AI味 ----------
-export const PLATFORM_CHOICES: { key: string; name: string }[] = [
+/** 平台清单。harden = 该平台额外加严的类别（同一处证据在这类平台上升档处置），
+ *  与后端 app/textlint.py 的 escalate 声明保持一致，供作者在界面上看到检查范围。 */
+export const PLATFORM_CHOICES: { key: string; name: string; harden?: string[] }[] = [
   { key: "", name: "通用（不指定平台）" },
-  { key: "qidian", name: "起点中文网" },
-  { key: "fanqie", name: "番茄小说" },
-  { key: "qimao", name: "七猫小说" },
-  { key: "jjwxc", name: "晋江文学城" },
-  { key: "feilu", name: "飞卢小说" },
+  { key: "qidian", name: "起点中文网", harden: ["涉政与影射现实从严"] },
+  {
+    key: "fanqie",
+    name: "番茄小说",
+    harden: ["暴力血腥升为必改", "擦边描写升档", "涉黑违法升档", "引流最严", "未成年零容忍"],
+  },
+  { key: "qimao", name: "七猫小说", harden: ["暴力血腥升档", "擦边描写升档"] },
+  { key: "jjwxc", name: "晋江文学城", harden: ["擦边描写升为必改", "情欲描写从严"] },
+  { key: "feilu", name: "飞卢小说", harden: ["暴力血腥升档"] },
+  { key: "qunxiang", name: "QQ阅读/阅文系", harden: ["涉政从严", "引流从严"] },
 ];
 
 export interface DeflavorResult {

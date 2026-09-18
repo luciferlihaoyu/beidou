@@ -260,6 +260,7 @@ def _build_export_pack(p: AiProject, novel, groups) -> bytes:
     import zipfile
     from datetime import datetime
 
+    from .. import censor
     from ..textlint import PLATFORM_PROFILES, lint
 
     buf = io.BytesIO()
@@ -303,23 +304,33 @@ def _build_export_pack(p: AiProject, novel, groups) -> bytes:
             f"目标平台：{platform_name}" + (f"（自定义词 {len(custom_words)} 个）" if custom_words else ""),
             f"检测范围：done 章节 {done_count} 章 / 全书共 {chapter_total} 章",
             "",
+            "分级说明：🔴 硬红线（必改）｜🟠 影响审核或推荐｜🔵 待结合语境复核",
+            "",
         ]
         problem = [r for r in done_reports if r["issues"]]
+        all_issues = [i for r in done_reports for i in r["issues"]]
+        block_count = sum(1 for i in all_issues if i.get("level") == "block")
         if not done_reports:
             lines.append("（没有已完成章节可检测）")
         elif not problem:
-            lines.append("✅ 全部检测章节均未命中敏感词/规范问题。")
+            lines.append("✅ 全部检测章节未命中敏感词/规范问题。")
         else:
             for r in problem:
-                lines.append(f"—— {r['title']}（得分 {r['score']}）——")
-                for i in r["issues"]:
-                    lines.append(f"  [{i['severity']}] {i['type']}：{i['detail']}")
-                lines.append("")
+                lines.append(f"—— {r['title']}（规范得分 {r['score']}）——")
+                lines.extend(censor.format_issues(r["issues"]))
+            lines.extend(censor.summarize(all_issues))
+            lines.append("")
         if done_reports:
             avg = round(sum(r["score"] for r in done_reports) / len(done_reports), 1)
             lines.append("———————")
             lines.append(f"全书平均分：{avg}")
-            lines.append("结论：" + ("✅ 可投稿" if avg >= 90 else "⚠️ 建议修稿后再投（平均分低于 90）"))
+            lines.append("结论：" + censor.verdict(avg, block_count))
+        lines.append("")
+        lines.append("说明：" + censor.SUMMARY)
+        lines.append(
+            "本报告按公开审核口径做本地排查，不是任何平台的确切词库；"
+            "标记为「待复核」的项需结合剧情语境判断，不要机械替换。"
+        )
         z.writestr("敏感词终检报告.txt", "\n".join(lines) + "\n")
 
         # ---- 3. 简介（4 版本，如有）----

@@ -466,6 +466,19 @@ export function M3Toolbar({
               </button>
             ))}
           </div>
+          {(() => {
+            const chosen = PLATFORM_CHOICES.find((c) => c.key === platform);
+            if (!chosen?.harden?.length) return null;
+            return (
+              <p className="mt-2 text-xs leading-5 text-amber-600 dark:text-amber-400">
+                {chosen.name}加严：{chosen.harden.join("｜")}
+              </p>
+            );
+          })()}
+          <p className="mt-1 text-[11px] leading-5 text-muted-foreground">
+            检测按公开审核口径分为三档：🔴 硬红线（必改）｜🟠 影响审核或推荐｜🔵 需结合语境复核。
+            平台确切词库不公开且会变，检测只保证「少踩明显的雷」，不保证过审。
+          </p>
           <input
             className="mt-2 h-8 w-full rounded-md border border-border bg-transparent px-3 text-sm"
             placeholder="自定义敏感词，逗号分隔（如：金手指,系统流,真实地名）"

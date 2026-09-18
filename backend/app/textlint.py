@@ -13,7 +13,11 @@ from __future__ import annotations
 
 import re
 
-# ---- 敏感词表（网文平台机审常见类别，按需扩充）----
+from . import censor
+
+# ---- 兼容保留：旧的薄词表（新检测走 app/censor.py，此表仅备外部引用）----
+# 说明：平台确切词库是内部机密且动态更新，词表越写越像「保证过审」的假承诺；
+# 真正的检测逻辑已升级为 censor.check() 的分级规则 + 模式识别。
 SENSITIVE_WORDS: dict[str, list[str]] = {
     "政治": ["领导人", "执政党", "颠覆国家"],
     "暴恐": ["恐怖袭击", "炸弹制作", "人体炸弹"],
@@ -28,38 +32,64 @@ PLATFORM_PROFILES: dict[str, dict] = {
     "qidian": {
         "name": "起点中文网",
         "extra": {
-            "政治": ["国家领导人", "反动", "颠覆政权", "政治运动"],
-            "影射现实": ["真实地名暴动", "现实机构黑幕"],
+            # 起点对涉政/影射现实最严（历史、官场、现实题材尤其注意）
+            "政治": ["国家领导人", "反动", "颠覆政权", "政治运动", "政变", "独裁"],
+            "影射现实": ["真实地名暴动", "现实机构黑幕", "现实政策影射"],
+            "色情": ["床戏", "肉体交易", "情色"],
         },
     },
     "fanqie": {
         "name": "番茄小说",
         "extra": {
-            "暴恐": ["砍杀", "分尸", "碎尸"],
-            "涉黑": ["黑帮火并", "收保护费", "地下赌场"],
-            "色情": ["床戏", "肉体交易"],
+            # 番茄（免费向）尺度最严：未成年、擦边、引流、血腥细节都是高发驳回点
+            "未成年不当": ["校园霸凌细节", "未成年恋爱描写"],
+            "色情": ["床戏", "肉体交易", "擦边", "挑逗"],
+            "暴恐": ["砍杀", "分尸", "碎尸", "虐杀", "血腥细节"],
+            "涉黑": ["黑帮火并", "收保护费", "地下赌场", "高利贷"],
+            "赌博": ["网络赌博", "赌局流程"],
+            "引流": ["加更群", "粉丝群", "书友群"],
+            "封建迷信": ["驱邪治病", "符水"],
         },
+        "escalate": ["暴力细节", "擦边描写", "涉黑违法"],
     },
     "qimao": {
         "name": "七猫小说",
         "extra": {
-            "暴恐": ["砍杀", "分尸"],
-            "涉黑": ["黑帮", "收保护费"],
+            "暴恐": ["砍杀", "分尸", "血腥细节"],
+            "涉黑": ["黑帮", "收保护费", "高利贷"],
             "赌博": ["地下赌场", "网络赌博"],
+            "色情": ["床戏", "肉体交易"],
         },
+        "escalate": ["暴力细节", "擦边描写"],
     },
     "jjwxc": {
         "name": "晋江文学城",
         "extra": {
-            "色情": ["床戏", "肉体", "情欲", "欢爱"],
-            "耽美敏感": ["男男性行为", "女女性行为"],
-            "政治": ["影射时政"],
+            # 晋江对情欲描写与耽美分区最敏感，对政治影射同样严格
+            "色情": ["床戏", "肉体", "情欲", "欢爱", "露骨", "情色"],
+            "耽美敏感": ["男男性行为", "女女性行为", "同性肉体描写"],
+            "政治": ["影射时政", "现实政治"],
+            "未成年不当": ["未成年性相关"],
         },
+        # 晋江对情欲与擦边最敏感
+        "escalate": ["擦边描写"],
     },
     "feilu": {
         "name": "飞卢小说",
         "extra": {
+            "政治": ["国家领导人", "颠覆政权", "现实政治"],
+            "暴恐": ["血腥细节"],
+            "涉黑": ["黑帮火并"],
+            "引流": ["书友群", "粉丝群"],
+        },
+        "escalate": ["暴力细节"],
+    },
+    "qunxiang": {
+        "name": "QQ阅读/阅文系",
+        "extra": {
             "政治": ["国家领导人", "颠覆政权"],
+            "色情": ["床戏", "肉体交易"],
+            "引流": ["书友群", "加更群"],
         },
     },
 }
@@ -129,23 +159,21 @@ def lint(text: str, platform: str = "", custom_words: list[str] | None = None) -
         ctx = text[max(0, m.start() - 8) : m.end() + 8]
         issues.append({"type": "重复词", "severity": "medium", "detail": f"「{word}{word}」相邻重复（…{ctx}…）"})
 
-    # 2. 敏感词（通用 + 平台加严 + 自定义）
-    word_groups: list[tuple[str, list[str], str]] = [
-        (cat, words, "") for cat, words in SENSITIVE_WORDS.items()
-    ]
+    # 2. 平台合规检测（分级 + 合规改写建议）
+    #    旧实现只有 14 个词、全部一律 high、不区分语境；现改为按公开审核口径
+    #    分 block/fix/review 三档，并附「为什么踩雷 + 合规改法」。
     profile = PLATFORM_PROFILES.get(platform)
-    if profile:
-        word_groups += [(cat, words, f"[{profile['name']}]") for cat, words in profile["extra"].items()]
-    if custom_words:
-        word_groups.append(("自定义", [w for w in custom_words if w.strip()], ""))
-    for cat, words, tag in word_groups:
-        for w in words:
-            if w and w in text:
-                issues.append({
-                    "type": "敏感词",
-                    "severity": "high",
-                    "detail": f"{tag}含{cat}类敏感词「{w}」，平台机审可能拦截",
-                })
+    extra = profile["extra"] if profile else None
+    for issue in censor.check(
+        text,
+        platform=platform,
+        custom_words=custom_words,
+        extra_rules=extra,
+        escalate=(profile or {}).get("escalate"),
+    ):
+        if profile and issue["category"] in (extra or {}):
+            issue["detail"] = f"[{profile['name']}]" + issue["detail"]
+        issues.append(issue)
 
     # 3. 常见错别字
     for wrong, right in TYPO_PAIRS:
@@ -167,4 +195,15 @@ def lint(text: str, platform: str = "", custom_words: list[str] | None = None) -
 
     # 计分：高 -15 / 中 -5 / 低 -1，封顶 100
     penalty = sum(15 if i["severity"] == "high" else 5 if i["severity"] == "medium" else 1 for i in issues)
-    return {"score": max(0, 100 - penalty), "issues": issues[:50]}
+    summary = {
+        "block": sum(1 for i in issues if i.get("level") == "block"),
+        "fix": sum(1 for i in issues if i.get("level") == "fix"),
+        "review": sum(1 for i in issues if i.get("level") == "review"),
+    }
+    return {
+        "score": max(0, 100 - penalty),
+        "issues": issues[:50],
+        "summary": summary,
+        # 明确边界：不存在「敏感词清零即合规」，本检测不保证平台过审
+        "note": censor.SUMMARY,
+    }
