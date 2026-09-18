@@ -10,6 +10,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import re
 
 import pytest
@@ -234,3 +236,113 @@ class TestSkillTools:
         )
         assert "| 第1章 |" in out and "| 第2章 |" in out
         assert "| 第3章 |" not in out
+
+
+# ---------------------------------------------------------------------------
+# 拆书阅读上下文：模型没有文件系统，「读全书」由服务端按卡内规则代读。
+# 用假 DB 会话直接测 reading_context 全链路（不依赖真库）。
+# ---------------------------------------------------------------------------
+from types import SimpleNamespace  # noqa: E402
+
+
+class _FakeResult:
+    def __init__(self, items):
+        self._items = items
+
+    def scalars(self):
+        return self
+
+    def all(self):
+        return self._items
+
+
+class _FakeDB:
+    """按查询实体分发假数据：select(Chapter) → 章节，select(Volume) → 卷。"""
+
+    def __init__(self, chapters, vols):
+        self._chapters = chapters
+        self._vols = vols
+
+    async def execute(self, q):
+        entity = q.column_descriptions[0]["entity"]
+        from app.models import Chapter, Volume
+
+        return _FakeResult(self._chapters if entity is Chapter else self._vols)
+
+
+def _mk_chapters(n, per_chapter_chars=500, vols=None):
+    """造 n 章：正文为可识别文本；vols 是每章的 volume_id 列表（可 None）。"""
+    out = []
+    for i in range(1, n + 1):
+        body = f"第{i}章正文。" + f"情节推进{i}。" * (per_chapter_chars // 8)
+        out.append(
+            SimpleNamespace(
+                id=i,
+                sort_order=i,
+                title=f"试炼{i}",
+                word_count=len(body),
+                content=body,
+                volume_id=vols[i - 1] if vols else None,
+            )
+        )
+    return out
+
+
+class TestReadingContext:
+    def test_reading_cards_registry(self):
+        assert "novel-deconstruction" in skills.READING_CARDS
+
+    def test_golden_three_full_text(self):
+        chs = _mk_chapters(6)
+        out = asyncio.run(skills.reading_context(_FakeDB(chs, []), 1))
+        assert "【本书阅读上下文" in out
+        assert "【章节索引】" in out and "第1章 试炼1" in out and "第6章" in out
+        # 前三章给全文
+        assert out.count("· 全文】") == 3
+        assert "第1章正文。" in out
+        # 第 4-6 章不在黄金三章里，但会作为全书抽样的 首/末/最长 出现
+        assert "· 抽样】" in out
+        assert "未覆盖" in out  # 必须交代诚实标注义务
+
+    def test_empty_novel_returns_empty(self):
+        assert asyncio.run(skills.reading_context(_FakeDB([], []), 1)) == ""
+
+    def test_volume_sampling_skips_golden(self):
+        # 两卷各 8 章：黄金三章吃掉卷一前 3 章，卷一剩 5 章 → 抽样；卷二 8 章 → 抽样
+        vols = [1] * 8 + [2] * 8
+        chs = _mk_chapters(16, vols=vols)
+        vol_objs = [
+            SimpleNamespace(id=1, title="第一卷 风起", sort_order=1),
+            SimpleNamespace(id=2, title="第二卷 云涌", sort_order=2),
+        ]
+        out = asyncio.run(skills.reading_context(_FakeDB(chs, vol_objs), 1))
+        assert "第一卷 风起 · " in out and "第二卷 云涌 · " in out
+        # 黄金三章（第1-3章）不应再以抽样身份出现
+        assert "第一卷 风起 · 第1章" not in out
+
+    def test_long_chapter_truncated_with_note(self, monkeypatch):
+        monkeypatch.setattr(skills, "GOLDEN_CAP", 300)
+        chs = _mk_chapters(4, per_chapter_chars=1200)
+        out = asyncio.run(skills.reading_context(_FakeDB(chs, []), 1))
+        assert "超长截断" in out and "已截断" in out
+
+    def test_total_budget_drops_samples_first(self, monkeypatch):
+        monkeypatch.setattr(skills, "MAX_READING_CHARS", 2500)
+        chs = _mk_chapters(10, per_chapter_chars=900)
+        out = asyncio.run(skills.reading_context(_FakeDB(chs, []), 1))
+        assert "总量上限" in out  # 必须显式说明，不能静默丢
+        assert out.count("· 全文】") == 3  # 黄金三章优先保住
+
+    def test_index_capped_with_note(self, monkeypatch):
+        monkeypatch.setattr(skills, "INDEX_CAP_CHAPTERS", 10)
+        chs = _mk_chapters(30, per_chapter_chars=250)
+        out = asyncio.run(skills.reading_context(_FakeDB(chs, []), 1))
+        assert "仅显示前 10 行" in out and "共 30 章" in out
+        assert "第30章" not in out.split("【章节索引】")[1].split("【")[0]
+
+    def test_small_novel_no_sampling_noise(self):
+        # 只有 4 章：黄金三章盖住后只剩 1 章，不触发抽样，也不该有抽取说明噪声
+        chs = _mk_chapters(4)
+        out = asyncio.run(skills.reading_context(_FakeDB(chs, []), 1))
+        assert out.count("· 抽样】") == 0
+        assert "【抽取说明】" not in out

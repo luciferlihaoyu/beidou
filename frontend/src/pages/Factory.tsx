@@ -25,6 +25,9 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 
+/** 拆书创建路径的本地暂存键（项目创建前没有服务端归属，先落本地） */
+const FACTORY_BOOK_KEY = "beidou:factory-book-draft";
+
 const STATUS_LABEL: Record<string, string> = {
   draft: "立项中",
   setup: "待设定",
@@ -53,11 +56,44 @@ export default function Factory() {
   const [form, setForm] = useState<AiProjectCreate>({ seed_prompt: "" });
   const [showTargets, setShowTargets] = useState(false);
   const [busy, setBusy] = useState(false);
-  // 创建路径：idea = 一句话创意；book = 先拆书学范式
+  // 创建路径：idea = 一句话创意；book = 先拆书学范式。
+  // 拆书草稿在项目创建前不存在服务端归属，先落本地（localStorage），
+  // 创建成功即转存到项目并清除——刷新/误关页面都不丢。
   const [mode, setMode] = useState<"idea" | "book">("idea");
-  const [refText, setRefText] = useState("");
-  const [refNote, setRefNote] = useState<ReferenceNote | null>(null);
+  const [refText, setRefText] = useState(() => {
+    try {
+      return localStorage.getItem(FACTORY_BOOK_KEY + ":text") ?? "";
+    } catch {
+      return "";
+    }
+  });
+  const [refNote, setRefNote] = useState<ReferenceNote | null>(() => {
+    try {
+      const raw = localStorage.getItem(FACTORY_BOOK_KEY + ":note");
+      return raw ? (JSON.parse(raw) as ReferenceNote) : null;
+    } catch {
+      return null;
+    }
+  });
   const [deconstructing, setDeconstructing] = useState(false);
+
+  useEffect(() => {
+    try {
+      if (refText) localStorage.setItem(FACTORY_BOOK_KEY + ":text", refText);
+      else localStorage.removeItem(FACTORY_BOOK_KEY + ":text");
+    } catch {
+      /* 隐私模式等场景静默失败，不阻断创建 */
+    }
+  }, [refText]);
+
+  useEffect(() => {
+    try {
+      if (refNote) localStorage.setItem(FACTORY_BOOK_KEY + ":note", JSON.stringify(refNote));
+      else localStorage.removeItem(FACTORY_BOOK_KEY + ":note");
+    } catch {
+      /* 同上 */
+    }
+  }, [refNote]);
 
   async function runDeconstruct() {
     if (refText.trim().length < 200) {
@@ -100,13 +136,23 @@ export default function Factory() {
     setBusy(true);
     try {
       const p = await aiFactoryApi.create({ ...form, seed_prompt: seed });
-      // 拆书路径：把范式挂到新项目上（立项/设定生成时自动注入）
+      // 拆书路径：把范式挂到新项目上（立项/设定生成时自动注入），并带过去原文
       if (mode === "book" && refNote) {
         try {
           await deconstructApi.save(p.id, refNote);
+          await deconstructApi
+            .saveDraft(p.id, { text: trimForUpload(refText), hint: "", note: null })
+            .catch(() => {});
         } catch {
           toast.warning("范式保存失败，可进入项目后在「拆书学习」里重新保存");
         }
+      }
+      // 已转存到项目，清掉本地暂存
+      try {
+        localStorage.removeItem(FACTORY_BOOK_KEY + ":text");
+        localStorage.removeItem(FACTORY_BOOK_KEY + ":note");
+      } catch {
+        /* 清不掉也无妨 */
       }
       toast.success(mode === "book" && refNote ? "项目已创建并挂载范式，开始立项吧" : "项目已创建，开始立项吧");
       navigate(`/factory/${p.id}`);
@@ -279,7 +325,10 @@ export default function Factory() {
                     onChange={(e) => setRefText(e.target.value)}
                   />
                   <div className="flex items-center justify-between">
-                    <span className="text-[11px] text-muted-foreground">已备 {refText.length.toLocaleString()} 字</span>
+                    <span className="text-[11px] text-muted-foreground">
+                      已备 {refText.length.toLocaleString()} 字
+                      <span className="ml-1">· 本地暂存，刷新不丢</span>
+                    </span>
                     <Button size="sm" variant="outline" disabled={deconstructing} onClick={() => void runDeconstruct()}>
                       {deconstructing ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : <Wand2 className="mr-1 h-4 w-4" />}
                       {deconstructing ? "拆解中…" : "开始拆书"}

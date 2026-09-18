@@ -21,16 +21,44 @@ export default function DeconstructCard({
   onProjectChange: (p: AiProject) => void;
 }) {
   const [open, setOpen] = useState(false);
-  const [text, setText] = useState("");
-  const [hint, setHint] = useState("");
+  // 断点续传：原文/提示/草稿从项目恢复（服务端自动暂存），刷新页面不丢。
+  // ref 的取值优先级：已保存的范式 > 未保存的草稿。
+  const [text, setText] = useState(project.deconstruct_text ?? "");
+  const [hint, setHint] = useState(project.deconstruct_hint ?? "");
   const [busy, setBusy] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [ref, setRef] = useState<ReferenceNote | null>(project.reference ?? null);
+  const [ref, setRef] = useState<ReferenceNote | null>(
+    project.reference ?? project.deconstruct_draft ?? null
+  );
 
-  const has = !!(ref && (ref.worldview_framework || ref.power_system || ref.pacing));
+  const savedRef = project.reference ?? null;
+  const savedHas = !!(
+    savedRef &&
+    (savedRef.worldview_framework || savedRef.power_system || savedRef.pacing)
+  );
+  const draftHas =
+    !savedHas && !!(ref && (ref.worldview_framework || ref.power_system || ref.pacing));
+
+  // 草稿自动保存（防抖 900ms）：上传一本书是重活，拆到一半刷新全丢等于白干。
+  // 已保存的那份范式不再重复存草稿（内容相同即视为已落定，服务端保存时本就会清草稿）。
+  useEffect(() => {
+    if (busy) return; // 拆解请求进行中不动草稿
+    const t = window.setTimeout(() => {
+      const same = !!(
+        ref &&
+        savedRef &&
+        JSON.stringify(ref) === JSON.stringify(savedRef)
+      );
+      void deconstructApi
+        .saveDraft(project.id, { text: trimForUpload(text), hint, note: same ? null : ref })
+        .catch(() => {});
+    }, 900);
+    return () => window.clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [text, hint, ref, busy, project.id, savedRef]);
 
   // 项目被外部刷新（如他处保存/清空范式）时同步卡片显示；用引用比较避免覆盖用户正在编辑的内容
-  const lastProjectRef = useRef<unknown>(project.reference);
+  const lastProjectRef = useRef(project.reference);
   useEffect(() => {
     if (project.reference !== lastProjectRef.current) {
       lastProjectRef.current = project.reference;
@@ -94,10 +122,16 @@ export default function DeconstructCard({
       <button className="flex w-full items-center justify-between" onClick={() => setOpen((v) => !v)}>
         <span className="flex items-center gap-2 text-sm font-medium">
           <BookOpen className="h-4 w-4 text-primary" />
-          拆书学习{has ? " ✓" : ""}
+          拆书学习{savedHas ? " ✓" : ""}
         </span>
         <span className="text-[11px] text-muted-foreground">
-          {has ? "已挂载范式（生成立项/设定时注入）" : "粘贴参考书，学它的写法套路写新书"}
+          {savedHas
+            ? "已挂载范式（生成立项/设定时注入）"
+            : draftHas
+              ? "拆到一半的草稿（自动暂存，刷新不丢）"
+              : text
+                ? `已备 ${text.length.toLocaleString()} 字原文（自动暂存）`
+                : "粘贴参考书，学它的写法套路写新书"}
           <span className="ml-1">{open ? "收起 ▲" : "展开 ▼"}</span>
         </span>
       </button>
@@ -136,6 +170,7 @@ export default function DeconstructCard({
                 <span className="text-[11px] text-muted-foreground">
                   已备 {text.length.toLocaleString()} 字
                   {text.length > 360_000 && `（拆解时自动采样 ${(360_000).toLocaleString()} 字：首尾兼顾）`}
+                  <span className="ml-1">· 草稿自动保存，刷新后从这儿继续</span>
                 </span>
                 <Button size="sm" disabled={busy} onClick={() => void runDeconstruct()}>
                   {busy ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : <Wand2 className="mr-1 h-4 w-4" />}
@@ -164,6 +199,9 @@ export default function DeconstructCard({
                       setRef(null);
                       setText("");
                       setHint("");
+                      void deconstructApi
+                        .saveDraft(project.id, { text: "", hint: "", note: null })
+                        .catch(() => {});
                     }}
                   >
                     <Sparkles className="mr-1 h-3 w-3" />

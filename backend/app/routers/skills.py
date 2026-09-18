@@ -312,6 +312,7 @@ def card_block(
     task: str = "",
     requested: list[str] | None = None,
     tool_output: str = "",
+    reading: str = "",
 ) -> str:
     """组装「技能卡包」文本块：工作手册 + 参考文件全文 + 加载说明 + 工具输出。
 
@@ -337,6 +338,8 @@ def card_block(
         parts += [block, ""]
     if tool_output:
         parts += [tool_output, ""]
+    if reading:
+        parts += [reading, ""]
     if skipped:
         parts += ["【本次未加载的文件】" + "、".join(skipped) + "（如确需，可要求加载）", ""]
     if notes:
@@ -353,9 +356,10 @@ def build_skill_prompt(
     task: str,
     requested: list[str] | None = None,
     tool_output: str = "",
+    reading: str = "",
 ) -> str:
     """技能卡一次性执行 prompt（/skills/{slug}/run 用）。"""
-    block = card_block(slug, task=task, requested=requested, tool_output=tool_output)
+    block = card_block(slug, task=task, requested=requested, tool_output=tool_output, reading=reading)
     return f"{block}\n当前作品信息：\n{context}\n\n任务：{task}"
 
 
@@ -392,6 +396,153 @@ def tool_output_for(slug: str, chapters: list[tuple[str, str]]) -> str:
     if not chapters:
         return ""
     return run_for_card(slug, chapters)
+
+
+# ---------------------------------------------------------------------------
+# 拆书阅读上下文：模型没有文件系统，「读全书」由服务端代读。
+# 按拆书卡手册里的「阅读量规则」抽取：黄金三章精读（前 3 章全文）+
+# 每卷开头/卷末/最长章抽样 + 全书章节索引。超限显式标注，并要求模型
+# 对未读部分如实写「未覆盖」——禁止凭空概括。
+# ---------------------------------------------------------------------------
+READING_CARDS = {"novel-deconstruction"}
+MAX_READING_CHARS = 40_000
+GOLDEN_CHAPTERS = 3
+GOLDEN_CAP = 6_000
+SAMPLE_CAP = 3_500
+INDEX_CAP_CHAPTERS = 400
+
+
+def _assemble_reading(
+    index_lines: list[str],
+    golden: list[tuple[str, str]],
+    samples: list[tuple[str, str, str]],
+    notes: list[str],
+) -> str:
+    """拼装阅读上下文文本块（纯函数，便于测试）。"""
+    if not index_lines:
+        return ""
+    parts = [
+        "【本书阅读上下文（服务端按「拆书」技能的阅读量规则代读抽取）】",
+        f"- 章节索引：共 {len(index_lines)} 章",
+    ]
+    if golden:
+        parts.append(f"- 黄金三章全文：{len(golden)} 章（每章至多 {GOLDEN_CAP:,} 字）")
+    if samples:
+        parts.append(
+            f"- 分卷抽样：{len(samples)} 章（每卷开头/卷末/最长章各取其一；「最长章≈高潮章」"
+            "是字数启发式，不是情节判断）"
+        )
+    parts += ["", "【章节索引】", *index_lines, ""]
+    for label, text in golden:
+        parts += [f"【{label} · 全文】", text, ""]
+    for vol, label, text in samples:
+        parts += [f"【{vol} · {label} · 抽样】", text, ""]
+    if notes:
+        parts.append("【抽取说明】" + "；".join(notes))
+    parts.append(
+        "以上为按规则的抽样阅读，未提供的章节一律如实标注「未覆盖」，"
+        "禁止对未读部分凭空概括或编造章节依据。"
+    )
+    return "\n".join(parts)
+
+
+async def reading_context(db: AsyncSession, novel_id: int) -> str:
+    """按拆书卡的阅读量规则，从库里抽取章节索引 + 黄金三章 + 每卷抽样。"""
+    from sqlalchemy import select
+
+    from ..models import Chapter, Volume
+    from ..utils import strip_html
+
+    chapters = (
+        await db.execute(select(Chapter).where(Chapter.novel_id == novel_id).order_by(Chapter.sort_order))
+    ).scalars().all()
+    if not chapters:
+        return ""
+
+    vols = (
+        await db.execute(select(Volume).where(Volume.novel_id == novel_id).order_by(Volume.sort_order))
+    ).scalars().all()
+    vol_name = {v.id: (v.title or "未命名卷") for v in vols}
+
+    def chapter_label(i: int, c) -> str:
+        base = f"第{i}章" + (f" {c.title}" if c.title else "")
+        return f"{base}（{(c.word_count or 0):,}字）"
+
+    notes: list[str] = []
+    # 1) 章节索引（全局序号按排序位置生成，与界面一致）
+    index_lines = [chapter_label(i, c) for i, c in enumerate(chapters, 1)]
+    if len(index_lines) > INDEX_CAP_CHAPTERS:
+        notes.append(f"章节索引仅显示前 {INDEX_CAP_CHAPTERS} 行（共 {len(index_lines)} 章），完整清单未提供")
+        index_lines = index_lines[:INDEX_CAP_CHAPTERS]
+
+    # 2) 黄金三章：前 3 个有正文的章（全文，超长截断并标注）
+    golden: list[tuple[str, str]] = []
+    golden_ids: set[int] = set()
+    for i, c in enumerate(chapters, 1):
+        text = strip_html(c.content or "").strip()
+        if len(text) < 200:
+            continue
+        if len(text) > GOLDEN_CAP:
+            text = text[:GOLDEN_CAP] + "\n……（超长截断）"
+            notes.append(f"第{i}章超过 {GOLDEN_CAP:,} 字已截断")
+        golden.append((chapter_label(i, c), text))
+        golden_ids.add(c.id)
+        if len(golden) >= GOLDEN_CHAPTERS:
+            break
+
+    # 3) 分卷抽样：每卷 开头 1 + 卷末 1 + 最长 1（去重、避开黄金三章）
+    by_vol: dict[int | None, list] = {}
+    for i, c in enumerate(chapters, 1):
+        by_vol.setdefault(c.volume_id, []).append((i, c))
+    multi_vol = len([k for k in by_vol if k is not None]) > 0
+    samples: list[tuple[str, str, str]] = []
+    sample_ids: set[int] = set()
+
+    def vol_groups():
+        if multi_vol:
+            order = {v.id: n for n, v in enumerate(vols)}
+            keys = sorted(by_vol, key=lambda k: -1 if k is None else order.get(k, 9999))
+            for k in keys:
+                yield vol_name.get(k, "未分卷"), by_vol[k]
+        else:
+            yield "全书", by_vol.get(None, list(by_vol.values())[0] if by_vol else [])
+
+    for name, items in vol_groups():
+        rest = [(i, c) for i, c in items if c.id not in golden_ids]
+        if len(rest) <= 1:
+            continue  # 黄金三章之外没剩什么了，不必再抽（短书补全反而更好）
+        picks: list[tuple[int, object]] = [rest[0], rest[-1]]
+        longest = max(rest, key=lambda ic: (ic[1].word_count or 0))
+        if longest[1].id not in {c.id for _, c in picks}:
+            picks.append(longest)
+        for i, c in picks:
+            if c.id in sample_ids:
+                continue
+            text = strip_html(c.content or "").strip()[:SAMPLE_CAP]
+            if len(text) < 200:
+                continue
+            samples.append((name, chapter_label(i, c), text))
+            sample_ids.add(c.id)
+
+    # 4) 总量上限：超了从抽样尾部开始砍（黄金三章优先保住）
+    total = sum(len(t) for _, t in golden) + sum(len(t) for _, _, t in samples)
+    while samples and total > MAX_READING_CHARS:
+        vol, label, text = samples.pop()
+        total -= len(text)
+        notes.append(f"{label} 因总量上限未提供")
+    if golden and total > MAX_READING_CHARS:
+        overflow = total - MAX_READING_CHARS
+        for n, (label, text) in enumerate(golden):
+            if overflow <= 0:
+                break
+            cut = min(overflow, max(len(text) - 1000, 0))
+            if cut > 0:
+                golden[n] = (label, text[: len(text) - cut] + "\n……（总量上限截断）")
+                overflow -= cut
+                total -= cut
+        notes.append(f"阅读上下文总量压至 {MAX_READING_CHARS:,} 字")
+
+    return _assemble_reading(index_lines, golden, samples, notes)
 
 
 @router.get("")
@@ -445,7 +596,8 @@ async def run_skill(
 
     task = data.instruction.strip() or f"请运用「{card['name']}」技能，基于以上作品信息开始工作，并主动给出产出。"
     tool_out = tool_output_for(slug, await novel_texts(db, novel.id))
-    prompt = build_skill_prompt(slug, context, task, data.docs, tool_output=tool_out)
+    reading = await reading_context(db, novel.id) if slug in READING_CARDS else ""
+    prompt = build_skill_prompt(slug, context, task, data.docs, tool_output=tool_out, reading=reading)
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": prompt},

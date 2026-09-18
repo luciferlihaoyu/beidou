@@ -456,6 +456,11 @@ export interface AiProject {
   subplot_board: string;
   synopsis: AiSynopsis | null;
   reference: ReferenceNote | null;
+  /** 拆书断点续传：上传的原文（裁剪后）+ 书名提示 + 未保存的范式草稿。
+   *  reference 仍是「已确认挂载」的口径，草稿只在保存前存在。 */
+  deconstruct_text: string;
+  deconstruct_hint: string;
+  deconstruct_draft: ReferenceNote | null;
   market: AiMarketReport | null;
   cover_prompt: AiCoverPrompt | null;
   kb_query: string;
@@ -932,6 +937,12 @@ export const deconstructApi = {
   save: (projectId: number, reference: ReferenceNote) =>
     api.put<{ ok: boolean; reference: ReferenceNote }>(`/api/ai-factory/projects/${projectId}/reference`, { reference }),
   clear: (projectId: number) => api.delete<{ ok: boolean }>(`/api/ai-factory/projects/${projectId}/reference`),
+  /** 拆书步骤暂存（防抖调用）：刷新页面后从这里恢复断点 */
+  saveDraft: (projectId: number, payload: { text: string; hint: string; note: ReferenceNote | null }) =>
+    api.put<{ ok: boolean; chars: number; has_note: boolean }>(
+      `/api/ai-factory/projects/${projectId}/deconstruct-draft`,
+      payload
+    ),
 };
 
 /** 章节生成失败：分类后的「病因 + 怎么办」 */

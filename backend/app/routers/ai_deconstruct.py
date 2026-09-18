@@ -142,6 +142,8 @@ async def save_reference(project_id: int, data: ReferenceIn, user: User = Depend
     """保存（或人工编辑后覆盖）项目的范式笔记。"""
     p = await _get_project(project_id, user, db)
     p.reference_json = json.dumps(data.reference, ensure_ascii=False)[:20000]
+    # 范式已确认挂载，草稿的使命结束（原文保留：用户可能想再拆一次）
+    p.deconstruct_draft_json = ""
     await db.commit()
     return {"ok": True, "reference": data.reference}
 
@@ -151,8 +153,49 @@ async def clear_reference(project_id: int, user: User = Depends(get_current_user
     """清空范式笔记（不再注入立项/设定）。"""
     p = await _get_project(project_id, user, db)
     p.reference_json = ""
+    p.deconstruct_draft_json = ""
     await db.commit()
     return {"ok": True}
+
+
+class DeconstructDraftIn(BaseModel):
+    """拆书步骤暂存：原文 + 书名提示 + 未保存的范式草稿。
+
+    客户端防抖自动保存，刷新页面后从这儿恢复断点。reference_json 仍是
+    「已确认挂载」的唯一口径——草稿永远不会被注入立项/设定。
+    """
+
+    text: str = Field(default="", max_length=2_000_000)
+    hint: str = Field(default="", max_length=200)
+    note: dict | None = None
+
+
+def _cap_for_storage(text: str, limit: int = 800_000) -> str:
+    """存储上限：超长按首尾保留（与前端 trimForUpload 同思路），不静默丢尾。"""
+    if len(text) <= limit:
+        return text
+    head, tail = int(limit * 0.75), int(limit * 0.25)
+    return text[:head] + "\n\n……（中间省略）……\n\n" + text[-tail:]
+
+
+@router.put("/projects/{project_id}/deconstruct-draft")
+async def save_deconstruct_draft(
+    project_id: int, data: DeconstructDraftIn, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
+):
+    """暂存拆书中间态（原文/提示/范式草稿）。仅 draft/setup 状态的项目用得上，
+    但不强制——用户可能停在别处刚刷新。"""
+    p = await _get_project(project_id, user, db)
+    p.deconstruct_text = _cap_for_storage(data.text)
+    p.deconstruct_hint = data.hint[:200]
+    p.deconstruct_draft_json = (
+        json.dumps(data.note, ensure_ascii=False)[:20000] if data.note else ""
+    )
+    await db.commit()
+    return {
+        "ok": True,
+        "chars": len(p.deconstruct_text),
+        "has_note": bool(p.deconstruct_draft_json),
+    }
 
 
 def reference_prompt_block(p: AiProject) -> str:

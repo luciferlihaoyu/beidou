@@ -108,6 +108,10 @@ async def _migrate():
         novel_cols = (await conn.execute(text("PRAGMA table_info(novels)"))).fetchall()
         if novel_cols and not any(c[1] == "daily_goal" for c in novel_cols):
             await conn.execute(text("ALTER TABLE novels ADD COLUMN daily_goal INTEGER NOT NULL DEFAULT 0"))
+        # ai_projects 拆书步骤暂存（M14.1：刷新断点续传）
+        await _ensure_column(conn, "ai_projects", "deconstruct_text", "TEXT NOT NULL DEFAULT ''")
+        await _ensure_column(conn, "ai_projects", "deconstruct_hint", "VARCHAR(200) NOT NULL DEFAULT ''")
+        await _ensure_column(conn, "ai_projects", "deconstruct_draft_json", "TEXT NOT NULL DEFAULT ''")
         # 章节快照/存稿点表（t4-snapshots）。CREATE TABLE IF NOT EXISTS 自身幂等。
         await conn.execute(
             text(

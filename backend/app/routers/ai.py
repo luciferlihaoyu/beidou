@@ -446,14 +446,17 @@ async def chat(data: ChatIn, user: User = Depends(get_current_user), db: AsyncSe
         # 技能卡：注入工作手册 + 按维度加载的参考文件全文 + 服务端工具实测数据。
         # 此前只注入 SKILL.md 正文，卡里「按速查表加载 references/xxx.md」这一步
         # 在 web 应用里从未真正发生（模型看不到磁盘），参考清单形同不存在。
-        from .skills import card_block, get_card, novel_texts, tool_output_for
+        from .skills import READING_CARDS, card_block, get_card, novel_texts, reading_context, tool_output_for
 
         card = get_card(data.skill)
         if card is None:
             raise HTTPException(404, "技能卡不存在")
         tool_out = tool_output_for(data.skill, await novel_texts(db, novel.id))
+        # 拆书卡：模型没有文件系统，由服务端按卡内阅读量规则代读（黄金三章 +
+        # 每卷抽样 + 章节索引），否则「拆这本书」连第 2、3 章原文都读不到。
+        reading = await reading_context(db, novel.id) if data.skill in READING_CARDS else ""
         system += "\n\n" + card_block(
-            data.skill, task=data.message, requested=data.skill_docs, tool_output=tool_out
+            data.skill, task=data.message, requested=data.skill_docs, tool_output=tool_out, reading=reading
         )
     messages = [{"role": "system", "content": system}]
     messages += [{"role": m.role, "content": m.content} for m in history]

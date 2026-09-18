@@ -367,6 +367,12 @@ class AiProject(Base):
     synopsis_json: Mapped[str] = mapped_column(Text, default="")  # 多版本简介 {short,standard,promotion,douyin}
     market_json: Mapped[str] = mapped_column(Text, default="")  # 市场调研报告（选题用）
     reference_json: Mapped[str] = mapped_column(Text, default="")  # 拆书学习范式笔记（可编辑，注入立项/设定）
+    # 拆书步骤暂存（M14.1）：上传的原文 + 未保存的范式草稿。用户要求「刷新后还在」——
+    # 上传一本书是重活，拆到一半刷新全丢等于白干。reference_json 仍是「已确认挂载」
+    # 的唯一口径；这三列只是断点续传的中间态，保存范式时草稿即清空。
+    deconstruct_text: Mapped[str] = mapped_column(Text, default="")  # 待拆/已拆原文（首尾裁剪后）
+    deconstruct_hint: Mapped[str] = mapped_column(String(200), default="")  # 书名/题材提示
+    deconstruct_draft_json: Mapped[str] = mapped_column(Text, default="")  # 范式草稿 JSON（保存前中间态）
     cover_prompt: Mapped[str] = mapped_column(Text, default="")  # 封面绘图 prompt（中文描述+英文 prompt）
     kb_query: Mapped[str] = mapped_column(String(200), default="")  # 璇玑知识源检索词（空=不启用）
     platform: Mapped[str] = mapped_column(String(20), default="")  # 目标平台（敏感词词库分档）
