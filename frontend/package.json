@@ -8,7 +8,8 @@
     "build": "tsc -b && vite build",
     "lint": "eslint .",
     "preview": "vite preview",
-    "test:punct": "node scripts/test-punct-rules.ts"
+    "test:punct": "node scripts/test-punct-rules.ts",
+    "test:theme": "node scripts/test-editor-theme.ts"
   },
   "dependencies": {
     "@hookform/resolvers": "^5.2.2",

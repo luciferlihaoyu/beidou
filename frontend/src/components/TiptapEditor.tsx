@@ -234,6 +234,7 @@ export default function TiptapEditor({
     backgroundImage: lineBg?.image,
     backgroundSize: lineBg?.size,
     backgroundRepeat: lineBg?.repeat,
+    backgroundPosition: lineBg?.position,
     backgroundAttachment: "local",
     position: "relative",
     // A3：按背景亮度自动选正文颜色，避免「暗色模式 + 亮主题背景 = 浅字白底」

@@ -2089,6 +2089,8 @@ export default function Editor() {
             {
               "--bd-font-size": FONT_SIZE_VAR[typo.fontSize],
               "--bd-line-height": LINE_HEIGHT_VAR[typo.lineHeight],
+              // 一行文字的实际行框高度：横线/方格按它平铺，线才能始终落在字下方
+              "--bd-line-box": "calc(var(--bd-font-size) * var(--bd-line-height))",
               "--bd-para-indent": PARA_INDENT_VAR[typo.paraIndent ?? "two"],
               "--bd-para-spacing": PARA_SPACING_VAR[typo.paraSpacing ?? "normal"],
               "--bd-align": typo.align ?? "left",

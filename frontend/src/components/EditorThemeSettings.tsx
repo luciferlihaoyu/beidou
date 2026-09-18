@@ -107,6 +107,7 @@ export default function EditorThemeSettings({ open, onOpenChange, theme, onChang
                 backgroundImage: previewLine?.image,
                 backgroundSize: previewLine?.size,
                 backgroundRepeat: previewLine?.repeat,
+                backgroundPosition: previewLine?.position,
               };
               return (
                 <button
@@ -178,15 +179,63 @@ export default function EditorThemeSettings({ open, onOpenChange, theme, onChang
               </div>
             </div>
             <div>
-              <Label className="text-xs">行距（{theme.lineSpacing}px）</Label>
-              <input
-                type="range"
-                min={16}
-                max={48}
-                value={theme.lineSpacing}
-                onChange={(e) => patch({ lineSpacing: Number(e.target.value) })}
-                className="mt-2 w-full"
-              />
+              <div className="flex items-center justify-between">
+                <Label className="text-xs">线距</Label>
+                <div className="flex rounded-md border border-border text-[11px]">
+                  {(
+                    [
+                      ["auto", "跟随文字"],
+                      ["manual", "固定像素"],
+                    ] as const
+                  ).map(([mode, label]) => (
+                    <button
+                      key={mode}
+                      className={
+                        "px-2 py-0.5 transition-colors " +
+                        ((theme.lineSpacingMode ?? "auto") === mode
+                          ? "bg-primary/10 font-medium text-primary"
+                          : "text-muted-foreground hover:bg-muted")
+                      }
+                      onClick={() => patch({ lineSpacingMode: mode })}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              {(theme.lineSpacingMode ?? "auto") === "auto" ? (
+                <div className="mt-2">
+                  <p className="text-[11px] leading-5 text-muted-foreground">
+                    横线/方格按「字号 × 行距」自动平铺，始终落在每行文字下方；改排版即跟着变。
+                  </p>
+                  <Label className="mt-2 block text-xs">
+                    线位微调（{theme.lineOffset ?? 0}px，只挪相位不改间距）
+                  </Label>
+                  <input
+                    type="range"
+                    min={-8}
+                    max={8}
+                    value={theme.lineOffset ?? 0}
+                    onChange={(e) => patch({ lineOffset: Number(e.target.value) })}
+                    className="mt-1 w-full"
+                  />
+                </div>
+              ) : (
+                <div className="mt-2">
+                  <p className="text-[11px] leading-5 text-amber-600 dark:text-amber-400">
+                    固定像素与文字行高无关，字号或行距一变就会与文字错位。
+                  </p>
+                  <Label className="mt-2 block text-xs">行距（{theme.lineSpacing}px）</Label>
+                  <input
+                    type="range"
+                    min={16}
+                    max={48}
+                    value={theme.lineSpacing}
+                    onChange={(e) => patch({ lineSpacing: Number(e.target.value) })}
+                    className="mt-1 w-full"
+                  />
+                </div>
+              )}
             </div>
             <div className="col-span-2">
               <Label className="text-xs">背景色</Label>

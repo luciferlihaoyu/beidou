@@ -3,7 +3,10 @@
  * 数据结构（localStorage 也按此存）：
  * - lineType: blank | lined | grid | dotted | cross（五类）
  * - lineColor: 浅色 hex
- * - lineSpacing: 像素 (16-48)
+ * - lineType/lineColor: 线型与颜色
+ * - lineSpacingMode: auto（跟随文字行距，默认）| manual（固定像素）
+ * - lineSpacing: 手动模式下的像素值 (16-48)
+ * - lineOffset: 自动模式下的相位微调（px，负值上移）——只挪相位，不改间距
  * - bgColor: 编辑区背景色
  * - bgImage: base64 dataURL（null = 无）
  * - bgImageOpacity: 0-1
@@ -16,10 +19,17 @@
 export type LineType = "blank" | "lined" | "grid" | "dotted" | "cross";
 export type BgImageFit = "cover" | "contain" | "tile";
 
+/** 横线间距来源：auto = 跟随排版的「字号 × 行距」，manual = 固定像素 */
+export type LineSpacingMode = "auto" | "manual";
+
 export interface EditorTheme {
   lineType: LineType;
   lineColor: string;
+  /** 默认 auto：线距由文字行高推导，保证线始终落在每行文字下方 */
+  lineSpacingMode: LineSpacingMode;
   lineSpacing: number;
+  /** 自动模式的相位微调（px）：background-position 只挪相位，绝不改间距 */
+  lineOffset: number;
   bgColor: string;
   bgImage: string | null;
   bgImageOpacity: number;
@@ -32,7 +42,9 @@ export interface EditorTheme {
 export const DEFAULT_THEME: EditorTheme = {
   lineType: "blank",
   lineColor: "#e5e7eb",
+  lineSpacingMode: "auto", // 关键默认：线距跟随文字行高，避免「线跟字越错越多」
   lineSpacing: 28,
+  lineOffset: 0,
   bgColor: "#ffffff",
   bgImage: null,
   bgImageOpacity: 0.5,
@@ -82,55 +94,86 @@ export interface LineBackground {
   image: string;
   size: string;
   repeat: string;
+  /** 自动模式的相位微调用；手动模式为 undefined（不需要） */
+  position?: string;
 }
 
+/** 一行文字的「行框高度」：字号 × 行距，由 Editor.tsx 注入为 CSS 变量。
+ *  用 CSS 变量而不是 JS 计算，排版一改线就跟着改，无需重新渲染。 */
+const LINE_BOX = "var(--bd-line-box, 35px)";
+
 export function buildLineBackground(t: EditorTheme): LineBackground | null {
-  const s = t.lineSpacing;
+  const manual = t.lineSpacingMode === "manual";
+  const s = t.lineSpacing; // 手动模式的像素间距
+  // 自动模式：间距 = 行框高度（与文字严格同周期）；线画在每个重复单元的底部，
+  // 即「每行文字的基线下方」，所以字变大小、行距变松紧，线都贴在字下方合适距离。
+  const periodY = manual ? `${s}px` : LINE_BOX;
+  const position = manual ? undefined : `0 ${t.lineOffset || 0}px`;
   const c = t.lineColor;
+
   switch (t.lineType) {
     case "blank":
       return null;
     case "lined":
-      // 一条 1px 线 + 底部留白，按 100% × s 平铺
+      // 自动模式用百分比停靠：底部 1px 实线，不受具体像素影响
       return {
-        image: `linear-gradient(to bottom, transparent 0, transparent ${s - 1}px, ${c} ${s - 1}px, ${c} ${s}px, transparent ${s}px)`,
-        size: `100% ${s}px`,
+        image: manual
+          ? `linear-gradient(to bottom, transparent 0, transparent ${s - 1}px, ${c} ${s - 1}px, ${c} ${s}px, transparent ${s}px)`
+          : `linear-gradient(to bottom, transparent 0 calc(100% - 1px), ${c} calc(100% - 1px) 100%)`,
+        size: `100% ${periodY}`,
         repeat: "repeat",
+        position,
       };
     case "grid":
-      // 横线 + 竖线两层，各自按 s×s 平铺
+      // 横线 + 竖线两层；单元格边长 = 行框高度（方形格），两层各自平铺
       return {
-        image: `linear-gradient(to right, ${c} 1px, transparent 1px), linear-gradient(to bottom, ${c} 1px, transparent 1px)`,
-        size: `${s}px ${s}px, ${s}px ${s}px`,
+        image: manual
+          ? `linear-gradient(to right, ${c} 1px, transparent 1px), linear-gradient(to bottom, transparent 0, transparent ${s - 1}px, ${c} ${s - 1}px, ${c} ${s}px, transparent ${s}px)`
+          : `linear-gradient(to right, ${c} 0 1px, transparent 1px 100%), linear-gradient(to bottom, transparent 0 calc(100% - 1px), ${c} calc(100% - 1px) 100%)`,
+        size: manual ? `${s}px ${s}px, ${s}px ${s}px` : `${LINE_BOX} ${LINE_BOX}, 100% ${LINE_BOX}`,
         repeat: "repeat, repeat",
+        position,
       };
     case "dotted":
+      // 点落在每行文字下方（自动模式取底部）
       return {
-        image: `radial-gradient(circle, ${c} 1px, transparent 1.5px)`,
-        size: `${s}px ${s}px`,
+        image: manual
+          ? `radial-gradient(circle, ${c} 1px, transparent 1.5px)`
+          : `radial-gradient(circle at 50% calc(100% - 1px), ${c} 1px, transparent 1.5px)`,
+        size: manual ? `${s}px ${s}px` : `100% ${LINE_BOX}`,
         repeat: "repeat",
+        position,
       };
     case "cross": {
-      // 田字格：外框实线 + 内部虚线十字
-      const inner = s / 2;
-      const svg =
-        `<svg xmlns='http://www.w3.org/2000/svg' width='${s}' height='${s}' viewBox='0 0 ${s} ${s}'>` +
-        `<line x1='0' y1='0' x2='${s}' y2='0' stroke='${c}' stroke-width='1'/>` +
-        `<line x1='0' y1='${s}' x2='${s}' y2='${s}' stroke='${c}' stroke-width='1'/>` +
-        `<line x1='0' y1='0' x2='0' y2='${s}' stroke='${c}' stroke-width='1'/>` +
-        `<line x1='${s}' y1='0' x2='${s}' y2='${s}' stroke='${c}' stroke-width='1'/>` +
-        `<line x1='${inner}' y1='0' x2='${inner}' y2='${s}' stroke='${c}' stroke-width='0.5' stroke-dasharray='2 2'/>` +
-        `<line x1='0' y1='${inner}' x2='${s}' y2='${inner}' stroke='${c}' stroke-width='0.5' stroke-dasharray='2 2'/></svg>`;
+      // 田字格：用 viewBox + preserveAspectRatio=none 让格子随行高伸缩，
+      // 线条用 vector-effect=non-scaling-stroke 保持 1px（否则拉伸会变粗变虚）。
+      const svg = manual
+        ? `<svg xmlns='http://www.w3.org/2000/svg' width='${s}' height='${s}' viewBox='0 0 ${s} ${s}'>` +
+          `<line x1='0' y1='0' x2='${s}' y2='0' stroke='${c}' stroke-width='1'/>` +
+          `<line x1='0' y1='${s}' x2='${s}' y2='${s}' stroke='${c}' stroke-width='1'/>` +
+          `<line x1='0' y1='0' x2='0' y2='${s}' stroke='${c}' stroke-width='1'/>` +
+          `<line x1='${s}' y1='0' x2='${s}' y2='${s}' stroke='${c}' stroke-width='1'/>` +
+          `<line x1='${s / 2}' y1='0' x2='${s / 2}' y2='${s}' stroke='${c}' stroke-width='0.5' stroke-dasharray='2 2'/>` +
+          `<line x1='0' y1='${s / 2}' x2='${s}' y2='${s / 2}' stroke='${c}' stroke-width='0.5' stroke-dasharray='2 2'/></svg>`
+        : `<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100' preserveAspectRatio='none'>` +
+          `<line x1='0' y1='99.5' x2='100' y2='99.5' stroke='${c}' stroke-width='1' vector-effect='non-scaling-stroke'/>` +
+          `<line x1='0' y1='0' x2='100' y2='0' stroke='${c}' stroke-width='1' vector-effect='non-scaling-stroke'/>` +
+          `<line x1='0.5' y1='0' x2='0.5' y2='100' stroke='${c}' stroke-width='1' vector-effect='non-scaling-stroke'/>` +
+          `<line x1='99.5' y1='0' x2='99.5' y2='100' stroke='${c}' stroke-width='1' vector-effect='non-scaling-stroke'/>` +
+          `<line x1='50' y1='0' x2='50' y2='100' stroke='${c}' stroke-width='0.5' stroke-dasharray='2 2' vector-effect='non-scaling-stroke'/>` +
+          `<line x1='0' y1='50' x2='100' y2='50' stroke='${c}' stroke-width='0.5' stroke-dasharray='2 2' vector-effect='non-scaling-stroke'/></svg>`;
       return {
         image: `url("data:image/svg+xml;utf8,${encodeURIComponent(svg)}")`,
-        size: `${s}px ${s}px`,
+        size: manual ? `${s}px ${s}px` : `${LINE_BOX} ${LINE_BOX}`,
         repeat: "repeat",
+        position,
       };
     }
+    default:
+      return null;
   }
 }
 
-/** 背景图（base64）拼装 background-image，配合 opacity/blur 用 ::before 层 */
 export function buildImageBackground(t: EditorTheme): string | undefined {
   if (!t.bgImage) return undefined;
   switch (t.bgImageFit) {
