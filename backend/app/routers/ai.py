@@ -1,10 +1,13 @@
 """AI 模块：接口配置管理 + OpenAI 兼容协议的流式对话/续写/大纲/审查。"""
 
+import asyncio
 import json
 
 import time
 
 import httpx
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
@@ -16,6 +19,8 @@ from ..db import get_db
 from ..deps import get_ai_config, get_current_user, get_owned_novel
 from ..models import AIConfig, Chapter, ChatMessage, Novel, User
 from ..utils import strip_html
+
+logger = logging.getLogger("beidou.ai")
 
 router = APIRouter(prefix="/api/ai", tags=["ai"])
 
@@ -143,10 +148,24 @@ async def delete_config(config_id: int, user: User = Depends(get_current_user), 
 
 # ---------- 流式对话核心 ----------
 
+# 等待上游期间的心跳间隔（秒）。取值要明显小于常见网关/代理的空闲超时
+# （Envoy 路由默认 15s、Nginx proxy_read_timeout 常配 60s）。
+KEEPALIVE_SECONDS = 10.0
+
+
 async def _stream_openai(config: AIConfig, messages: list[dict], on_complete=None):
     """以 SSE 形式转发 OpenAI 兼容接口的流式响应。
 
     on_complete: 可选异步回调，流正常结束后收到完整回复文本（用于保存对话历史）。
+
+    为什么要有心跳（重要教训）：本函数过去在**上游吐出第一个 token 之前一个字节都不发**。
+    而一个长章节的思考阶段动辄几十秒，中间什么都不过线——网关/代理会把这个「安静」的
+    连接当成空闲连接掐掉，客户端于是收到一个**干净结束的空响应**：既没有正文，也没有
+    任何错误事件，用户看到的就是「点了一下，过一会什么都没有」。所以现在：
+      1. 一连上就先发一条 stage=connected（让字节立刻流动，也让前端能区分「没连上」和「在等模型」）；
+      2. 等上游数据期间每 KEEPALIVE_SECONDS 发一行 SSE 注释（`:` 开头，客户端按协议忽略）
+         把连接撑住；
+      3. 上游的异常一律转成 error 事件，绝不静默收尾。
     """
     url = _normalize_base(config.base_url) + "/v1/chat/completions"
     payload = {"model": config.model, "messages": messages, "stream": True}
@@ -156,39 +175,72 @@ async def _stream_openai(config: AIConfig, messages: list[dict], on_complete=Non
 
     async def generate():
         parts: list[str] = []
-        finished = False
+        upstream_ok = False
+        queue: asyncio.Queue = asyncio.Queue()
+
+        async def pump():
+            """把上游 SSE 行搬进队列；结束时投递 eof，任何异常投递 fatal。"""
+            try:
+                async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=15.0)) as client:
+                    async with client.stream("POST", url, json=payload, headers=headers) as resp:
+                        if resp.status_code != 200:
+                            body = (await resp.aread()).decode(errors="ignore")[:300]
+                            await queue.put(("fatal", f"AI 接口返回 {resp.status_code}: {body}"))
+                            return
+                        async for line in resp.aiter_lines():
+                            await queue.put(("line", line))
+            except httpx.HTTPError as exc:
+                await queue.put(("fatal", f"无法连接 AI 接口: {exc.__class__.__name__}"))
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # 任何其他异常也必须报给前端，不能静默结束
+                await queue.put(("fatal", f"生成中断: {exc.__class__.__name__}: {exc}"))
+            finally:
+                await queue.put(("eof", None))
+
+        # 立刻发一条：连接一开始就有字节，避免「等首字期间被当空闲连接掐掉」
+        yield f"data: {json.dumps({'stage': 'connected', 'model': config.model}, ensure_ascii=False)}\n\n"
+
+        task = asyncio.create_task(pump())
         try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=15.0)) as client:
-                async with client.stream("POST", url, json=payload, headers=headers) as resp:
-                    if resp.status_code != 200:
-                        body = (await resp.aread()).decode(errors="ignore")[:300]
-                        yield f"data: {json.dumps({'error': f'AI 接口返回 {resp.status_code}: {body}'})}\n\n"
-                        return
-                    async for line in resp.aiter_lines():
-                        if not line.startswith("data:"):
-                            continue
-                        data = line[5:].strip()
-                        if data == "[DONE]":
-                            break
-                        try:
-                            chunk = json.loads(data)
-                            delta = chunk["choices"][0].get("delta", {}).get("content")
-                            if delta:
-                                parts.append(delta)
-                                yield f"data: {json.dumps({'content': delta}, ensure_ascii=False)}\n\n"
-                        except (json.JSONDecodeError, KeyError, IndexError):
-                            continue
-            finished = True
-        except httpx.HTTPError as exc:
-            yield f"data: {json.dumps({'error': f'无法连接 AI 接口: {exc.__class__.__name__}'}, ensure_ascii=False)}\n\n"
-            return
+            while True:
+                try:
+                    kind, item = await asyncio.wait_for(queue.get(), timeout=KEEPALIVE_SECONDS)
+                except asyncio.TimeoutError:
+                    yield ": keepalive\n\n"
+                    continue
+                if kind == "eof":
+                    upstream_ok = True
+                    break
+                if kind == "fatal":
+                    logger.warning("流式生成失败：配置「%s」模型 %s：%s", config.name, config.model, item)
+                    yield f"data: {json.dumps({'error': item}, ensure_ascii=False)}\n\n"
+                    return
+                line = item or ""
+                if not line.startswith("data:"):
+                    continue
+                data = line[5:].strip()
+                if data == "[DONE]":
+                    continue
+                try:
+                    chunk = json.loads(data)
+                    delta = chunk["choices"][0].get("delta", {}).get("content")
+                except (json.JSONDecodeError, KeyError, IndexError, TypeError):
+                    continue
+                if delta:
+                    parts.append(delta)
+                    yield f"data: {json.dumps({'content': delta}, ensure_ascii=False)}\n\n"
+        finally:
+            task.cancel()
+
         if not parts:
-            # 200 但零增量：以前这里只发 done，前端「无错也无字」，用户只看到转圈
-            # 然后任务卡在 writing 直到 15 分钟自动解锁。必须报出「哪个配置/模型/端点」。
+            # 上游 200 但零增量：以前这里只发 done，前端「无错也无字」。必须报出
+            # 「哪个配置/模型/端点」，否则用户无法判断该改哪一样。
+            logger.warning("模型零输出：配置「%s」模型 %s 端点 %s", config.name, config.model, config.base_url)
             yield f"data: {json.dumps({'error': empty_output_error(config.name, config.model, config.base_url, stream=True)}, ensure_ascii=False)}\n\n"
             return
-        yield f"data: {json.dumps({'done': True})}\n\n"
-        if finished and on_complete is not None and parts:
+        yield f"data: {json.dumps({'done': True, 'chars': sum(len(x) for x in parts)})}\n\n"
+        if upstream_ok and on_complete is not None:
             try:
                 await on_complete("".join(parts))
             except Exception:

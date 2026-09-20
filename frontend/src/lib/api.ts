@@ -71,12 +71,24 @@ export const api = {
   },
 };
 
-/** SSE 流式请求（POST），逐段回调文本。 */
+/** SSE 流式请求（POST），逐段回调文本。
+ *
+ * onStage：收到后端的阶段事件时回调（目前是 {"stage":"connected"}）。
+ *
+ * 为什么要在结束时做「零内容」判定：用户报过「点生成，过一会儿什么都没出来」。
+ * 那种情况下连接是**干净结束**的——既没有正文，也没有错误事件；前端若只等 onChunk，
+ * 就会安静收工，用户根本不知道发生了什么。这里把响应元信息（状态码、content-type、
+ * 收到多少字节）带进错误文案，下一句就能区分三种完全不同的原因：
+ *   1. 请求没走到生成接口（content-type 不是 SSE）
+ *   2. 连接在等到首字前就被掐断（SSE、0 字节）——网关把安静长连接当空闲连接处理
+ *   3. 后端确实发了事件但一个字正文都没有（推理模型只回思考内容等）
+ */
 export async function streamPost(
   path: string,
   body: unknown,
   onChunk: (text: string) => void,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  onStage?: (stage: string) => void
 ): Promise<void> {
   const token = getToken();
   const resp = await fetch(path, {
@@ -98,12 +110,16 @@ export async function streamPost(
     }
     throw new ApiError(resp.status, message);
   }
+  const contentType = resp.headers.get("content-type") ?? "";
   const reader = resp.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
+  let rawBytes = 0;
+  let contentChars = 0;
   for (;;) {
     const { done, value } = await reader.read();
     if (done) break;
+    rawBytes += value?.byteLength ?? 0;
     buffer += decoder.decode(value, { stream: true });
     const events = buffer.split("\n\n");
     buffer = events.pop() ?? "";
@@ -113,11 +129,35 @@ export async function streamPost(
       try {
         const payload = JSON.parse(line.slice(5).trim());
         if (payload.error) throw new ApiError(500, payload.error);
-        if (payload.content) onChunk(payload.content);
+        if (payload.stage && onStage) onStage(payload.stage);
+        if (payload.content) {
+          contentChars += payload.content.length;
+          onChunk(payload.content);
+        }
       } catch (e) {
         if (e instanceof ApiError) throw e;
       }
     }
+  }
+  if (contentChars === 0) {
+    const isSse = contentType.includes("text/event-stream");
+    const meta = `HTTP ${resp.status}，content-type ${contentType || "（无）"}，收到 ${rawBytes} 字节`;
+    if (!isSse) {
+      throw new ApiError(
+        resp.status,
+        `这次请求没有走到生成接口（${meta}）。通常是登录态失效或网关拦截——刷新页面重新登录后再试；若反复出现请把这条信息发我。`
+      );
+    }
+    if (rawBytes === 0) {
+      throw new ApiError(
+        resp.status,
+        `连接在模型返回第一个字之前被切断了（${meta}）。常见原因是网关/代理把「等待期间一直安静」的长连接按空闲连接掐掉——多为模型首字太慢。请重试一次；若反复出现，建议到「模型路由」把正文换成一个更快的模型。`
+      );
+    }
+    throw new ApiError(
+      resp.status,
+      `服务端发来了事件但没有一个字正文（${meta}）。可能是生成中途被切断，或该模型只输出推理过程、不输出正文。请重试；反复出现请换一个模型。`
+    );
   }
 }
 

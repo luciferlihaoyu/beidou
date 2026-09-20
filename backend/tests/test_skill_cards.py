@@ -67,6 +67,20 @@ class TestPackagingIntegrity:
                     assert d["executable"] is False, d
 
 
+def _reference_count(picked: list[str]) -> int:
+    return len([p for p in picked if p.startswith("references/")])
+
+
+def _references_on_disk() -> int:
+    """卡包里实际存在的参考文献数。
+
+    故意不硬编码：卡包新增一个 reference（如 2026-09-20 新增的多书对比
+    syntopical-mode.md）时，硬编码的 6 会让「全书拆书要带上全部参考」这个
+    真正的不变量假红。这里改成对着磁盘数，加文件时依然要求全部带上。
+    """
+    return len(list((skills.CARD_DIR / "novel-deconstruction" / "references").glob("*.md")))
+
+
 class TestSelection:
     def test_must_load_docs_detected(self):
         """拆书卡明确规定 consistency-check.md 任何任务都必须加载。"""
@@ -92,17 +106,17 @@ class TestSelection:
     def test_full_book_loads_everything(self):
         picked = skills.select_docs("novel-deconstruction", "全书完整拆书")
         assert "assets/report-template.md" in picked
-        assert len([p for p in picked if p.startswith("references/")]) == 6, picked
+        assert _reference_count(picked) == _references_on_disk(), picked
 
     def test_empty_instruction_loads_all(self):
         picked = skills.select_docs("novel-deconstruction", "")
-        assert len([p for p in picked if p.startswith("references/")]) == 6
+        assert _reference_count(picked) == _references_on_disk()
 
     def test_generic_instruction_loads_all(self):
         """AI 面板在用户没输入时发的是「请运用…技能开始工作」——没有维度关键词，
         此时只加载强制项会让五个维度清单全部缺席，必须走全量。"""
         picked = skills.select_docs("novel-deconstruction", "请运用「拆书分析」技能开始工作，并主动给出产出。")
-        assert len([p for p in picked if p.startswith("references/")]) == 6
+        assert _reference_count(picked) == _references_on_disk()
         assert "assets/report-template.md" in picked
 
     def test_explicit_request_wins(self):

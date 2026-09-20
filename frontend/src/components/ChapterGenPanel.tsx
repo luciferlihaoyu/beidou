@@ -57,6 +57,7 @@ export default function ChapterGenPanel({
   const [genJob, setGenJob] = useState<AiChapterJob | null>(null);
   const [genOutput, setGenOutput] = useState("");
   const [genBusy, setGenBusy] = useState(false);
+  const [waitingFirstToken, setWaitingFirstToken] = useState(false);
   const [finalizing, setFinalizing] = useState(false);
   const [reviewJob, setReviewJob] = useState<AiChapterJob | null>(null);
   const [reviewBusy, setReviewBusy] = useState(false);
@@ -146,34 +147,27 @@ export default function ChapterGenPanel({
     setGenJob(job);
     setGenOutput("");
     setGenBusy(true);
-    // 累计收到多少字符：用于识别「流结束了但一个字都没有」这种静默失败
-    let received = 0;
+    setWaitingFirstToken(false);
     streamPost(
       `/api/ai-factory/projects/${project.id}/jobs/${job.id}/generate`,
       { instruction },
       (chunk) => {
-        received += chunk.length;
+        if (chunk.length > 0) setWaitingFirstToken(false);
         setGenOutput((prev) => prev + chunk);
         requestAnimationFrame(() => {
           const el = scrollRef.current?.querySelector("[data-radix-scroll-area-viewport]");
           if (el) el.scrollTop = el.scrollHeight;
         });
       },
-      ctrl.signal
+      ctrl.signal,
+      // 已经连上服务端、正在等模型吐第一个字。慢模型下这段等待可能很久，
+      // 以前界面只有「生成中」三个字，用户不知道是在跑还是已经死了。
+      (stage) => {
+        if (stage === "connected") setWaitingFirstToken(true);
+      }
     )
-      .then(() => {
-        if (ctrl.signal.aborted || received > 0) return;
-        // 流正常结束却零字符：后端有错会发 error 事件（走 catch），
-        // 走到这里说明连错误都没送出来。以前这里什么都不做——用户只看到转圈，
-        // 任务还卡在 writing 直到 15 分钟自动解锁，等于「点了生成什么都没有」。
-        const msg =
-          "模型没有返回任何内容（流被静默结束）。请到项目设置 →「模型路由」确认正文路由指向的模型可用，再重试";
-        toast.error(msg);
-        void aiFactoryFailApi
-          .markFailed(project.id, job.id, msg)
-          .then(() => loadJobs())
-          .catch(() => {});
-      })
+      // 零内容/被切断/后端报错都由 streamPost 统一抛错走 catch——
+      // 单一真相来源，面板不再自己判定（否则两处文案会各自漂移）。
       .catch((e) => {
         if (ctrl.signal.aborted) return;
         const msg = e instanceof Error ? e.message : "生成失败";
@@ -682,7 +676,9 @@ export default function ChapterGenPanel({
             </DialogTitle>
             <DialogDescription>
               {genBusy
-                ? `生成中… 已 ${genOutput.replace(/\s/g, "").length.toLocaleString()} 字`
+                ? waitingFirstToken && genOutput.length === 0
+                  ? "已连上模型，正在等它吐第一个字…（慢模型可能等几十秒，连接有心跳，不会断）"
+                  : `生成中… 已 ${genOutput.replace(/\s/g, "").length.toLocaleString()} 字`
                 : `生成完成 · ${genOutput.replace(/\s/g, "").length.toLocaleString()} 字`}
               {genJob?.outline ? ` · 大纲：${genJob.outline.slice(0, 50)}` : ""}
             </DialogDescription>
