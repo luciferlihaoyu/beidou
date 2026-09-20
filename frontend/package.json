@@ -9,7 +9,8 @@
     "lint": "eslint .",
     "preview": "vite preview",
     "test:punct": "node scripts/test-punct-rules.ts",
-    "test:theme": "node scripts/test-editor-theme.ts"
+    "test:theme": "node scripts/test-editor-theme.ts",
+    "test:route": "node scripts/test-model-route.ts"
   },
   "dependencies": {
     "@hookform/resolvers": "^5.2.2",

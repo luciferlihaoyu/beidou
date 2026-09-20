@@ -146,10 +146,13 @@ export default function ChapterGenPanel({
     setGenJob(job);
     setGenOutput("");
     setGenBusy(true);
+    // 累计收到多少字符：用于识别「流结束了但一个字都没有」这种静默失败
+    let received = 0;
     streamPost(
       `/api/ai-factory/projects/${project.id}/jobs/${job.id}/generate`,
       { instruction },
       (chunk) => {
+        received += chunk.length;
         setGenOutput((prev) => prev + chunk);
         requestAnimationFrame(() => {
           const el = scrollRef.current?.querySelector("[data-radix-scroll-area-viewport]");
@@ -158,6 +161,19 @@ export default function ChapterGenPanel({
       },
       ctrl.signal
     )
+      .then(() => {
+        if (ctrl.signal.aborted || received > 0) return;
+        // 流正常结束却零字符：后端有错会发 error 事件（走 catch），
+        // 走到这里说明连错误都没送出来。以前这里什么都不做——用户只看到转圈，
+        // 任务还卡在 writing 直到 15 分钟自动解锁，等于「点了生成什么都没有」。
+        const msg =
+          "模型没有返回任何内容（流被静默结束）。请到项目设置 →「模型路由」确认正文路由指向的模型可用，再重试";
+        toast.error(msg);
+        void aiFactoryFailApi
+          .markFailed(project.id, job.id, msg)
+          .then(() => loadJobs())
+          .catch(() => {});
+      })
       .catch((e) => {
         if (ctrl.signal.aborted) return;
         const msg = e instanceof Error ? e.message : "生成失败";

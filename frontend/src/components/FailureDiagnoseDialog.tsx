@@ -145,7 +145,25 @@ export default function FailureDiagnoseDialog({
                 <span className="col-span-2">
                   模型路由：正文 {data.own_configs.chapter_llm}
                 </span>
+                {data.effective_chapter && (
+                  <span className="col-span-2">
+                    实际使用：
+                    {data.effective_chapter.problem
+                      ? `⚠ ${data.effective_chapter.problem}`
+                      : `${data.effective_chapter.resolved}（${data.effective_chapter.base_url}）`}
+                    {data.effective_chapter.resolved &&
+                      data.effective_chapter.requested !== "(跟随默认配置)" &&
+                      !data.effective_chapter.requested.includes("@") &&
+                      `　← 来自路由「${data.effective_chapter.requested}」`}
+                  </span>
+                )}
               </div>
+              {data.effective_chapter?.problem && (
+                <p className="mt-1.5 text-[11px] text-amber-600 dark:text-amber-400">
+                  正文没有可用的模型配置——这就是生成不出内容的原因。请到「设置 → AI 配置」添加带 API Key 的配置，
+                  或在项目设置 →「模型路由」里改指一个可用的配置。
+                </p>
+              )}
               {ctxWarning && (
                 <p className="mt-1.5 text-[11px] text-amber-600 dark:text-amber-400">
                   上下文偏大——若报「上下文超长」，先减小最近章节原文/记忆卡数量，或换上下文窗口更大的模型。

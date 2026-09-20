@@ -965,6 +965,13 @@ export interface JobDiagnosis {
   orphan: boolean;
   orphan_hint: string;
   own_configs: { chapter_llm: string; summary_llm: string; review_llm: string };
+  /** 正文这一步**实际**会用到的配置与模型（含「静默回退到默认配置」的实情） */
+  effective_chapter?: {
+    requested: string;
+    resolved: string;
+    base_url?: string;
+    problem?: string;
+  };
 }
 
 export const aiFactoryFailApi = {

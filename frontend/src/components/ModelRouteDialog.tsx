@@ -11,6 +11,7 @@ import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { Cpu, Loader2, RefreshCw } from "lucide-react";
 import { aiConfigApi, aiFactoryM2, type AIConfig, type AiProject } from "@/lib/api";
+import { routeValueLabel } from "@/lib/modelRoute";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -49,6 +50,9 @@ export default function ModelRouteDialog({
 }) {
   const [configs, setConfigs] = useState<AIConfig[]>([]);
   const [modelsByConfig, setModelsByConfig] = useState<Record<number, string[]>>({});
+  /** 清单拉取失败的配置：id → 原因。必须区分「清单没取到」与「配置被删」——
+   *  旧实现把前者也显示成「原配置已删除」，用户以为路由被重置成默认模型了。 */
+  const [failed, setFailed] = useState<Record<number, string>>({});
   const [loadingModels, setLoadingModels] = useState(false);
   const [values, setValues] = useState<Record<RouteKey, string>>({
     setup_llm: "",
@@ -71,36 +75,48 @@ export default function ModelRouteDialog({
     } as Record<RouteKey, string>);
     aiConfigApi
       .list()
-      .then(async (cs) => {
+      .then((cs) => {
         setConfigs(cs);
-        // 并行拉每个配置的端点模型清单（失败的配置降级为空清单）
-        setLoadingModels(true);
-        const entries = await Promise.all(
-          cs.filter((c) => c.has_key).map(async (c) => {
-            try {
-              const r = await aiConfigApi.models(c.id);
-              return [c.id, r.models, r.error] as const;
-            } catch {
-              return [c.id, [], "请求失败"] as const;
-            }
-          })
-        );
-        setModelsByConfig(
-          Object.fromEntries(entries.map(([id, models]) => [id, models as string[]]))
-        );
-        // 拉取失败的配置：汇总提示（此前静默降级，用户不知道为何只有一个模型）
-        const failures = entries.filter(([, models]) => models.length === 0);
-        if (failures.length > 0) {
-          const names = failures
-            .map(([id, , err]) => `${cs.find((c) => c.id === id)?.name ?? id}${err ? `（${err}）` : ""}`)
-            .join("、");
-          toast.warning(`以下配置的模型清单拉取失败，仅显示默认模型：${names}`, { duration: 8000 });
-        }
-        setLoadingModels(false);
+        void loadModels(cs);
       })
       .catch((e) => toast.error(e.message));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
+
+  /** 拉取每个配置的端点模型清单（打开弹窗与「刷新」按钮共用）。 */
+  async function loadModels(cs: AIConfig[]) {
+    const withKey = cs.filter((c) => c.has_key);
+    if (withKey.length === 0) {
+      setModelsByConfig({});
+      setFailed({});
+      return;
+    }
+    setLoadingModels(true);
+    try {
+      const entries = await Promise.all(
+        withKey.map(async (c) => {
+          try {
+            const r = await aiConfigApi.models(c.id);
+            return [c.id, r.models, r.error] as const;
+          } catch {
+            return [c.id, [], "请求失败"] as const;
+          }
+        })
+      );
+      setModelsByConfig(Object.fromEntries(entries.map(([id, models]) => [id, models as string[]])));
+      const bad = entries.filter(([, models]) => models.length === 0);
+      setFailed(Object.fromEntries(bad.map(([id, , err]) => [id, err || "拉取失败"])));
+      if (bad.length > 0) {
+        // 说清后果：清单没取到 ≠ 路由被改，原选择仍保留、生成仍按原值走
+        const names = bad
+          .map(([id, , err]) => `${cs.find((c) => c.id === id)?.name ?? id}${err ? `（${err}）` : ""}`)
+          .join("、");
+        toast.warning(`以下配置的模型清单没取到，路由已按原值保留：${names}`, { duration: 8000 });
+      }
+    } finally {
+      setLoadingModels(false);
+    }
+  }
 
   function optionsFor(c: AIConfig): Option[] {
     const models = modelsByConfig[c.id] ?? [];
@@ -121,7 +137,9 @@ export default function ModelRouteDialog({
       if (!c.has_key) continue;
       groups[c.name] = optionsFor(c);
     }
-    const orphan = v && ![...Object.values(groups).flat()].some((o) => o.value === v);
+    // 判定交给纯函数（有测试覆盖）：区分「配置被删」与「清单没取到」，
+    // 否则后者会显示成前者，用户误以为路由被重置成默认模型。
+    const mark = routeValueLabel({ value: v, configs, models: modelsByConfig, failed });
     return (
       <div className="relative">
         <select
@@ -130,7 +148,7 @@ export default function ModelRouteDialog({
           onChange={(e) => setValues((prev) => ({ ...prev, [routeKey]: e.target.value }))}
         >
           <option value="">跟随默认配置</option>
-          {orphan && <option value={v}>原配置已删除（{v}）</option>}
+          {mark.extra && <option value={v}>{mark.extra}</option>}
           {Object.entries(groups).map(([name, opts]) => (
             <optgroup key={name} label={name}>
               {opts.map((o) => (
@@ -185,6 +203,12 @@ export default function ModelRouteDialog({
               {renderSelect(r.key)}
             </div>
           ))}
+          {Object.keys(failed).length > 0 && (
+            <p className="rounded-md bg-muted px-3 py-2 text-[11px] leading-5 text-muted-foreground">
+              有配置的模型清单没取到（多为端点暂时不可达）。你的路由选择<span className="text-foreground">没有被改动</span>，
+              仍按原值生效——点左下角「刷新模型清单」重试即可；只有配置被真正删除时才会显示「原配置已删除」。
+            </p>
+          )}
           {configs.filter((c) => c.has_key).length === 0 && (
             <p className="rounded-md bg-amber-500/10 px-3 py-2 text-xs text-amber-600 dark:text-amber-400">
               还没有带 API Key 的 AI 配置，请先到「账户 → AI 配置」添加（支持天枢/DeepSeek/任意 OpenAI 兼容端点）
@@ -197,22 +221,8 @@ export default function ModelRouteDialog({
             variant="ghost"
             size="sm"
             className="text-xs"
-            onClick={() => {
-              setLoadingModels(true);
-              Promise.all(
-                configs.filter((c) => c.has_key).map(async (c) => {
-                  try {
-                    const r = await aiConfigApi.models(c.id);
-                    return [c.id, r.models] as const;
-                  } catch {
-                    return [c.id, []] as const;
-                  }
-                })
-              ).then((entries) => {
-                setModelsByConfig(Object.fromEntries(entries));
-                setLoadingModels(false);
-              });
-            }}
+            disabled={loadingModels}
+            onClick={() => void loadModels(configs)}
           >
             <RefreshCw className={`mr-1 h-3 w-3 ${loadingModels ? "animate-spin" : ""}`} />
             刷新模型清单

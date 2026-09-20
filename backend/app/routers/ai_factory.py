@@ -26,7 +26,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import get_db
 from ..deps import get_ai_config, get_current_user
-from ..failure_kinds import classify_failure
+import logging
+
+from ..failure_kinds import classify_failure, empty_output_error
+
+logger = logging.getLogger("beidou.ai_factory")
 from ..models import (
     AIConfig,
     AiChapterJob,
@@ -88,6 +92,28 @@ async def _pick_config(user: User, db: AsyncSession, route_field: str | None) ->
     return await get_ai_config(user, db)
 
 
+async def _effective_route(user: User, db: AsyncSession, route_field: str | None) -> dict:
+    """诊断用：这个路由字段**实际**会解析成哪个配置与模型。
+
+    为什么需要它：路由存的是「配置 ID@模型名」，配置被删/重建、或模型名不存在时
+    会自动回退到默认配置——界面上未必看得出来，但生成用的模型已经换了。
+    诊断里把「请求的路由 → 实际用的配置/模型」摊开讲，用户和排查者都不用猜。
+    本函数绝不抛错：诊断不该因为没配置而 500。
+    """
+    requested = route_field or "(跟随默认配置)"
+    try:
+        config = await _pick_config(user, db, route_field)
+    except Exception as exc:  # HTTPException(400/404)：没有配置或没有 Key
+        detail = getattr(exc, "detail", None) or exc.__class__.__name__
+        return {"requested": requested, "resolved": "", "base_url": "", "problem": str(detail)}
+    return {
+        "requested": requested,
+        "resolved": f"{config.name} / {config.model}",
+        "base_url": config.base_url,
+        "problem": "",
+    }
+
+
 async def _chat_text(
     config: AIConfig,
     system: str,
@@ -121,7 +147,15 @@ async def _chat_text(
             usage = data.get("usage") or {}
             usage_sink["prompt"] = usage_sink.get("prompt", 0) + int(usage.get("prompt_tokens") or 0)
             usage_sink["completion"] = usage_sink.get("completion", 0) + int(usage.get("completion_tokens") or 0)
-        return data["choices"][0]["message"]["content"] or ""
+        content = data["choices"][0]["message"]["content"] or ""
+        if not content.strip():
+            # 空响应以前直接返回 ""，上层解析失败后静默——界面表现就是
+            # 「点了一键生成，过一会儿什么都没有」。这里必须给出可操作的原因。
+            raise HTTPException(
+                502,
+                empty_output_error(config.name, config.model, config.base_url, stream=False),
+            )
+        return content
     except (KeyError, IndexError, TypeError) as exc:
         raise HTTPException(502, f"AI 接口响应格式异常: {exc}") from exc
 
@@ -1143,6 +1177,8 @@ async def diagnose_job(
             "summary_llm": p.summary_llm or "(跟随默认)",
             "review_llm": p.review_llm or "(跟随默认)",
         },
+        # 正文这一步实际会用哪个配置/模型（含「回退到默认」的实情）
+        "effective_chapter": await _effective_route(user, db, p.chapter_llm),
     }
 
 
@@ -1494,12 +1530,21 @@ async def update_project(
 ):
     """更新项目设置（全部可选，传什么改什么）。"""
     p = await _get_project(project_id, user, db)
+    route_changes: list[str] = []
     for field, value in data.model_dump(exclude_unset=True).items():
+        if field.endswith("_llm"):
+            before = getattr(p, field, None)
+            if (before or "") != (value or ""):
+                # 路由变更留痕：用户报「重启后路由变回默认」这类问题时，
+                # 没有日志就只能猜。翻得到日志才能证明是谁在什么时候改的。
+                route_changes.append(f"{field}: {before or '(默认)'} → {value or '(默认)'}")
         if field == "context_extra_chapters":
             setattr(p, field, json.dumps(value or []))
         else:
             setattr(p, field, value)
     await db.commit()
+    if route_changes:
+        logger.info("项目 %s 模型路由变更（user=%s）：%s", p.id, user.id, "；".join(route_changes))
     novel = await db.get(Novel, p.novel_id) if p.novel_id else None
     return _project_out(p, novel)
 

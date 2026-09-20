@@ -152,6 +152,8 @@ async def _stream_openai(config: AIConfig, messages: list[dict], on_complete=Non
     payload = {"model": config.model, "messages": messages, "stream": True}
     headers = {"Authorization": f"Bearer {config.api_key}"}
 
+    from ..failure_kinds import empty_output_error
+
     async def generate():
         parts: list[str] = []
         finished = False
@@ -179,6 +181,11 @@ async def _stream_openai(config: AIConfig, messages: list[dict], on_complete=Non
             finished = True
         except httpx.HTTPError as exc:
             yield f"data: {json.dumps({'error': f'无法连接 AI 接口: {exc.__class__.__name__}'}, ensure_ascii=False)}\n\n"
+            return
+        if not parts:
+            # 200 但零增量：以前这里只发 done，前端「无错也无字」，用户只看到转圈
+            # 然后任务卡在 writing 直到 15 分钟自动解锁。必须报出「哪个配置/模型/端点」。
+            yield f"data: {json.dumps({'error': empty_output_error(config.name, config.model, config.base_url, stream=True)}, ensure_ascii=False)}\n\n"
             return
         yield f"data: {json.dumps({'done': True})}\n\n"
         if finished and on_complete is not None and parts:

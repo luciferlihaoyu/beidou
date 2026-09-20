@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import re
 
-__all__ = ["classify_failure", "FailureInfo"]
+__all__ = ["classify_failure", "FailureInfo", "empty_output_error"]
 
 # 分类码 → (中文病因, 建议动作)
 KINDS: dict[str, tuple[str, str]] = {
@@ -106,3 +106,23 @@ def classify_failure(raw: str | None) -> FailureInfo:
             break
     title, hint = KINDS[code]
     return FailureInfo(code=code, title=title, hint=hint, raw=text)
+
+
+def empty_output_error(config_name: str, model: str, base_url: str, *, stream: bool) -> str:
+    """「模型一个字符都没返回」的统一文案（纯函数，流式/非流式两条路复用）。
+
+    为什么要单独造这句话：这两条路以前都是**静默**的——流式只发 done、非流式
+    直接返回空字符串。前端于是「无错也无字」，用户只看到转圈或空白，无法判断
+    是自己的模型名不对、端点不支持，还是额度用尽。
+
+    文案必须带上「哪个配置、哪个模型、哪个端点」：这是用户唯一能动手改的三样。
+    措辞含「空内容」以便 classify_failure 归到 empty_output 类，给出配套建议。
+    """
+    channel = "流式" if stream else "非流式"
+    return (
+        f"模型返回空内容（{channel}）：配置「{config_name}」的模型 {model}"
+        f"（端点 {base_url}）一个字符都没回来。常见原因：该端点不提供这个模型名、"
+        "该模型只回推理过程不输出正文（推理模型需换非推理模型）、或账号额度已用尽。"
+        "请到「设置 → AI 配置」重新拉取模型列表并选一个确实存在的模型，"
+        "或在项目设置 →「模型路由」里改掉这个路由后重试。"
+    )
