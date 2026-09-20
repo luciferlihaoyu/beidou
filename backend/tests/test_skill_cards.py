@@ -174,10 +174,16 @@ class TestCardBlock:
         assert "golden-three-chapters.md" in blk
 
     def test_block_states_scripts_are_not_executable(self):
-        """必须明确声明脚本不可执行，避免模型谎称已运行脚本。"""
+        """脚本声明双向断言：白名单卡声明服务端实测；未白名单卡严禁谎称已运行。"""
+        # novel-deconstruction 的 fact_extractor.py 已入 skilltools.WHITELIST
         blk = skills.card_block("novel-deconstruction", task="拆书")
-        assert "无法执行这些脚本" in blk
-        assert "不要声称已运行脚本" in blk
+        assert "该卡部分脚本由服务端真实执行" in blk
+        assert "工具输出" in blk
+        assert "不要声称已运行脚本" in blk  # 同卡未接白的 chapter_splitter.py 仍防谎称
+        # deai-rewrite 带脚本但未入白名单：必须保留"不可执行"防谎称声明
+        note = skills._scripts_note("deai-rewrite")
+        assert "无法执行这些脚本" in note
+        assert "不要声称已运行脚本" in note
 
     def test_block_lists_skipped_docs(self):
         blk = skills.card_block("novel-deconstruction", task="分析黄金三章")
@@ -231,6 +237,23 @@ class TestSkillTools:
     def test_empty_text_returns_empty(self):
         assert skilltools.run_for_card("style-fingerprint", []) == ""
         assert skilltools.run_for_card("style-fingerprint", [("第一章", "   ")]) == ""
+
+    def test_novel_deconstruction_facts_tool(self):
+        """拆书卡白名单:Web 第 3 步「加载事实索引」真实实测,不再走无索引兜底。"""
+        text = (
+            "林凡睁开眼，识海中悬浮着一枚【青冥珠】。\n"
+            "系统提示：每击杀1妖兽=10积分。\n"
+            "林凡翻了个身。三日后，宗门大比将启。\n"
+            "林凡暗自握紧了拳头，这个秘密无人知晓。\n"
+        )
+        out = skilltools.run_for_card("novel-deconstruction", [("第一章 觉醒", text)])
+        assert "事实索引" in out and "非模型估计" in out
+        assert "numeric=" in out and "temporal=" in out and "state=" in out
+        assert "10积分" in out and "三日" in out      # 命中摘句直接可引用
+        assert "林凡×3" in out                        # topics 复用全书阈值
+        # 空正文照旧返回空串(不注入空块)
+        assert skilltools.run_for_card("novel-deconstruction", []) == ""
+        assert skilltools.run_for_card("novel-deconstruction", [("第一章", "  ")]) == ""
 
     def test_tool_failure_is_contained(self, monkeypatch):
         """工具抛异常不能拖垮整轮技能执行，但必须如实说明失败。"""

@@ -296,15 +296,38 @@ def docs_block(slug: str, rels: list[str]) -> tuple[str, list[dict], list[str]]:
 
 
 def _scripts_note(slug: str) -> str:
-    """脚本不可执行声明——防止模型谎称「已运行脚本」并编造输出。"""
+    """脚本执行声明，按卡分口径，消除「已接白却声明不可执行」的自相矛盾：
+
+    - 已接 skilltools 白名单的卡：点名执行脚本、如实说明由服务端真实执行，
+      实测输出见工具输出块；同卡未接白的脚本（如逐章拆分器）仍禁止谎称。
+    - 未接白名单的卡维持原声明：防模型谎称「已运行脚本」并编造输出。
+    """
+    from .. import skilltools
+
     scripts = [d["rel"] for d in list_docs(slug) if d["kind"] == "scripts"]
     if not scripts:
         return ""
-    return (
+    spec = skilltools.WHITELIST.get(slug)
+    if spec is None:
+        return (
+            "【脚本说明】本技能附带以下脚本：" + "、".join(scripts) + "。"
+            "**当前环境无法执行这些脚本**（模型无文件系统与命令行）。请直接依据给定文本完成"
+            "等价分析，并在报告中说明结论来自阅读原文；**不要声称已运行脚本**，也不要编造脚本输出。\n"
+        )
+    executed = spec[0]
+    unexecuted = [s for s in scripts if s.rsplit("/", 1)[-1] != executed.rsplit("/", 1)[-1]]
+    note = (
         "【脚本说明】本技能附带以下脚本：" + "、".join(scripts) + "。"
-        "**当前环境无法执行这些脚本**（模型无文件系统与命令行）。请直接依据给定文本完成"
-        "等价分析，并在报告中说明结论来自阅读原文；**不要声称已运行脚本**，也不要编造脚本输出。\n"
+        f"**该卡部分脚本由服务端真实执行**（其中 `{executed}` 以纯函数在服务端跑），"
+        "实测输出见下方【服务端工具输出】块——请直接引用实测数据，"
+        "不要把它当作自己的估计重新编算一次。"
     )
+    if unexecuted:
+        note += (
+            f"其余（{'、'.join(unexecuted)}）当前环境无法执行，请依据给定文本完成"
+            "等价分析，**不要声称已运行脚本**，也不要编造脚本输出。"
+        )
+    return note + "\n"
 
 
 def card_block(

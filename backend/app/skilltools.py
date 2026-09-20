@@ -31,6 +31,7 @@ CARD_DIR = Path(__file__).parent / "skillcards"
 WHITELIST: dict[str, tuple[str, str, str]] = {
     "style-fingerprint": ("scripts/style_profile.py", "profile", "corpus"),
     "webnovel-pace-analyzer": ("scripts/pace_scan.py", "analyze_chapter", "chapter"),
+    "novel-deconstruction": ("scripts/fact_extractor.py", "extract_facts", "chapter"),
 }
 
 # 输入上限：工具是本地纯计算，但正文动辄百万字，仍设上限避免单请求吃满 CPU
@@ -105,6 +106,50 @@ def _fmt_pace(rows: list[tuple[str, dict]]) -> list[str]:
     return lines
 
 
+def _fmt_facts(rows: list[tuple[str, dict]]) -> list[str]:
+    """把 fact_extractor.extract_facts() 的逐章结果排成人能读的几行。
+
+    纯函数返回 {facts_numeric/facts_temporal/facts_entity/facts_state/topics}
+    (见该函数 docstring);逐章给计数行 + 少量命中摘句(可直接引用的实测证据),
+    末尾给全书汇总。
+    """
+    cats = ("numeric", "temporal", "entity", "state")
+    lines: list[str] = []
+    totals = dict.fromkeys(cats, 0)
+    for title, d in rows:
+        counts = []
+        for cat in cats:
+            n = len(d.get(f"facts_{cat}") or [])
+            totals[cat] += n
+            counts.append(f"{cat}={n}")
+        lines.append(f"- {title}：" + "、".join(counts))
+        # 抽样:numeric 前 3 + temporal 前 2 条摘句,够当线索又不淹没正文
+        for f in (d.get("facts_numeric") or [])[:3] + (d.get("facts_temporal") or [])[:2]:
+            lines.append(f"  · [{f.get('detail', '')}] {f.get('text', '')}")
+        topics = d.get("topics") or []
+        if topics:
+            lines.append(
+                "  · 主题/人名候选：" + "、".join(
+                    f"{t.get('term', '')}×{t.get('count', 0)}" for t in topics[:10]
+                )
+            )
+    lines.append(
+        f"\n汇总：{len(rows)} 章实测——numeric={totals['numeric']}、temporal={totals['temporal']}、"
+        f"entity={totals['entity']}、state={totals['state']} 条。"
+        "（启发式索引，只保证'让事实碰面'，非完备事实清单，需结合正文核对。）"
+    )
+    return lines
+
+
+# 粒度 chapter 的呈现按 slug 分派：slug → (输出标题, 格式化函数)。
+# 各卡纯函数返回的 dict 形状不同,格式化函数负责排成人能读的行;
+# chapter 粒度但未在此登记的卡保守返回空串,不误注入。
+CHAPTER_VIEWS: dict[str, tuple[str, Callable[[list[tuple[str, dict]]], list[str]]]] = {
+    "webnovel-pace-analyzer": ("节奏扫描", _fmt_pace),
+    "novel-deconstruction": ("事实索引", _fmt_facts),
+}
+
+
 def run_for_card(slug: str, chapters: list[tuple[str, str]]) -> str:
     """对给定章节执行该卡的服务端工具，返回可注入 prompt 的文本块（无工具时返回空串）。
 
@@ -137,9 +182,13 @@ def run_for_card(slug: str, chapters: list[tuple[str, str]]) -> str:
                 rows.append((title, fn(body_text)))
             if not rows:
                 return ""
-            body = _fmt_pace(rows)
+            view = CHAPTER_VIEWS.get(slug)
+            if view is None:  # chapter 粒度但未配呈现格式 → 保守返回空
+                return ""
+            label, fmt = view
+            body = fmt(rows)
             head = (
-                "【服务端工具输出·节奏扫描】以下数据由技能卡自带脚本 `"
+                f"【服务端工具输出·{label}】以下数据由技能卡自带脚本 `"
                 + spec[0]
                 + "` 在服务端逐章实测得出（非模型估计）："
             )

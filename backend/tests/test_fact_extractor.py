@@ -159,3 +159,65 @@ def test_summary_counts(tmp_path, dummy):
     dist = result["dist"]
     assert dist["numeric"] >= 2 and dist["temporal"] >= 2
     assert len(result["topics"]) >= 1
+
+
+# --------------------------------- Web 白名单纯函数 extract_facts（skilltools 用）
+PURE_TEXT = (
+    "林凡睁开眼，识海中悬浮着一枚【青冥珠】。\n"
+    "系统提示：每击杀1妖兽=10积分。\n"
+    "林凡翻了个身。三日后，宗门大比将启。\n"
+    "林凡暗自握紧了拳头，这个秘密无人知晓。\n"
+)
+FACT_KEYS = {"facts_numeric", "facts_temporal", "facts_entity", "facts_state", "topics"}
+
+
+def test_extract_facts_hits_all_categories():
+    out = fact_extractor.extract_facts(PURE_TEXT)
+    assert set(out) == FACT_KEYS
+    assert any("10积分" in f["text"] for f in out["facts_numeric"])
+    assert any("三日" in f["text"] for f in out["facts_temporal"])
+    assert any("青冥珠" in f["text"] for f in out["facts_entity"])
+    assert any("无人知晓" in f["text"] for f in out["facts_state"])
+    # topics 复用全书阈值(单章口径):林凡出现 3 次入选且带 count
+    lin = [t for t in out["topics"] if t["term"] == "林凡"]
+    assert lin and lin[0]["count"] == 3
+
+
+def test_extract_facts_empty_returns_full_empty_structure():
+    out = fact_extractor.extract_facts("")
+    assert set(out) == FACT_KEYS
+    assert all(v == [] for v in out.values())
+
+
+def test_extract_facts_is_pure_and_deterministic():
+    a = fact_extractor.extract_facts(PURE_TEXT)
+    b = fact_extractor.extract_facts(PURE_TEXT)
+    assert a == b  # 无副作用、无内部可变态
+
+
+def test_extract_facts_swallows_internal_errors(monkeypatch):
+    def boom(_t):
+        raise RuntimeError("模拟内核崩溃")
+
+    monkeypatch.setattr(fact_extractor, "_match_facts", boom)
+    out = fact_extractor.extract_facts("任意文本")
+    assert set(out) == FACT_KEYS and all(v == [] for v in out.values())
+    # 非法输入类型同样兜底为空结构,不抛异常
+    assert fact_extractor.extract_facts(None) == fact_extractor.extract_facts("")
+
+
+def test_extract_facts_matches_cli_extracts(tmp_path):
+    """纯函数与 CLI 走同一套规则:逐类事实(去章号后)必须逐一相等,杜绝口径漂移。"""
+    d = make_book(tmp_path)
+    for no, name in ((1, "0001_第一章_觉醒.txt"), (2, "0002_第二章_初战.txt")):
+        text = (d / name).read_text(encoding="utf-8")
+        pure = fact_extractor.extract_facts(text)
+        cli = [
+            {"category": f["category"], "text": f["text"], "detail": f["detail"]}
+            for f in fact_extractor.extract_facts_for_chapter(no, text)
+        ]
+        flat = (
+            pure["facts_numeric"] + pure["facts_temporal"]
+            + pure["facts_entity"] + pure["facts_state"]
+        )
+        assert cli == flat

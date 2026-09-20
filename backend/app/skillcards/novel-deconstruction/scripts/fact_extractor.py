@@ -141,8 +141,12 @@ def _clean(s: str) -> str:
     return re.sub(r"\s+", "", s)
 
 
-def extract_facts_for_chapter(chapter_no: int, text: str) -> list:
-    """对单章文本做启发式提取,返回该章的 facts 列表(按 category 顺序)。"""
+def _match_facts(text: str) -> list:
+    """共享内核:对单章文本跑四类规则,返回【无章号】的事实记录列表。
+
+    CLI(run → extract_facts_for_chapter)与 Web 白名单纯函数(extract_facts)
+    共用这一套正则/句子切分/摘句截取口径,避免两份实现漂移。
+    """
     # 预切句子(带位置),供匹配定位所属句
     spans = []
     for m in SENT_RE.finditer(text):
@@ -176,7 +180,6 @@ def extract_facts_for_chapter(chapter_no: int, text: str) -> list:
                 recorded.add(excerpt)
                 n_cat += 1
                 facts.append({
-                    "chapter": chapter_no,
                     "category": category,
                     "text": excerpt,
                     "detail": detail,
@@ -184,11 +187,20 @@ def extract_facts_for_chapter(chapter_no: int, text: str) -> list:
     return facts
 
 
-def extract_topics(chapter_texts: list) -> list:
+def extract_facts_for_chapter(chapter_no: int, text: str) -> list:
+    """对单章文本做启发式提取,返回该章的 facts 列表(按 category 顺序)。"""
+    return [{"chapter": chapter_no, **f} for f in _match_facts(text)]
+
+
+def extract_topics(chapter_texts: list, keep_total: bool = False) -> list:
     """从多章文本建主题倒查索引:人名/专名/伏笔词 → 出现章号列表。
 
     注意:这是辅助倒查,不是完备实体识别——高频、以姓氏开头的人名与
     引号专名才会入选;召回不足的部分由核对者/AI 补漏。
+
+    keep_total: 内部开关。True 时把排序用的总次数以 "count" 键保留
+    (供 Web 纯函数 extract_facts 做章内主题展示);默认 False,保持
+    facts_index.json 的既有输出一字不变。
     """
     stats = {}  # term -> {"kind": str, "per_chapter": {no: count}}
 
@@ -232,8 +244,59 @@ def extract_topics(chapter_texts: list) -> list:
 
     topics.sort(key=lambda t: (-t["_total"], t["term"]))
     for t in topics:
-        del t["_total"]  # 内部排序字段,不进产物
+        if keep_total:
+            t["count"] = t.pop("_total")
+        else:
+            del t["_total"]  # 内部排序字段,不进产物
     return topics
+
+
+def _empty_facts_result() -> dict:
+    """extract_facts 的空结构(空输入/异常兜底共用,保证五个键永远齐全)。"""
+    out = {f"facts_{cat}": [] for cat in CATEGORY_ORDER}
+    out["topics"] = []
+    return out
+
+
+def extract_facts(text: str) -> dict:
+    """Web 白名单纯函数(skilltools.py WHITELIST,chapter 粒度):单章 → 事实/主题索引。
+
+    skilltools 对正文章节逐章调用本函数(输入规模由 MAX_CHAPTERS /
+    MAX_CHAPTER_CHARS 兜住),返回值由 skilltools._fmt_facts 汇总成
+    「服务端工具输出·事实索引」文本块注入 prompt。章号由调用方提供,
+    故结果不含 chapter 字段;skilltools 的调用语义允许 chapter 粒度
+    返回 dict(格式化函数只按已知键取值),此为该粒度的适配口径。
+
+    输入: text —— 单章正文纯文本(典型几千~上万字)。
+          非 str / 空白 / 内部异常一律返回空结构,绝不抛异常。
+
+    返回(键名与 facts_index.json 的 category 口径一一对应):
+        {
+          "facts_numeric":  [{"category": "numeric",  "text": "<≤60字摘句>", "detail": "<命中规则>"}, ...],
+          "facts_temporal": [{"category": "temporal", ...}, ...],
+          "facts_entity":   [{"category": "entity",   ...}, ...],
+          "facts_state":    [{"category": "state",    ...}, ...],
+          "topics":         [{"term": "<人名/引号专名/伏笔词>", "chapters": [1],
+                              "first_chapter": 1, "count": <本章出现次数>}, ...]
+        }
+
+    口径说明(facts_* 与 CLI 产物同源——共用 _match_facts 同一套规则):
+        - numeric/temporal 句式覆盖较全,可直接作事实清单雏形;
+        - entity/state 刻意保守(宁缺勿滥),完备性由 AI 通读补漏;
+        - topics 复用 extract_topics 全书阈值(单章口径:人名候选≥3次、
+          引号专名≥2次、伏笔词≥1次),chapters/first_chapter 为占位章号 1,
+          承接方按 "term + count" 解读即可。
+    """
+    out = _empty_facts_result()
+    try:
+        if not isinstance(text, str) or not text.strip():
+            return out
+        for f in _match_facts(text):
+            out[f"facts_{f['category']}"].append(f)
+        out["topics"] = extract_topics([(1, text)], keep_total=True)
+        return out
+    except Exception:  # Web 工具失败必须兜底为空结构,绝不向上抛
+        return out
 
 
 def _load_index(workdir: Path):
