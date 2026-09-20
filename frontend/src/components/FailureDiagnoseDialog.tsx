@@ -7,7 +7,8 @@
 
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
-import { AlertTriangle, CloudCog, Loader2, RefreshCw, Settings2, Trash2 } from "lucide-react";
+import { AlertTriangle, CloudCog, Loader2, Plus, RefreshCw, Settings2, Trash2 } from "lucide-react";
+import { useNavigate } from "react-router";
 import { aiFactoryFailApi, type AiChapterJob, type JobDiagnosis } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import {
@@ -32,6 +33,7 @@ export default function FailureDiagnoseDialog({
   job: AiChapterJob | null;
   onRetry: (job: AiChapterJob) => void;
 }) {
+  const navigate = useNavigate();
   const [data, setData] = useState<JobDiagnosis | null>(null);
   const [loading, setLoading] = useState(false);
   const [retrying, setRetrying] = useState(false);
@@ -159,9 +161,27 @@ export default function FailureDiagnoseDialog({
                 )}
               </div>
               {data.effective_chapter?.problem && (
+                <div className="mt-2 flex gap-2">
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="h-7 text-xs"
+                    onClick={() => {
+                      onOpenChange(false);
+                      navigate("/account");
+                    }}
+                  >
+                    <Plus className="mr-1 h-3 w-3" />
+                    去添加模型配置
+                  </Button>
+                  <p className="self-center text-[11px] text-muted-foreground">
+                    在「账号设置 → AI 接口配置」填 Base URL / API Key；本项目的「模型路由」只负责选。
+                  </p>
+                </div>
+              )}
+              {data.effective_chapter?.problem && (
                 <p className="mt-1.5 text-[11px] text-amber-600 dark:text-amber-400">
-                  正文没有可用的模型配置——这就是生成不出内容的原因。请到「设置 → AI 配置」添加带 API Key 的配置，
-                  或在项目设置 →「模型路由」里改指一个可用的配置。
+                  正文没有可用的模型配置——这就是生成不出内容的原因。
                 </p>
               )}
               {ctxWarning && (

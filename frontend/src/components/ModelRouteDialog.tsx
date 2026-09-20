@@ -9,7 +9,8 @@
 
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
-import { Cpu, Loader2, RefreshCw } from "lucide-react";
+import { Cpu, Loader2, Plus, RefreshCw } from "lucide-react";
+import { useNavigate } from "react-router";
 import { aiConfigApi, aiFactoryM2, type AIConfig, type AiProject } from "@/lib/api";
 import { routeValueLabel } from "@/lib/modelRoute";
 import { Button } from "@/components/ui/button";
@@ -48,6 +49,7 @@ export default function ModelRouteDialog({
   onOpenChange: (v: boolean) => void;
   onSaved: (p: AiProject) => void;
 }) {
+  const navigate = useNavigate();
   const [configs, setConfigs] = useState<AIConfig[]>([]);
   const [modelsByConfig, setModelsByConfig] = useState<Record<number, string[]>>({});
   /** 清单拉取失败的配置：id → 原因。必须区分「清单没取到」与「配置被删」——
@@ -211,22 +213,40 @@ export default function ModelRouteDialog({
           )}
           {configs.filter((c) => c.has_key).length === 0 && (
             <p className="rounded-md bg-amber-500/10 px-3 py-2 text-xs text-amber-600 dark:text-amber-400">
-              还没有带 API Key 的 AI 配置，请先到「账户 → AI 配置」添加（支持天枢/DeepSeek/任意 OpenAI 兼容端点）
+              还没有带 API Key 的 AI 配置——点下方「＋ 添加模型配置」去添加（支持天枢/DeepSeek/任意 OpenAI 兼容端点）。
+              那里才是填 Base URL / API Key 的地方；本窗口只负责「哪个环节用哪个模型」。
             </p>
           )}
         </div>
 
         <div className="flex items-center justify-between border-t border-border pt-3">
-          <Button
-            variant="ghost"
-            size="sm"
-            className="text-xs"
-            disabled={loadingModels}
-            onClick={() => void loadModels(configs)}
-          >
-            <RefreshCw className={`mr-1 h-3 w-3 ${loadingModels ? "animate-spin" : ""}`} />
-            刷新模型清单
-          </Button>
+          <div className="flex items-center gap-1">
+            {/* 只做选择的地方也要给出「去哪加」的直达路：此前这里只有一句
+                「请先到账户 → AI 配置添加」的文字提示，菜单实际叫「账号设置」，
+                用户就卡在「找不到接线的地方」。 */}
+            <Button
+              variant="ghost"
+              size="sm"
+              className="text-xs"
+              onClick={() => {
+                onOpenChange(false);
+                navigate("/account");
+              }}
+            >
+              <Plus className="mr-1 h-3 w-3" />
+              添加模型配置
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="text-xs"
+              disabled={loadingModels}
+              onClick={() => void loadModels(configs)}
+            >
+              <RefreshCw className={`mr-1 h-3 w-3 ${loadingModels ? "animate-spin" : ""}`} />
+              刷新模型清单
+            </Button>
+          </div>
           <Button size="sm" disabled={saving} onClick={() => void save()}>
             {saving ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : null}
             保存路由
