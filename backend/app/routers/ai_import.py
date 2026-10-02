@@ -18,13 +18,13 @@ import json
 import re
 
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import get_db
 from ..deps import count_words, get_current_user
 from ..models import AiChapterJob, AiProject, Chapter, Character, Novel, User, Volume, WorldviewEntry
+from ..sse import sse_streaming
 from ..utils import strip_html
 from .ai_factory import (
     _SYSTEM,
@@ -265,4 +265,5 @@ async def import_novel(data: ImportIn, user: User = Depends(get_current_user), d
         except Exception as exc:  # noqa: BLE001  顶层兜底：任何异常都转成事件，前端不悬空
             yield sse({"event": "error", "message": f"导入失败: {exc.__class__.__name__}: {exc}"})
 
-    return StreamingResponse(generate(), media_type="text/event-stream")
+    # 抗缓冲头由 app/sse 统一带上（与 ai / batch 两处同一构造器）
+    return sse_streaming(generate())

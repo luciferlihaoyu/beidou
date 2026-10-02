@@ -241,6 +241,21 @@ async def _generate_one_with_retry(p: AiProject, novel: Novel, job: AiChapterJob
 
 
 async def _generate_one(p: AiProject, novel: Novel, job: AiChapterJob, chapter: Chapter, num: int, db) -> dict:
+    """夜跑/后台连跑的单章入口：**生成期间登记**，再跑真正的流程。
+
+    过去只有逐章 SSE 端点登记在 ACTIVE_JOBS 里，夜跑一条都不登记。而夜跑一章
+    最坏是「上游 15 分钟 + 改写/摘要各 15 分钟 + 关系同步」，**设计上就会超过卡死
+    阈值**：用户打开面板触发 _sweep_stuck_jobs，正在正常生成的章节就被捞回 pending
+    并盖一句「生成中断」，这条流跑完又写 done——两个写入方互踩同一行状态。
+    登记做成上下文管理器（ai_factory.track_active_job），三条路径同一套语义。
+    """
+    from .routers.ai_factory import track_active_job
+
+    async with track_active_job(job.id):
+        return await _generate_chapter(p, novel, job, chapter, num, db)
+
+
+async def _generate_chapter(p: AiProject, novel: Novel, job: AiChapterJob, chapter: Chapter, num: int, db) -> dict:
     """后台生成单章：生成→AI味检测/改写→定稿→状态文件→关系同步。返回战报。"""
     from .routers.ai_factory import _text_to_html  # 延迟导入避免循环
 

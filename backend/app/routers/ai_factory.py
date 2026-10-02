@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import re
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
 import httpx
@@ -24,7 +25,8 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..db import get_db
+from .. import llm_timeouts
+from ..db import get_db, SessionLocal
 from ..deps import get_ai_config, get_current_user
 import logging
 
@@ -137,7 +139,10 @@ async def _chat_text(
         "max_tokens": max_tokens,
     }
     headers = {"Authorization": f"Bearer {config.api_key}"}
-    async with httpx.AsyncClient(timeout=httpx.Timeout(180.0, connect=15.0)) as client:
+    # 非流式 JSON 调用（立项/设定/大纲/审校）统一走 llm_timeouts：默认 15 分钟。
+    # 这些任务一次要吐几千字结构化 JSON，思考型模型 3 分钟很正常，短超时会让
+    # 用户看到「点了一键生成，过一会儿什么都没有」。
+    async with httpx.AsyncClient(timeout=llm_timeouts.openai_timeout(llm_timeouts.json_seconds())) as client:
         resp = await client.post(url, json=payload, headers=headers)
     if resp.status_code != 200:
         raise HTTPException(502, f"AI 接口返回 {resp.status_code}: {resp.text[:200]}")
@@ -1056,7 +1061,17 @@ async def generate_chapter(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """SSE 流式生成一章正文。job → writing；内容由客户端收集后走 finalize 落库。"""
+    """SSE 流式生成一章正文。job → writing；内容由客户端收集后走 finalize 落库。
+
+    「先回包、再干活」（本轮最关键的加固）：过去这里在**返回响应对象之前**串行做了
+    _pick_config + _assemble_context（DB 查询 + 璇玑知识库召回，超时 30s）+ db.commit()，
+    响应头被这段耗时压着不下发，客户端于是看到「HTTP 200 + text/event-stream + 0 字节」，
+    前端只能报「连接在模型返回第一个字之前被切断了」。现在：
+      1. 只保留廉价守卫（项目状态 / job / chapter 存在性 → 仍是 400 / 404）；
+      2. 昂贵准备搬进流内的 prepare()，connected 事件与响应头抢先下发；
+      3. 准备或上游任何环节失败都由 on_error 把任务落到 failed 并写 last_error，
+         绝不把 job 永远留在 writing 让界面转圈。
+    """
     p = await _get_project(project_id, user, db)
     if p.status != "writing":
         raise HTTPException(400, f"当前状态 {p.status} 不能生成正文（请先完成大纲）")
@@ -1071,16 +1086,6 @@ async def generate_chapter(
     novel = await db.get(Novel, p.novel_id)
     assert novel is not None
 
-    config = await _pick_config(user, db, p.chapter_llm)
-    context = await _assemble_context(p, novel, chapter, job, db)
-    if data and data.instruction.strip():
-        context += f"\n\n【作者重写指示（最高优先级，务必遵守）】\n{data.instruction.strip()}"
-
-    job.status = "writing"
-    job.attempt += 1
-    job.started_at = utcnow()  # 供卡死判定
-    await db.commit()
-
     from .ai import _stream_openai
 
     system = (
@@ -1088,9 +1093,75 @@ async def generate_chapter(
         + "你正在执行整章正文写作任务。要求：中文网文风格，段落短小（手机阅读友好），"
         "对话生动，章末留钩子。严格遵守角色卡与状态文件的一致性。"
     )
-    resp = await _stream_openai(config, [{"role": "system", "content": system}, {"role": "user", "content": context}])
-    # 包一层登记：客户端一断开就注销，避免自动解锁误伤正在生成的章节
-    resp.body_iterator = _track_active_stream(resp, job.id)
+    instruction = data.instruction.strip() if data and data.instruction.strip() else ""
+    # FIX-3：闭包只捕主键。响应体阶段（流已开跑）不许再碰请求级会话。
+    project_pk, novel_pk, chapter_pk, job_pk = p.id, novel.id, chapter.id, job.id
+
+    async def _prepare():
+        """流内准备：选模型 → 组装上下文 → 任务转 writing 落库，返回 (config, messages)。
+
+        _pick_config 也算一次 DB 往返（且可能回落到默认配置再查一次），一并挪进来，
+        保证首字节不被任何准备工作挡住。
+
+        **为什么这里另开会话，不用 `db`**：``db`` 是 Depends(get_db) 的请求级会话，
+        生命周期归依赖栈管。当前版本恰好把 yield 依赖的退出放在响应体发完**之后**，
+        所以蹭它"看起来能用"；但 requirements 只写 fastapi>=0.115 不锁版本，而 0.106
+        正是把"退出挪到发响应之前"当破坏性变更动过的那版。一旦版本回摆，响应体阶段
+        拿到的就是已关闭的会话——症状从「首字慢」升级成「流一切正常、状态永远不落库」，
+        更难查。自持 SessionLocal 才是与框架版本无关的写法（同 routers/ai.py 的
+        _save_assistant_reply）。
+        """
+        async with SessionLocal() as s:
+            proj = await s.get(AiProject, project_pk)
+            chapter_row = await s.get(Chapter, chapter_pk)
+            job_row = await s.get(AiChapterJob, job_pk)
+            novel_row = await s.get(Novel, novel_pk)
+            if proj is None or chapter_row is None or job_row is None or novel_row is None:
+                raise HTTPException(404, "生成准备阶段：项目/章节/任务已不存在（可能刚被删除）")
+            config = await _pick_config(user, s, proj.chapter_llm)
+            context = await _assemble_context(proj, novel_row, chapter_row, job_row, s)
+            if instruction:
+                context += f"\n\n【作者重写指示（最高优先级，务必遵守）】\n{instruction}"
+
+            job_row.status = "writing"
+            job_row.attempt += 1
+            job_row.started_at = utcnow()  # 与 writing 成对写：卡死判定靠它，缺了就误判
+            await s.commit()
+            return config, [
+                {"role": "system", "content": system},
+                {"role": "user", "content": context},
+            ]
+
+    async def _on_error(message: str) -> None:
+        """失败善后：状态必须离开 writing（与 /fail 端点同一套语义与文案口径）。
+
+        同样自持会话；而且这段必须**在把 error 事件发给前端之前**跑完（见
+        routers/ai.py 的 settle）——客户端一撤，生成器停在 yield 上，排在后面的
+        善后永远不会执行（评审 FIX-1 实测的洞）。
+        """
+        info = classify_failure(message)
+        logger.warning("逐章生成失败（job=%s，code=%s）：%s", job_pk, info.code, message[:300])
+        try:
+            async with SessionLocal() as s:
+                job_row = await s.get(AiChapterJob, job_pk)
+                if job_row is None:
+                    return
+                job_row.status = "failed"
+                job_row.last_error = message[:2000]
+                job_row.last_error_code = info.code
+                await s.commit()
+        except Exception:  # noqa: BLE001  善后写库失败不能把 SSE 也带崩
+            logger.exception("逐章生成善后写库失败（job=%s）", job_pk)
+
+    resp = await _stream_openai(None, None, prepare=_prepare, on_error=_on_error)
+    # 包一层登记：生成期间登记、客户端一断开就注销，避免自动解锁误伤正在生成的章节。
+    # 必须**先把原迭代器取出来**再换包：把 resp 直接传进去时，包装器过去是在迭代
+    # 那一刻才惰性读 inner.body_iterator，而那时它已被换成包装器自己 → 迭代自己 →
+    # 首次 anext 抛 RuntimeError: anext(): asynchronous generator is already running
+    # → 响应头已发、正文零字节，正是前端那句「模型返回第一个字之前被切断」的字面
+    # 现场（2026-09-30 Zeabur 日志实证，逐章生成 100% 失败、与所选模型无关）。
+    inner = resp.body_iterator
+    resp.body_iterator = _track_active_stream(inner, job.id)
     return resp
 
 
@@ -1187,22 +1258,70 @@ async def diagnose_job(
 ACTIVE_JOBS: dict[int, float] = {}
 
 
-async def _track_active_stream(inner, job_id: int):
-    """包一层流式响应：生成期间登记，无论正常结束、报错还是客户端断开都注销。"""
+@asynccontextmanager
+async def track_active_job(job_id: int):
+    """登记「本进程此刻正在为该任务跑生成」，退出时（正常/报错/断开）一律注销。
+
+    为什么要单独有这件：过去只有逐章 SSE 端点通过 _track_active_stream 登记，
+    批量连跑（batch_run）与夜跑（nightly._generate_one）一条都不登记——那两个地方
+    一章最坏要等两轮 15 分钟的上游读超时，**设计上就会超过卡死阈值**，于是自动解锁
+    把正在正常生成的章节当成尸体捞回 pending 并盖一句「生成中断」，流跑完又写 done，
+    同一行状态被两个写入方来回踩。登记与「怎么发字节」无关，所以做成上下文管理器：
+    循环前进入、finally 退出，三条路径共用一套语义。
+    """
     import time as _time
 
     ACTIVE_JOBS[job_id] = _time.time()
     try:
-        async for chunk in inner.body_iterator:
-            yield chunk
+        yield
     finally:
         ACTIVE_JOBS.pop(job_id, None)
+
+
+def _track_active_stream(iterator, job_id: int):
+    """把响应体迭代器包一层「生成期间登记」。参数**必须是迭代器本身**。
+
+    传响应对象一律 TypeError，不做兼容（评审 FIX-4.2）：过去那句
+    `resp.body_iterator = _track_active_stream(resp, job.id)`（2026-09-30 Zeabur 线上）
+    让包装器在**迭代那一刻**才惰性读 inner.body_iterator，而那时它已经被换成包装器
+    自己 → 迭代自己 → RuntimeError: anext(): asynchronous generator is already running
+    → 响应头已发、正文零字节，逐章生成 100% 失败（与模型、代理、首字速度都无关）。
+    现在先在调用点取好 inner，本函数只收迭代器；宁可当场报错，也绝不悄悄把流变空。
+    """
+    if hasattr(iterator, "body_iterator"):
+        raise TypeError(
+            "_track_active_stream 需要被包装的迭代器本身（resp.body_iterator），"
+            "不是响应对象——那会让包装器迭代它自己（2026-09-30 线上 0 字节事故）"
+        )
+
+    async def tracked():
+        async with track_active_job(job_id):
+            try:
+                async for chunk in iterator:
+                    yield chunk
+            finally:
+                # 断开时把内层流一起关掉：否则 _stream_openai 的帧停在 await 上，它的 pump
+                # 任务（正等上游，超时最长 15 分钟）会继续占用连接与上游配额。
+                # 必须在 aclose 返回前同步关掉，不能指望 async-generator 的 GC 终结器
+                # ——服务端事件循环不关，那条残留任务就一直挂着（第 1 轮实测过 20s 挂起）。
+                # aclose 失败不能盖掉原始异常（GeneratorExit / 真实错误），只记日志。
+                aclose = getattr(iterator, "aclose", None)
+                if aclose is not None:
+                    try:
+                        await aclose()
+                    except BaseException as exc:  # noqa: BLE001  包括 GeneratorExit
+                        logger.debug("关闭内层流失败（job=%s）：%s", job_id, exc)
+
+    return tracked()
 
 
 # 生成中断判定：任务停在 writing 超过这个时长即认为「卡死」。
 # 中断来源：用户点停止后前端 abort（服务端的 StreamingResponse 被取消，
 # 不会有人把状态改回去）、浏览器关闭、部署重启、后台任务崩溃。
-STUCK_MINUTES = 15
+# 阈值不再硬编码 15 分钟——流式读超时放宽到 15 分钟后它与超时同值，正常在跑的
+# 长章节会被误判。这里取 llm_timeouts 的推导值（≈35 分钟）作展示/兼容常量，
+# 真正的判定每次调用都问解析器，env 覆盖即时生效。
+STUCK_MINUTES = llm_timeouts.stuck_minutes()
 
 
 def as_utc(dt: datetime | None) -> datetime | None:
@@ -1220,19 +1339,29 @@ def job_is_stuck(
     status: str,
     started_at: datetime | None,
     now: datetime,
-    minutes: int = STUCK_MINUTES,
+    minutes: int | None = None,
     active: bool = False,
 ) -> bool:
-    """status=writing 且已超过 minutes 没有推进 → 卡死（取消/断连/重启）。
+    """status=writing 且已超过阈值没有推进 → 卡死（取消/断连/重启）。
 
-    active=True 表示本进程正持有该任务的流式连接，永远不算卡死。
+    - 阈值默认取 llm_timeouts.stuck_minutes()（跟随超时口径，约 35 分钟）。硬编码
+      15 分钟的时代，「还在正常生成」的长章节会被自动解锁改状态，与仍在跑的流互踩。
+    - active=True 表示本进程正持有该任务的生成（SSE / batch / nightly 都登记），
+      永远不算卡死。
+    - **started_at 为空 + writing 一律算可疑**（评审 FIX-2.4）：这类行是本字段上线前的
+      老数据、以及崩在写时间戳之前的任务。过去这里 return False，而 _sweep_stuck_jobs
+      的注释写着「算作卡死」——两边相反，后果是这批行永远解不了锁，界面一直转圈。
+      统一按注释的方向定：可疑，交给扫描器捞回（捞回后 started_at 也会被重置）。
     """
-    if active or status != "writing" or started_at is None:
+    if active or status != "writing":
         return False
+    if started_at is None:
+        return True
+    limit = llm_timeouts.stuck_minutes() if minutes is None else minutes
     started = as_utc(started_at)
     current = as_utc(now)
     assert started is not None and current is not None
-    return (current - started).total_seconds() > minutes * 60
+    return (current - started).total_seconds() > limit * 60
 
 
 async def _sweep_stuck_jobs(db: AsyncSession, project_id: int, now: datetime) -> int:
@@ -1265,7 +1394,7 @@ async def _sweep_stuck_jobs(db: AsyncSession, project_id: int, now: datetime) ->
         # started_at 为空的老数据（本字段上线前遗留）算作卡死，理由写清楚
         j.last_error = (
             "生成中断：任务停在「生成中」超过 "
-            f"{STUCK_MINUTES} 分钟（常见于点了停止、关闭页面、部署重启或后台任务崩溃）。"
+            f"{llm_timeouts.stuck_minutes()} 分钟（常见于点了停止、关闭页面、部署重启或后台任务崩溃）。"
             "已自动解锁，可直接重新生成。"
         )
         j.last_error_code = "interrupted"

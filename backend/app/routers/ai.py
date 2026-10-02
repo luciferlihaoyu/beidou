@@ -9,15 +9,16 @@ import httpx
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from .. import llm_timeouts
 from ..db import get_db
 from ..deps import get_ai_config, get_current_user, get_owned_novel
 from ..models import AIConfig, Chapter, ChatMessage, Novel, User
+from ..sse import paced_upstream, sse_streaming
 from ..utils import strip_html
 
 logger = logging.getLogger("beidou.ai")
@@ -148,40 +149,68 @@ async def delete_config(config_id: int, user: User = Depends(get_current_user), 
 
 # ---------- 流式对话核心 ----------
 
-# 等待上游期间的心跳间隔（秒）。取值要明显小于常见网关/代理的空闲超时
-# （Envoy 路由默认 15s、Nginx proxy_read_timeout 常配 60s）。
-KEEPALIVE_SECONDS = 10.0
+# 等待上游期间的心跳间隔（秒）的**显式覆盖入口**。
+# 默认 None = 不覆盖，实际取值由 app/llm_timeouts.keepalive_seconds() 决定
+# （环境变量 BEIDOU_KEEPALIVE_SECONDS > 默认 5s）；把它赋成数值即强制生效
+# （测试与临时调参用），优先级高于环境变量——不再有「与默认值相同就算没改」的玄学。
+# 心跳必须明显小于网关/代理的空闲超时（Envoy 路由默认 15s、nginx 常配 60s），
+# 否则安静期会被当空闲连接掐掉，客户端拿到「200 + text/event-stream + 0 字节」。
+KEEPALIVE_SECONDS: float | None = None
 
 
-async def _stream_openai(config: AIConfig, messages: list[dict], on_complete=None):
+# 准备函数的返回形态：messages，或 (实际使用的配置, messages)
+PrepareResult = list[dict] | tuple[AIConfig, list[dict]]
+
+
+async def _stream_openai(
+    config: AIConfig | None,
+    messages: list[dict] | None,
+    on_complete=None,
+    prepare=None,
+    on_error=None,
+):
     """以 SSE 形式转发 OpenAI 兼容接口的流式响应。
 
     on_complete: 可选异步回调，流正常结束后收到完整回复文本（用于保存对话历史）。
+    prepare:     可选的异步准备函数（「先回包、再干活」的关键）。提供时，本函数
+                 **先发 connected、再 await prepare()**：模型路由解析与上下文组装
+                 （DB 查询 + 璇玑召回，最坏几十秒）都不许挡在响应头前面，否则客户端
+                 拿到的是「200 + text/event-stream + 0 字节」。返回值既可以是
+                 messages，也可以是 (config, messages)——后者用于把 _pick_config
+                 一起挪进流内。此时入参 config / messages 可以给 None。
+    on_error:    可选异步回调，收到最终落到前端的错误文案，供调用方善后
+                 （例如把章节任务从 writing 回退成 failed，别让它永远卡住）。
 
-    为什么要有心跳（重要教训）：本函数过去在**上游吐出第一个 token 之前一个字节都不发**。
-    而一个长章节的思考阶段动辄几十秒，中间什么都不过线——网关/代理会把这个「安静」的
-    连接当成空闲连接掐掉，客户端于是收到一个**干净结束的空响应**：既没有正文，也没有
-    任何错误事件，用户看到的就是「点了一下，过一会什么都没有」。所以现在：
+    为什么要有心跳与 connected（重要教训，别回退）：本函数过去在**上游吐出第一个
+    token 之前一个字节都不发**。而一个长章节的思考阶段动辄几十秒，中间什么都不过线
+    ——网关/代理会把这个「安静」的连接当成空闲连接掐掉，客户端于是收到一个
+    **干净结束的空响应**：既没有正文，也没有任何错误事件，用户看到的就是
+    「点了一下，过一会什么都没有」。所以现在：
       1. 一连上就先发一条 stage=connected（让字节立刻流动，也让前端能区分「没连上」和「在等模型」）；
-      2. 等上游数据期间每 KEEPALIVE_SECONDS 发一行 SSE 注释（`:` 开头，客户端按协议忽略）
+      2. 等上游数据期间每 keepalive 秒发一行 SSE 注释（`:` 开头，客户端按协议忽略）
          把连接撑住；
       3. 上游的异常一律转成 error 事件，绝不静默收尾。
     """
-    url = _normalize_base(config.base_url) + "/v1/chat/completions"
-    payload = {"model": config.model, "messages": messages, "stream": True}
-    headers = {"Authorization": f"Bearer {config.api_key}"}
-
     from ..failure_kinds import empty_output_error
 
+    keepalive = llm_timeouts.keepalive_seconds(KEEPALIVE_SECONDS)
+
     async def generate():
+        cfg: AIConfig | None = config
+        msgs: list[dict] | None = messages
         parts: list[str] = []
         upstream_ok = False
-        queue: asyncio.Queue = asyncio.Queue()
 
-        async def pump():
-            """把上游 SSE 行搬进队列；结束时投递 eof，任何异常投递 fatal。"""
+        async def pump(queue: asyncio.Queue, url: str, payload: dict, headers: dict):
+            """把上游 SSE 行搬进队列；结束时投递 eof，任何异常投递 fatal。
+
+            投递与「静默期补心跳」由 app/sse.paced_upstream 统一驱动（batch 也用它），
+            本函数只负责把上游的字节搬进队列。
+            """
             try:
-                async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=15.0)) as client:
+                async with httpx.AsyncClient(
+                    timeout=llm_timeouts.openai_timeout(llm_timeouts.stream_read_seconds())
+                ) as client:
                     async with client.stream("POST", url, json=payload, headers=headers) as resp:
                         if resp.status_code != 200:
                             body = (await resp.aread()).decode(errors="ignore")[:300]
@@ -198,23 +227,82 @@ async def _stream_openai(config: AIConfig, messages: list[dict], on_complete=Non
             finally:
                 await queue.put(("eof", None))
 
-        # 立刻发一条：连接一开始就有字节，避免「等首字期间被当空闲连接掐掉」
-        yield f"data: {json.dumps({'stage': 'connected', 'model': config.model}, ensure_ascii=False)}\n\n"
+        def error_chunk(message: str) -> str:
+            logger.warning("流式生成失败：配置「%s」模型 %s：%s", cfg.name if cfg else "-", cfg.model if cfg else "-", message)
+            return f"data: {json.dumps({'error': message}, ensure_ascii=False)}\n\n"
 
-        task = asyncio.create_task(pump())
+        async def notify_error(message: str) -> None:
+            """让调用方收拾状态（任务不能悬在 writing）。"""
+            if on_error is None:
+                return
+            try:
+                await on_error(message)
+            except Exception as exc:  # noqa: BLE001  善后失败不能掩盖原始错误
+                logger.warning("SSE on_error 回调异常：%s", exc)
+
+        async def settle(message: str) -> str:
+            """失败出口的唯一样式：**先**善后，**再**把 error 事件发给前端。
+
+            顺序绝不能反过来：生成器一 yield 就挂起，而客户端读到 error 通常就撤
+            （或网关 send 失败 / 上层 aclose）——GeneratorExit 正好砸在那个 yield 上，
+            排在它后面的 notify_error 永远不会执行，任务于是永久停在 writing、
+            last_error 空空（评审复现过的洞：前端拿到了错误，数据库里却什么都没发生）。
+            """
+            await notify_error(message)
+            return error_chunk(message)
+
+        # 1) 一连上就先发字节：响应头 + connected，代理无从按空闲连接掐断。
+        #    config 尚未解析时**不发** model 字段——空字符串会让前端显示「模型 ：」这种假信息。
+        connected = {"stage": "connected"}
+        if cfg is not None:
+            connected["model"] = cfg.model
+        yield f"data: {json.dumps(connected, ensure_ascii=False)}\n\n"
+
+        if prepare is not None:
+            # 昂贵准备放在 connected 之后：响应头与首字节已经下发，代理无从掐断
+            try:
+                prepared: PrepareResult = await prepare()
+            except Exception as exc:  # noqa: BLE001  组装失败也要走 error 事件，不能裸抛
+                detail = getattr(exc, "detail", None) or f"{exc.__class__.__name__}: {exc}"
+                yield await settle(f"上下文准备失败：{str(detail)[:800]}")
+                return
+            if isinstance(prepared, tuple):
+                cfg, msgs = prepared
+            else:
+                msgs = prepared
+
+        # 2) 兜底：缺什么就说缺什么（prepare 成功却返回空列表时，别把它说成「没配置」）
+        if cfg is None:
+            yield await settle("上下文准备失败：没有拿到可用的模型配置")
+            return
+        if msgs is None:
+            yield await settle("上下文准备失败：没有拿到上下文消息")
+            return
+        if not msgs:
+            yield await settle("上下文准备失败：组装结果为空，没有任何消息可发给模型")
+            return
+
+        # 配置与消息就位后再补报模型名。只有 connected 那帧没带过 model 才补发
+        # （对话入口 config 本来就在手上，connected 里已有 model，别重复发一帧）。
+        if config is None:
+            yield f"data: {json.dumps({'stage': 'model', 'model': cfg.model}, ensure_ascii=False)}\n\n"
+
+        url = _normalize_base(cfg.base_url) + "/v1/chat/completions"
+        payload = {"model": cfg.model, "messages": msgs, "stream": True}
+        headers = {"Authorization": f"Bearer {cfg.api_key}"}
+
+        # 3) 上游等待 + 静默心跳：走 app/sse 的公共骨架（batch 复用同一件，别再各写一份）
+        stream = paced_upstream(lambda q: pump(q, url, payload, headers), keepalive=keepalive)
         try:
-            while True:
-                try:
-                    kind, item = await asyncio.wait_for(queue.get(), timeout=KEEPALIVE_SECONDS)
-                except asyncio.TimeoutError:
+            async for kind, item in stream:
+                if kind == "idle":
                     yield ": keepalive\n\n"
                     continue
                 if kind == "eof":
                     upstream_ok = True
-                    break
+                    continue
                 if kind == "fatal":
-                    logger.warning("流式生成失败：配置「%s」模型 %s：%s", config.name, config.model, item)
-                    yield f"data: {json.dumps({'error': item}, ensure_ascii=False)}\n\n"
+                    yield await settle(item)
                     return
                 line = item or ""
                 if not line.startswith("data:"):
@@ -231,13 +319,14 @@ async def _stream_openai(config: AIConfig, messages: list[dict], on_complete=Non
                     parts.append(delta)
                     yield f"data: {json.dumps({'content': delta}, ensure_ascii=False)}\n\n"
         finally:
-            task.cancel()
+            # 关掉骨架即取消 pump：客户端断开时别留一个正等上游（最长 15 分钟）的任务在跑
+            await stream.aclose()
 
         if not parts:
-            # 上游 200 但零增量：以前这里只发 done，前端「无错也无字」。必须报出
-            # 「哪个配置/模型/端点」，否则用户无法判断该改哪一样。
-            logger.warning("模型零输出：配置「%s」模型 %s 端点 %s", config.name, config.model, config.base_url)
-            yield f"data: {json.dumps({'error': empty_output_error(config.name, config.model, config.base_url, stream=True)}, ensure_ascii=False)}\n\n"
+            # 上游 200 但零增量：以前这里只发 done，前端「无错也无字」。报出
+            # 「哪个配置/模型/端点」，用户才知道该改哪一样。
+            # 日志由 error_chunk 统一打一条，这里不再重复打（同一次失败两条 warning 是噪音）。
+            yield await settle(empty_output_error(cfg.name, cfg.model, cfg.base_url, stream=True))
             return
         yield f"data: {json.dumps({'done': True, 'chars': sum(len(x) for x in parts)})}\n\n"
         if upstream_ok and on_complete is not None:
@@ -246,7 +335,8 @@ async def _stream_openai(config: AIConfig, messages: list[dict], on_complete=Non
             except Exception:
                 pass  # 保存历史失败不影响已完成的回复
 
-    return StreamingResponse(generate(), media_type="text/event-stream")
+    # 抗缓冲头由 app/sse 统一带上（generate_chapter 复用本响应时自动继承）
+    return sse_streaming(generate())
 
 
 class TestIn(BaseModel):

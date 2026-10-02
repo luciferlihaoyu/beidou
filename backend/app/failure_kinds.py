@@ -14,6 +14,10 @@ __all__ = ["classify_failure", "FailureInfo", "empty_output_error"]
 
 # 分类码 → (中文病因, 建议动作)
 KINDS: dict[str, tuple[str, str]] = {
+    "no_config": (
+        "没有可用的 AI 接口配置（还没配 Key，或该路由指向的配置已被删）",
+        "到「设置 → AI 配置」新建并保存一条默认配置（或在本项目的模型路由里重选一个存在的配置）后重试",
+    ),
     "auth": (
         "模型接口鉴权失败（Key 无效/过期/无权限）",
         "到「设置 → AI 配置」检查该配置的 API Key 与 Base URL；保存后重试这一章",
@@ -61,6 +65,11 @@ KINDS: dict[str, tuple[str, str]] = {
 }
 
 _PATTERNS: list[tuple[str, re.Pattern[str]]] = [
+    # 顺序敏感：**先判「压根没配好」**。这一类是用户自己能修的（配一条 AI 接口），
+    # 落到 unknown 就等于把「诊断直达」入口自己关掉了——文案里明明写着去设置页。
+    # 放在最前也避免被后面的 quota/network 抢走（"没有可用" 里不含返回码，但
+    # 「配置」类文本常与连接错误混在一句里，先判更稳）。
+    ("no_config", re.compile(r"未配置|还没有配置|请先.*配置|没有可用|没有[^。]*配置", re.I)),
     # 上游返回码（_stream_openai / _chat_text 会带上 status_code 与响应体）
     ("auth", re.compile(r"\b(401|403)\b|unauthorized|invalid[_ ]api[_ ]key|forbidden|authentication", re.I)),
     ("quota", re.compile(r"\b(402|429)\b|rate[_ ]limit|quota|insufficient|balance|too many requests|exceeded", re.I)),

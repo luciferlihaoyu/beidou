@@ -14,18 +14,21 @@ LLM 改写一次；LLM 生成失败 = 关键问题 → 停止并回报，绝不�
 
 from __future__ import annotations
 
+import asyncio
 import json
 
+import httpx as _httpx
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from .. import llm_timeouts
 from ..anti_llm import ANTI_LLM_RULES, deflavor_rewrite_prompt, detect
 from ..db import get_db
 from ..deps import count_words, get_current_user
-from ..models import AiChapterJob, AiProject, Chapter, Novel, User, Volume
+from ..models import AiChapterJob, AiProject, Chapter, Novel, User, Volume, utcnow
+from ..sse import paced_upstream, sse_streaming
 from ..utils import chapter_display_title, order_chapters, strip_html
 from .ai_factory import (
     _estimate_tokens,
@@ -39,6 +42,7 @@ from .ai_factory import (
     _pick_config,
     _text_to_html,
     _update_state_files,
+    track_active_job,
 )
 from .ai_factory import router as _ai_factory_router  # noqa: F401  仅确保初始化顺序
 
@@ -209,183 +213,221 @@ async def batch_run(
             num = number_map.get(chapter.id, 0)
             title = chapter_display_title(chapter.title, num)
             yield _sse({"event": "chapter_start", "job_id": job.id, "title": title, "index": done_n + 1, "total": total})
-            job.status = "writing"
-            job.attempt += 1
-            await db.commit()
-
-            context = await _assemble_context(p, novel, chapter, job, db)
-            system = (
-                _SYSTEM
-                + "你正在执行整章正文写作任务。中文网文风格，段落短小，对话生动，章末留钩子。"
-                + ANTI_LLM_RULES  # 源头控制：写前注入去 AI 味规则
-            )
-            if p.author_intent:
-                system += f"\n【作者长期意图】{p.author_intent[:300]}"
-            if p.current_focus:
-                system += f"\n【当前阶段焦点】{p.current_focus[:300]}"
-
-            # ---- 生成（复用 _stream_openai 的 httpx 流式；失败自动重试一次）----
-            parts: list[str] = []
-            url = _normalize_base(chapter_llm.base_url) + "/v1/chat/completions"
-            import httpx as _httpx
-
-            text = ""
-            gen_error = ""
-            for attempt in range(2):
-                if attempt:
-                    # 重试前：SSE 注明「重试中」，job 重置回 pending 再重跑
-                    yield _sse({"event": "retry", "job_id": job.id, "title": title, "message": f"生成失败，重试中（{gen_error[:80]}）"})
-                    job.status = "pending"
-                    await db.commit()
-                    parts = []
-                try:
-                    async with _httpx.AsyncClient(timeout=_httpx.Timeout(300.0, connect=15.0)) as client:
-                        async with client.stream(
-                            "POST",
-                            url,
-                            json={"model": chapter_llm.model, "messages": [{"role": "system", "content": system}, {"role": "user", "content": context}], "stream": True},
-                            headers={"Authorization": f"Bearer {chapter_llm.api_key}"},
-                        ) as resp:
-                            if resp.status_code != 200:
-                                body = (await resp.aread()).decode(errors="ignore")[:200]
-                                gen_error = f"AI 接口返回 {resp.status_code}: {body}"
-                                continue
-                            async for line in resp.aiter_lines():
-                                if not line.startswith("data:"):
-                                    continue
-                                data = line[5:].strip()
-                                if data == "[DONE]":
-                                    break
-                                try:
-                                    chunk = json.loads(data)
-                                    delta = chunk["choices"][0].get("delta", {}).get("content")
-                                    if delta:
-                                        parts.append(delta)
-                                        yield _sse({"event": "content", "job_id": job.id, "text": delta})
-                                except (json.JSONDecodeError, KeyError, IndexError):
-                                    continue
-                except _httpx.HTTPError as exc:
-                    gen_error = f"无法连接 AI 接口: {exc.__class__.__name__}"
-                    continue
-                text = "".join(parts).strip()
-                if len(text) < 100:
-                    gen_error = "生成内容过短"
-                    continue
-                gen_error = ""
-                break
-
-            if gen_error:
-                # 二次失败才标 failed（SSE 路径生成失败仍属关键问题：停止并回报）
-                yield _sse({"event": "error", "message": f"重试后仍失败：{gen_error}", "job_id": job.id, "title": title})
-                job.status = "failed"
+            # 本章生成期间登记：批量连跑一章最坏要等两轮 15 分钟的上游读超时，
+            # 不登记就会被卡死扫描当成尸体捞回（详见 ai_factory.track_active_job）。
+            async with track_active_job(job.id):
+                # 与 nightly/_prepare 一致：进 writing 必须**成对**写 started_at。
+                # 过去只写 status/attempt，于是行上留着上一轮的时间戳（甚至为空），
+                # 一被 _sweep_stuck_jobs 看到就「早已超时」→ 正在跑的章被误判卡死、
+                # 改回 pending 并盖一句生成中断，与这条流互踩状态。
+                job.status = "writing"
+                job.attempt += 1
+                job.started_at = utcnow()
                 await db.commit()
-                return
 
-            # ---- AI 味检测 + 自动改写（batch-ai-deflavor 循环思想）----
-            report = detect(text)
-            yield _sse({"event": "deai", "job_id": job.id, "score": report["score"]})
-            if report["score"] < 70:
-                yield _sse({"event": "rewrite", "job_id": job.id, "score": report["score"]})
+                context = await _assemble_context(p, novel, chapter, job, db)
+                system = (
+                    _SYSTEM
+                    + "你正在执行整章正文写作任务。中文网文风格，段落短小，对话生动，章末留钩子。"
+                    + ANTI_LLM_RULES  # 源头控制：写前注入去 AI 味规则
+                )
+                if p.author_intent:
+                    system += f"\n【作者长期意图】{p.author_intent[:300]}"
+                if p.current_focus:
+                    system += f"\n【当前阶段焦点】{p.current_focus[:300]}"
+
+                # ---- 生成（复用 _stream_openai 的 httpx 流式；失败自动重试一次）----
+                parts: list[str] = []
+                url = _normalize_base(chapter_llm.base_url) + "/v1/chat/completions"
+
+                payload = {
+                    "model": chapter_llm.model,
+                    "messages": [{"role": "system", "content": system}, {"role": "user", "content": context}],
+                    "stream": True,
+                }
+                headers = {"Authorization": f"Bearer {chapter_llm.api_key}"}
+
+                text = ""
+                gen_error = ""
+                for attempt in range(2):
+                    if attempt:
+                        # 重试前：SSE 注明「重试中」，job 重置回 pending 再重跑
+                        yield _sse({"event": "retry", "job_id": job.id, "title": title, "message": f"生成失败，重试中（{gen_error[:80]}）"})
+                        job.status = "pending"
+                        await db.commit()
+                        parts = []
+                    # 上游等待交给 app/sse.paced_upstream：静默期照样发心跳。
+                    # 过去这里是「裸 stream + async for」，一章思考几十秒时连接上一个字节
+                    # 都不过线——批量连跑正是无人值守跑得最久的路径，却一帧心跳都没有。
+                    async def pump(queue: asyncio.Queue) -> None:
+                        try:
+                            async with _httpx.AsyncClient(
+                                timeout=llm_timeouts.openai_timeout(llm_timeouts.stream_read_seconds())
+                            ) as client:
+                                async with client.stream("POST", url, json=payload, headers=headers) as resp:
+                                    if resp.status_code != 200:
+                                        body = (await resp.aread()).decode(errors="ignore")[:200]
+                                        await queue.put(("fatal", f"AI 接口返回 {resp.status_code}: {body}"))
+                                        return
+                                    async for line in resp.aiter_lines():
+                                        await queue.put(("line", line))
+                        except _httpx.HTTPError as exc:
+                            await queue.put(("fatal", f"无法连接 AI 接口: {exc.__class__.__name__}"))
+                        except Exception as exc:  # noqa: BLE001  任何异常都得报给前端，不能静默收尾
+                            await queue.put(("fatal", f"生成中断: {exc.__class__.__name__}: {exc}"))
+                        finally:
+                            await queue.put(("eof", None))
+
+                    stream = paced_upstream(pump)
+                    try:
+                        async for kind, item in stream:
+                            if kind == "idle":
+                                yield ": keepalive\n\n"
+                                continue
+                            if kind == "eof":
+                                continue
+                            if kind == "fatal":
+                                gen_error = item
+                                break
+                            line = item or ""
+                            if not line.startswith("data:"):
+                                continue
+                            data = line[5:].strip()
+                            if data == "[DONE]":
+                                continue
+                            try:
+                                chunk = json.loads(data)
+                                delta = chunk["choices"][0].get("delta", {}).get("content")
+                                if delta:
+                                    parts.append(delta)
+                                    yield _sse({"event": "content", "job_id": job.id, "text": delta})
+                            except (json.JSONDecodeError, KeyError, IndexError):
+                                continue
+                    finally:
+                        await stream.aclose()
+                    if gen_error:
+                        continue
+                    text = "".join(parts).strip()
+                    if len(text) < 100:
+                        gen_error = "生成内容过短"
+                        continue
+                    gen_error = ""
+                    break
+
+                if gen_error:
+                    # 二次失败才标 failed（SSE 路径生成失败仍属关键问题：停止并回报）
+                    yield _sse({"event": "error", "message": f"重试后仍失败：{gen_error}", "job_id": job.id, "title": title})
+                    job.status = "failed"
+                    await db.commit()
+                    return
+
+                # ---- AI 味检测 + 自动改写（batch-ai-deflavor 循环思想）----
+                report = detect(text)
+                yield _sse({"event": "deai", "job_id": job.id, "score": report["score"]})
+                if report["score"] < 70:
+                    yield _sse({"event": "rewrite", "job_id": job.id, "score": report["score"]})
+                    try:
+                        rewritten = await _chat_text(summary_llm, _SYSTEM, deflavor_rewrite_prompt(text, report), max_tokens=6000)
+                        rewritten = rewritten.strip()
+                        if len(rewritten) > 100:
+                            after = detect(rewritten)
+                            if after["score"] > report["score"]:
+                                text = rewritten
+                                yield _sse({"event": "deai", "job_id": job.id, "score": after["score"], "rewritten": True})
+                    except Exception:  # noqa: BLE001  改写失败就用原稿
+                        yield _sse({"event": "deai", "job_id": job.id, "score": report["score"], "rewritten": False})
+
+                # ---- 落库（同 finalize）----
+                chapter.content = _text_to_html(text)
+                chapter.word_count = count_words(chapter.content)
+                if chapter.status == "draft":
+                    chapter.status = "writing"
+                await db.commit()
+
+                # ---- 超长自动分章（定稿后）：拆出的后续段只写正文+FTS，摘要/状态文件按完整章跑 ----
+                from ..nightly import _maybe_split_chapter
+
+                split_into = await _maybe_split_chapter(p, novel, job, chapter, text, db)
+                if split_into > 1:
+                    yield _sse({
+                        "event": "split",
+                        "job_id": job.id,
+                        "title": title,
+                        "split_into": split_into,
+                        "message": f"{title} 过长（目标 {p.target_chapter_words} 字），已自动拆分为 {split_into} 章",
+                    })
                 try:
-                    rewritten = await _chat_text(summary_llm, _SYSTEM, deflavor_rewrite_prompt(text, report), max_tokens=6000)
-                    rewritten = rewritten.strip()
-                    if len(rewritten) > 100:
-                        after = detect(rewritten)
-                        if after["score"] > report["score"]:
-                            text = rewritten
-                            yield _sse({"event": "deai", "job_id": job.id, "score": after["score"], "rewritten": True})
-                except Exception:  # noqa: BLE001  改写失败就用原稿
-                    yield _sse({"event": "deai", "job_id": job.id, "score": report["score"], "rewritten": False})
+                    from ..search_fts import sync_chapter
 
-            # ---- 落库（同 finalize）----
-            chapter.content = _text_to_html(text)
-            chapter.word_count = count_words(chapter.content)
-            if chapter.status == "draft":
-                chapter.status = "writing"
-            await db.commit()
+                    await sync_chapter(db, chapter.id)
+                except Exception:  # noqa: BLE001
+                    pass
 
-            # ---- 超长自动分章（定稿后）：拆出的后续段只写正文+FTS，摘要/状态文件按完整章跑 ----
-            from ..nightly import _maybe_split_chapter
+                # ---- 状态文件增量更新（共享函数，失败不阻塞；含伏笔章龄戳记）----
+                state_updated = await _update_state_files(p, chapter, text, summary_llm, db, include_particle=True)
+                # ---- 人物关系自动同步（失败不阻塞）----
+                from .ai_factory import _sync_relations_from_chapter
 
-            split_into = await _maybe_split_chapter(p, novel, job, chapter, text, db)
-            if split_into > 1:
+                await _sync_relations_from_chapter(p, novel, text, summary_llm, db)
+
+                # ---- 本章摘要 + job 收尾 ----
+                try:
+                    job.summary = (
+                        await _chat_text(summary_llm, _SYSTEM, f"把以下章节正文压缩成 150 字剧情摘要（只输出摘要）：\n{text[:4000]}", max_tokens=400)
+                    ).strip()[:500]
+                except Exception:  # noqa: BLE001
+                    pass
+                from datetime import datetime, timezone
+
+                job.status = "done"
+                job.actual_words = chapter.word_count
+                job.finished_at = datetime.now(timezone.utc)
+                await db.commit()
+                done_n += 1
+
+                # ---- 质量门禁：最终成稿 AI 味 <60 记一记，连续 2 章自动暂停 ----
+                final_score = detect(strip_html(chapter.content))["score"]
+
+                # 成本账本：流式生成拿不到 usage，按字数粗估（生成 + 摘要 + 可能的改写）
+                est_prompt = _estimate_tokens(context) + _estimate_tokens(text[:4000])
+                est_completion = _estimate_tokens(text) + 120
+                if report["score"] < 70:
+                    est_prompt += _estimate_tokens(text[:8000])
+                    est_completion += _estimate_tokens(text)
+                _record_usage(p, est_prompt, est_completion)
+                await db.commit()
+
+                if final_score < 60:
+                    low_quality_streak += 1
+                    yield _sse({"event": "quality_warn", "job_id": job.id, "title": title, "score": final_score, "streak": low_quality_streak})
+                else:
+                    low_quality_streak = 0
+
                 yield _sse({
-                    "event": "split",
+                    "event": "chapter_done",
                     "job_id": job.id,
-                    "title": title,
+                    "title": title + (f"（过长自动拆 {split_into} 章）" if split_into > 1 else ""),
+                    "words": chapter.word_count,
+                    "state_updated": state_updated,
                     "split_into": split_into,
-                    "message": f"{title} 过长（目标 {p.target_chapter_words} 字），已自动拆分为 {split_into} 章",
-                })
-            try:
-                from ..search_fts import sync_chapter
-
-                await sync_chapter(db, chapter.id)
-            except Exception:  # noqa: BLE001
-                pass
-
-            # ---- 状态文件增量更新（共享函数，失败不阻塞；含伏笔章龄戳记）----
-            state_updated = await _update_state_files(p, chapter, text, summary_llm, db, include_particle=True)
-            # ---- 人物关系自动同步（失败不阻塞）----
-            from .ai_factory import _sync_relations_from_chapter
-
-            await _sync_relations_from_chapter(p, novel, text, summary_llm, db)
-
-            # ---- 本章摘要 + job 收尾 ----
-            try:
-                job.summary = (
-                    await _chat_text(summary_llm, _SYSTEM, f"把以下章节正文压缩成 150 字剧情摘要（只输出摘要）：\n{text[:4000]}", max_tokens=400)
-                ).strip()[:500]
-            except Exception:  # noqa: BLE001
-                pass
-            from datetime import datetime, timezone
-
-            job.status = "done"
-            job.actual_words = chapter.word_count
-            job.finished_at = datetime.now(timezone.utc)
-            await db.commit()
-            done_n += 1
-
-            # ---- 质量门禁：最终成稿 AI 味 <60 记一记，连续 2 章自动暂停 ----
-            final_score = detect(strip_html(chapter.content))["score"]
-
-            # 成本账本：流式生成拿不到 usage，按字数粗估（生成 + 摘要 + 可能的改写）
-            est_prompt = _estimate_tokens(context) + _estimate_tokens(text[:4000])
-            est_completion = _estimate_tokens(text) + 120
-            if report["score"] < 70:
-                est_prompt += _estimate_tokens(text[:8000])
-                est_completion += _estimate_tokens(text)
-            _record_usage(p, est_prompt, est_completion)
-            await db.commit()
-
-            if final_score < 60:
-                low_quality_streak += 1
-                yield _sse({"event": "quality_warn", "job_id": job.id, "title": title, "score": final_score, "streak": low_quality_streak})
-            else:
-                low_quality_streak = 0
-
-            yield _sse({
-                "event": "chapter_done",
-                "job_id": job.id,
-                "title": title + (f"（过长自动拆 {split_into} 章）" if split_into > 1 else ""),
-                "words": chapter.word_count,
-                "state_updated": state_updated,
-                "split_into": split_into,
-                "done": done_n,
-                "total": total,
-            })
-
-            if low_quality_streak >= 2:
-                yield _sse({
-                    "event": "paused",
-                    "reason": f"连续 {low_quality_streak} 章 AI 味低于 60 分，已自动暂停——建议调整提示词或更换正文模型后重跑",
                     "done": done_n,
                     "total": total,
                 })
-                return
+
+                if low_quality_streak >= 2:
+                    yield _sse({
+                        "event": "paused",
+                        "reason": f"连续 {low_quality_streak} 章 AI 味低于 60 分，已自动暂停——建议调整提示词或更换正文模型后重跑",
+                        "done": done_n,
+                        "total": total,
+                    })
+                    return
 
         yield _sse({"event": "done", "completed": done_n, "total": total})
 
-    return StreamingResponse(generate(), media_type="text/event-stream")
+    # 抗缓冲头由 app/sse 统一带上：nginx 类边缘默认 proxy_buffering on，
+    # 没有这两个头，批量连跑明明在吐事件，客户端却看到 0 字节。
+    return sse_streaming(generate())
 
 
 @router.get("/projects/{project_id}/retention")

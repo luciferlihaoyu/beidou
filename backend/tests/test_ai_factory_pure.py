@@ -726,11 +726,22 @@ class TestStuckJobRecovery:
         for st in ("pending", "done", "failed", "needs_fix", "reviewing"):
             assert job_is_stuck(st, old, now) is False, st
 
-    def test_missing_started_at_is_not_flagged(self):
-        """老数据没有 started_at：靠纯函数判不出来，由 _sweep 另作处理，不能误报。"""
+    def test_missing_started_at_on_writing_is_flagged(self):
+        """语义统一（评审 FIX-2.4）：writing 且 started_at 为空 **算可疑**。
+
+        过去这里断言 False，而 _sweep_stuck_jobs 的注释写着「老数据算作卡死」——两边
+        相反，实际生效的是纯函数那条 return False，后果是本字段上线前的遗留行、以及
+        崩在写时间戳之前的任务永远解不了锁，界面一直转圈、也只能手动 /fail。
+        现在按注释的方向定：可疑 → 交给扫描器捞回（捞回后 started_at 一并重置）。
+        """
         from app.routers.ai_factory import job_is_stuck
 
-        assert job_is_stuck("writing", None, self._now()) is False
+        now = self._now()
+        assert job_is_stuck("writing", None, now) is True
+        # 但本进程真在跑的（已登记）绝不算卡死；非 writing 状态也不许被误伤
+        assert job_is_stuck("writing", None, now, active=True) is False
+        assert job_is_stuck("pending", None, now) is False
+        assert job_is_stuck("done", None, now) is False
 
     def test_sweep_resets_stuck_and_keeps_active(self):
         """自动清理：卡死的回到 pending，正常推进的不动。"""
@@ -800,17 +811,15 @@ class TestActiveStreamNotStuck:
 
         from app.routers.ai_factory import ACTIVE_JOBS, _track_active_stream
 
-        class FakeResp:
-            def __init__(self, chunks):
-                self.body_iterator = self._gen(chunks)
-
-            async def _gen(self, chunks):
-                for c in chunks:
-                    yield c
+        async def source(chunks):
+            for c in chunks:
+                yield c
 
         async def run():
             seen_during = []
-            async for _ in _track_active_stream(FakeResp(["a", "b"]), 4242):
+            # FIX-4.2：契约收窄为「只收迭代器」。过去这里传的是带 body_iterator 的
+            # 响应对象替身（靠 getattr 兜底），那等于把写错的调用伪装成正常代码。
+            async for _ in _track_active_stream(source(["a", "b"]), 4242):
                 seen_during.append(4242 in ACTIVE_JOBS)
             return seen_during
 
@@ -824,17 +833,13 @@ class TestActiveStreamNotStuck:
 
         from app.routers.ai_factory import ACTIVE_JOBS, _track_active_stream
 
-        class Boom:
-            def __init__(self):
-                self.body_iterator = self._gen()
-
-            async def _gen(self):
-                yield "x"
-                raise RuntimeError("断开")
+        async def boom():
+            yield "x"
+            raise RuntimeError("断开")
 
         async def run():
             try:
-                async for _ in _track_active_stream(Boom(), 4343):
+                async for _ in _track_active_stream(boom(), 4343):
                     pass
             except RuntimeError:
                 pass

@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from .. import llm_timeouts
 from ..db import get_db
 from ..deps import get_current_user, get_default_ai_config, get_owned_novel
 from ..models import LibraryFolder, LibraryItem, Novel, User
@@ -419,7 +420,8 @@ async def organize_item(item_id: int, user: User = Depends(get_current_user), db
         "max_tokens": 600,
     }
     try:
-        async with httpx.AsyncClient(timeout=60.0) as client:
+        # 素材归类是辅助 LLM 任务：统一走 AUX 口径（默认 10 分钟）
+        async with httpx.AsyncClient(timeout=llm_timeouts.openai_timeout(llm_timeouts.aux_seconds())) as client:
             resp = await client.post(url, json=payload, headers={"Authorization": f"Bearer {config.api_key}"})
     except httpx.HTTPError as exc:
         raise HTTPException(400, f"无法连接 AI 接口: {exc.__class__.__name__}")

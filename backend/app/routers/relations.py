@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from .. import llm_timeouts
 from ..db import get_db
 from ..deps import get_ai_config, get_current_user, get_owned_novel
 from ..models import Chapter, Character, CharacterRelation, Novel, User, Volume
@@ -188,7 +189,8 @@ async def extract_relations(
         "temperature": 0.3,
     }
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=15.0)) as client:
+        # 关系抽取是辅助 LLM 任务（非流式，一次要吐完整 JSON）：统一走 AUX 口径
+        async with httpx.AsyncClient(timeout=llm_timeouts.openai_timeout(llm_timeouts.aux_seconds())) as client:
             resp = await client.post(
                 url, json=payload, headers={"Authorization": f"Bearer {config.api_key}"}
             )
