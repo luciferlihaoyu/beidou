@@ -571,6 +571,10 @@ export interface AiChapterJob {
   /** 停在「生成中」过久（停止/关页面/重启导致），需要解锁 */
   stuck?: boolean;
   stuck_minutes?: number;
+  /** 服务端已存的未定稿草稿（FIX-7）：生成中断/关页面后可恢复定稿 */
+  has_draft?: boolean;
+  /** 草稿字数（列表只带计数，全文走 /draft 端点） */
+  draft_chars?: number;
 }
 
 export const aiFactoryM2 = {
@@ -579,6 +583,11 @@ export const aiFactoryM2 = {
     api.post<{ ok: boolean; word_count: number; state_updated: boolean }>(
       `/api/ai-factory/projects/${projectId}/jobs/${jobId}/finalize`,
       { content_text: contentText }
+    ),
+  /** 未定稿草稿（FIX-7）：无草稿返回空串 + null，不报错 */
+  draft: (projectId: number, jobId: number) =>
+    api.get<{ text: string; updated_at: string | null }>(
+      `/api/ai-factory/projects/${projectId}/jobs/${jobId}/draft`
     ),
   review: (projectId: number, jobId: number) =>
     api.post<{ issues: NonNullable<AiChapterJob["review_issues"]>; has_high: boolean }>(

@@ -53,6 +53,9 @@ async def init_db():
         await _ensure_column(conn, "ai_projects", "nightly_enabled", "BOOLEAN NOT NULL DEFAULT 0")
         await _ensure_column(conn, "ai_projects", "nightly_chapters", "INTEGER NOT NULL DEFAULT 3")
         await _ensure_column(conn, "ai_projects", "nightly_last_run", "TEXT NOT NULL DEFAULT ''")
+        # FIX-7 未定稿草稿：服务端兜住「正文只在浏览器内存里」的丢稿风险
+        await _ensure_column(conn, "ai_chapter_jobs", "draft_text", "TEXT")
+        await _ensure_column(conn, "ai_chapter_jobs", "draft_updated_at", "DATETIME")
 
     await _migrate()
 

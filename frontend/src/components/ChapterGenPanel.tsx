@@ -9,6 +9,7 @@ import { toast } from "sonner";
 import {
   CheckCircle2,
   Circle,
+  Copy,
   Eraser,
   FileEdit,
   Loader2,
@@ -71,6 +72,8 @@ export default function ChapterGenPanel({
   useEffect(loadHookAlerts, [loadHookAlerts]);
   const abortRef = useRef<AbortController | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  // FIX-7：本次弹窗内容是否来自服务端草稿恢复（描述文案与关闭确认都要区分）
+  const [restoredDraft, setRestoredDraft] = useState(false);
 
   const loadJobs = useCallback(() => {
     aiFactoryM2.jobs(project.id).then(setJobs).catch((e) => toast.error(e.message));
@@ -116,6 +119,15 @@ export default function ChapterGenPanel({
   const doneCount = jobs.filter((j) => j.status === "done" || j.status === "needs_fix").length;
   const totalWords = jobs.reduce((s, j) => s + j.actual_words, 0);
 
+  // FIX-7：「采用并定稿」禁用时给用户可见的原因（按钮 title + 底栏小字共用）
+  const finalizeDisabledReason = genBusy
+    ? "正在生成，等流结束"
+    : finalizing
+      ? "正在定稿…"
+      : !genOutput.trim()
+        ? "还没有正文，先点生成"
+        : "";
+
   // ---------- 流式生成 ----------
   // 单章后台生成：复用后台连跑管线（job_ids 指定本章）
   async function startBgOne(job: AiChapterJob) {
@@ -146,6 +158,7 @@ export default function ChapterGenPanel({
     abortRef.current = ctrl;
     setGenJob(job);
     setGenOutput("");
+    setRestoredDraft(false); // 点生成 = 明确覆盖：草稿恢复标记一并清掉
     setGenBusy(true);
     setWaitingFirstToken(false);
     streamPost(
@@ -217,8 +230,21 @@ export default function ChapterGenPanel({
     }
   }
 
+  /** 把 fetch 层的英文技术串翻成可读中文（「点了没反应」的另一半现场：报错没人看得懂） */
+  function humanizeError(e: unknown, fallback: string): string {
+    const msg = e instanceof Error ? e.message : "";
+    if (!msg) return fallback;
+    if (/failed to fetch/i.test(msg)) return "网络请求失败：请检查网络；若刚重启过服务，请刷新页面重新登录";
+    return msg;
+  }
+
   async function finalize() {
-    if (!genJob || !genOutput.trim()) return;
+    if (!genJob) return;
+    if (!genOutput.trim()) {
+      // FIX-7：过去的静默 return 是「点了没反应」的主嫌疑之一——失败必须可见
+      toast.error("还没有正文，等生成完再定稿");
+      return;
+    }
     setFinalizing(true);
     try {
       const r = await aiFactoryM2.finalize(project.id, genJob.id, genOutput);
@@ -227,14 +253,57 @@ export default function ChapterGenPanel({
       );
       setGenJob(null);
       setGenOutput("");
+      setRestoredDraft(false);
       loadJobs();
       loadHookAlerts();
       // 刷新项目（状态文件变化）
       onProjectChange(await aiFactoryApi.get(project.id));
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : "定稿失败");
+      toast.error(humanizeError(e, "定稿失败"));
     } finally {
       setFinalizing(false);
+    }
+  }
+
+  /** FIX-7 自救口：定稿前把正文抄进剪贴板，关弹窗/刷新也不怕 */
+  async function copyOutput() {
+    if (!genOutput.trim()) return;
+    const chars = genOutput.replace(/\s/g, "").length.toLocaleString();
+    const ok = (text: string) => toast.success(text);
+    try {
+      await navigator.clipboard.writeText(genOutput);
+      ok(`已复制 ${chars} 字到剪贴板`);
+    } catch {
+      // http 部署下 navigator.clipboard 不可用：退回老式选区复制
+      try {
+        const ta = document.createElement("textarea");
+        ta.value = genOutput;
+        document.body.appendChild(ta);
+        ta.select();
+        const done = document.execCommand("copy");
+        document.body.removeChild(ta);
+        if (!done) throw new Error("execCommand failed");
+        ok(`已复制 ${chars} 字到剪贴板`);
+      } catch {
+        toast.error("复制失败：请手动全选正文复制");
+      }
+    }
+  }
+
+  /** FIX-7：从任务行打开「采用并定稿」——该章有服务端草稿时先拉来预填 */
+  async function openDraftDialog(job: AiChapterJob) {
+    setGenJob(job);
+    setGenOutput("");
+    setRestoredDraft(false);
+    if (!job.has_draft) return;
+    try {
+      const d = await aiFactoryM2.draft(project.id, job.id);
+      if (d.text.trim()) {
+        setGenOutput(d.text);
+        setRestoredDraft(true);
+      }
+    } catch {
+      // 拉不到草稿不拦路：弹窗仍打开，用户可点「重新生成」
     }
   }
 
@@ -561,6 +630,22 @@ export default function ChapterGenPanel({
                   )}
                 </Button>
               )}
+              {/* FIX-7：该章有服务端草稿且未定稿 → 直接入口定稿（丢稿恢复的主入口）。
+                  条件不限于 writing：点「停止」的行会被 reset 回 pending，但草稿还在，
+                  这批行同样要能找回（done 行不可能有草稿——finalize 成功即清空）。 */}
+              {j.has_draft && j.status !== "done" && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-7 px-2 text-xs text-primary"
+                  disabled={genBusy}
+                  title={`该章有未定稿草稿（${(j.draft_chars ?? 0).toLocaleString()} 字，上次生成已自动存服务端），点开可直接定稿`}
+                  onClick={() => void openDraftDialog(j)}
+                >
+                  <CheckCircle2 className="mr-1 h-3 w-3" />
+                  采用并定稿
+                </Button>
+              )}
               {j.stuck && (
                 <Button
                   variant="ghost"
@@ -665,10 +750,19 @@ export default function ChapterGenPanel({
           // 关弹窗时若还在生成，同样要解锁服务端状态，否则留下一行永远转圈
           if (genBusy && genJob) stopGenerate(genJob);
           else abortRef.current?.abort();
+          // FIX-7：正文没定稿就要关弹窗——拦一次，说清草稿已存服务端可恢复
+          if (!genBusy && genJob && genOutput.trim() && genJob.status !== "done") {
+            if (!window.confirm("正文还没定稿。草稿已自动存在服务端，关闭后可在任务行点「采用并定稿」找回。确定关闭？")) {
+              return;
+            }
+          }
           setGenJob(null);
+          setRestoredDraft(false);
         }
       }}>
-        <DialogContent className="flex max-h-[85vh] flex-col sm:max-w-2xl">
+        {/* 布局注记（FIX-7 复评后定稿）：显式三行模板 grid-rows-[auto_minmax(0,1fr)_auto]，
+            语义自明、不依赖工具类顺序（标题行 / 正文 1fr / 操作行）。 */}
+        <DialogContent className="grid max-h-[85vh] grid-rows-[auto_minmax(0,1fr)_auto] sm:max-w-2xl">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <Sparkles className="h-4 w-4 text-primary" />
@@ -679,23 +773,32 @@ export default function ChapterGenPanel({
                 ? waitingFirstToken && genOutput.length === 0
                   ? "已连上模型，正在等它吐第一个字…（慢模型可能等几十秒，连接有心跳，不会断）"
                   : `生成中… 已 ${genOutput.replace(/\s/g, "").length.toLocaleString()} 字`
-                : `生成完成 · ${genOutput.replace(/\s/g, "").length.toLocaleString()} 字`}
+                : restoredDraft
+                  ? `已恢复未定稿草稿 · ${genOutput.replace(/\s/g, "").length.toLocaleString()} 字（点生成则覆盖草稿）`
+                  : `生成完成 · ${genOutput.replace(/\s/g, "").length.toLocaleString()} 字`}
               {genJob?.outline ? ` · 大纲：${genJob.outline.slice(0, 50)}` : ""}
             </DialogDescription>
           </DialogHeader>
-          <ScrollArea ref={scrollRef} className="min-h-0 flex-1 rounded-md border border-border bg-muted/30">
+          <ScrollArea ref={scrollRef} className="min-h-0 rounded-md border border-border bg-muted/30">
             <div className="whitespace-pre-wrap px-4 py-3 font-content text-sm leading-7">
               {genOutput}
               {genBusy && <span className="animate-pulse text-primary">▍</span>}
             </div>
           </ScrollArea>
-          <div className="flex items-center justify-between border-t border-border pt-3">
-            <p className="text-[11px] text-muted-foreground">定稿 = 写入书稿 + AI 更新前情摘要/角色状态/伏笔</p>
-            <div className="flex gap-2">
+          <div className="flex items-center justify-between gap-3 border-t border-border pt-3">
+            <div className="min-w-0 text-[11px]">
+              <p className="text-muted-foreground">定稿 = 写入书稿 + AI 更新前情摘要/角色状态/伏笔</p>
+              {/* FIX-7：禁用原因必须可见——「按钮灰着点了没反应」的根治 */}
+              {finalizeDisabledReason && (
+                <p className="text-amber-600 dark:text-amber-400">「采用并定稿」暂不可用：{finalizeDisabledReason}</p>
+              )}
+            </div>
+            <div className="flex shrink-0 gap-2">
               {genBusy ? (
                 <Button
                   variant="outline"
                   size="sm"
+                  type="button"
                   className="text-destructive hover:text-destructive"
                   onClick={() => genJob && stopGenerate(genJob)}
                 >
@@ -703,12 +806,31 @@ export default function ChapterGenPanel({
                   停止生成
                 </Button>
               ) : (
-                <Button variant="outline" size="sm" onClick={() => genJob && startGenerate(genJob)}>
-                  <RefreshCw className="mr-1 h-3.5 w-3.5" />
-                  重新生成
-                </Button>
+                <>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    type="button"
+                    disabled={!genOutput.trim()}
+                    title="把正文复制到剪贴板——关弹窗/刷新前的自救口"
+                    onClick={() => void copyOutput()}
+                  >
+                    <Copy className="mr-1 h-3.5 w-3.5" />
+                    复制正文
+                  </Button>
+                  <Button variant="outline" size="sm" type="button" onClick={() => genJob && startGenerate(genJob)}>
+                    <RefreshCw className="mr-1 h-3.5 w-3.5" />
+                    重新生成
+                  </Button>
+                </>
               )}
-              <Button size="sm" disabled={genBusy || finalizing || !genOutput.trim()} onClick={() => void finalize()}>
+              <Button
+                size="sm"
+                type="button"
+                disabled={genBusy || finalizing || !genOutput.trim()}
+                title={finalizeDisabledReason || "把当前正文写入书稿"}
+                onClick={() => void finalize()}
+              >
                 {finalizing ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : <CheckCircle2 className="mr-1 h-3.5 w-3.5" />}
                 采用并定稿
               </Button>
@@ -836,16 +958,17 @@ function RewriteDialog({
 
   return (
     <Dialog open={job !== null} onOpenChange={(v) => !v && onClose()}>
-      <DialogContent className="flex max-h-[85vh] flex-col sm:max-w-lg">
-        <DialogHeader>
-          <DialogTitle className="flex items-center gap-2">
-            <RefreshCw className="h-4 w-4" />
-            重写 · {job?.chapter_title}
-          </DialogTitle>
-          <DialogDescription>整章推翻重来，或只改某一段。</DialogDescription>
-        </DialogHeader>
+        {/* 同 FIX-7：显式三行模板，语义自明、不依赖工具类顺序 */}
+        <DialogContent className="grid max-h-[85vh] grid-rows-[auto_minmax(0,1fr)_auto] sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <RefreshCw className="h-4 w-4" />
+              重写 · {job?.chapter_title}
+            </DialogTitle>
+            <DialogDescription>整章推翻重来，或只改某一段。</DialogDescription>
+          </DialogHeader>
 
-        <div className="space-y-3">
+          <div className="min-h-0 space-y-3 overflow-y-auto">
           <div className="flex gap-2">
             {(
               [
@@ -901,16 +1024,16 @@ function RewriteDialog({
 
         <div className="flex justify-end gap-2 border-t border-border pt-3">
           {scope === "full" ? (
-            <Button size="sm" onClick={() => onFullRewrite(instruction)}>
+            <Button size="sm" type="button" onClick={() => onFullRewrite(instruction)}>
               <Sparkles className="mr-1 h-3.5 w-3.5" />
               开始整章重写
             </Button>
           ) : newExcerpt ? (
-            <Button size="sm" onClick={onPartialDone}>
+            <Button size="sm" type="button" onClick={onPartialDone}>
               完成
             </Button>
           ) : (
-            <Button size="sm" disabled={busy || excerpt.trim().length < 10} onClick={() => void submitPartial()}>
+            <Button size="sm" type="button" disabled={busy || excerpt.trim().length < 10} onClick={() => void submitPartial()}>
               {busy ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : <Wand2 className="mr-1 h-3.5 w-3.5" />}
               重写这一段
             </Button>

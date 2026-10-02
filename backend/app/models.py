@@ -417,6 +417,11 @@ class AiChapterJob(Base):
     started_at: Mapped[datetime | None] = mapped_column(nullable=True)
     created_at: Mapped[datetime] = mapped_column(default=utcnow)
     finished_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    # FIX-7 未定稿草稿：前台逐章生成的正文过去只存在浏览器内存里，关弹窗/刷新即丢。
+    # 现在服务端在流包装层累积「已发给客户端的正文」，三种收尾路径（正常结束/
+    # 客户端中断/报错退出）只要累积非空就覆盖写这里；finalize 成功后清空。
+    draft_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    draft_updated_at: Mapped[datetime | None] = mapped_column(nullable=True)  # 草稿最近一次落库时刻
 
 
 class CharacterRelation(Base):

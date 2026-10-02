@@ -805,6 +805,9 @@ from ..utils import chapter_display_title, order_chapters, strip_html  # noqa: E
 
 
 def _job_out(job: AiChapterJob, chapter: Chapter | None, number: int) -> dict:
+    # FIX-7：草稿只给「有没有 + 多少字」，绝不带全文（几十行 × 几千字会撑爆列表）。
+    # getattr 防御：迁移刚上线时的旧行/缓存对象可能还没有这两个属性，列表不许因此 500。
+    draft = getattr(job, "draft_text", None) or ""
     return {
         "id": job.id,
         "chapter_id": job.chapter_id,
@@ -817,6 +820,8 @@ def _job_out(job: AiChapterJob, chapter: Chapter | None, number: int) -> dict:
         "review_score": job.review_score,
         "summary": job.summary or "",
         "finished_at": job.finished_at.isoformat() if job.finished_at else None,
+        "has_draft": bool(draft.strip()),
+        "draft_chars": len(draft),
     }
 
 
@@ -1247,7 +1252,9 @@ async def generate_chapter(
     # → 响应头已发、正文零字节，正是前端那句「模型返回第一个字之前被切断」的字面
     # 现场（2026-09-30 Zeabur 日志实证，逐章生成 100% 失败、与所选模型无关）。
     inner = resp.body_iterator
-    resp.body_iterator = _track_active_stream(inner, job.id)
+    # FIX-7：sink 收集「已发给客户端的正文」，包装层收尾时落 draft_text（三路径兜底）
+    draft_sink: list[str] = []
+    resp.body_iterator = _track_active_stream(inner, job.id, draft_sink)
     return resp
 
 
@@ -1364,8 +1371,67 @@ async def track_active_job(job_id: int):
         ACTIVE_JOBS.pop(job_id, None)
 
 
-def _track_active_stream(iterator, job_id: int):
+def _collect_stream_content(chunk: object, sink: list[str]) -> None:
+    """从 SSE 原始帧里抠出正文增量，追加进 sink（FIX-7 草稿累积用）。
+
+    只认 ``data: {"content": ...}`` 帧：connected/model/error/done/keepalive
+    都没有 content 键，天然不会被混进草稿。chunk 可能是 str 或 bytes（测试桩
+    两种都吐过），一行里也可能挤了多帧——逐行解析与前端 events_of 同一姿势。
+    """
+    if isinstance(chunk, (bytes, bytearray)):
+        chunk = chunk.decode("utf-8", "ignore")
+    if not isinstance(chunk, str) or not chunk:
+        return
+    for line in chunk.splitlines():
+        line = line.strip()
+        if not line.startswith("data:"):
+            continue
+        payload = line[5:].strip()
+        if not payload or payload == "[DONE]":
+            continue
+        try:
+            frame = json.loads(payload)
+        except ValueError:
+            continue
+        if isinstance(frame, dict):
+            delta = frame.get("content")
+            if isinstance(delta, str) and delta:
+                sink.append(delta)
+
+
+async def _save_job_draft(job_id: int, text: str) -> None:
+    """草稿落库（FIX-7）：累积正文非空才覆盖写 draft_text 并 commit；空则不动。
+
+    为什么自持 SessionLocal：与 _prepare/_on_error 同一道理由——收尾可能发生在
+    客户端断开（GeneratorExit）里，请求级会话随时可能已关闭，自持会话才与
+    框架版本无关。草稿是自救数据：写库失败只记日志，绝不影响流收尾。
+    """
+    if not text.strip():
+        return
+    try:
+        async with SessionLocal() as s:
+            job_row = await s.get(AiChapterJob, job_id)
+            if job_row is None:
+                return
+            if job_row.status == "done":
+                # 窄窗竞态守卫（FIX-7 复评）：用户在「停止生成」后几十毫秒内点了定稿，
+                # 断连收尾的草稿落库可能晚于 finalize 的最终 commit——不许把旧草稿
+                # 盖回已定稿的 done 行（正文已入书稿，草稿无意义）。
+                return
+            job_row.draft_text = text
+            job_row.draft_updated_at = utcnow()
+            await s.commit()
+    except Exception:  # noqa: BLE001  草稿写库失败不能把流收尾也带崩
+        logger.exception("草稿落库失败（job=%s）", job_id)
+
+
+def _track_active_stream(iterator, job_id: int, content_sink: list[str] | None = None):
     """把响应体迭代器包一层「生成期间登记」。参数**必须是迭代器本身**。
+
+    content_sink（FIX-7）：传入 list 时，包装器把每个发往客户端的 SSE 帧里的
+    正文增量累积进去，并在 finally（正常结束/报错/断开三条路径都会走到）里把
+    非空累积写进 ai_chapter_jobs.draft_text——前台生成的正文从此不再只活在
+    浏览器内存里。不传（batch/nightly 等既有调用）行为与从前完全一致。
 
     传响应对象一律 TypeError，不做兼容（评审 FIX-4.2）：过去那句
     `resp.body_iterator = _track_active_stream(resp, job.id)`（2026-09-30 Zeabur 线上）
@@ -1384,8 +1450,22 @@ def _track_active_stream(iterator, job_id: int):
         async with track_active_job(job_id):
             try:
                 async for chunk in iterator:
+                    if content_sink is not None:
+                        _collect_stream_content(chunk, content_sink)
                     yield chunk
             finally:
+                # FIX-7 草稿抢救（三条收尾路径都经过这里）：正常结束 / 报错退出 /
+                # 客户端断开（GeneratorExit 砸在 yield 上），已 yield 出去的字节
+                # 都已进 sink。必须在关内层流**之前**落库——万一 aclose 卡住，
+                # 草稿已经保住；空 sink 则什么都不动（旧草稿原样保留）。
+                if content_sink is not None and content_sink:
+                    # 宽兜到 BaseException：断开场景里 finally 正在传播 GeneratorExit，
+                    # 这里的异常若不接住会把它**替换**掉（流收尾直接变成异常退出）。
+                    # _save_job_draft 内部已自兜一层，这是包装器侧的最后防线。
+                    try:
+                        await _save_job_draft(job_id, "".join(content_sink))
+                    except BaseException as exc:  # noqa: BLE001
+                        logger.debug("草稿落库异常（job=%s）：%s", job_id, exc)
                 # 断开时把内层流一起关掉：否则 _stream_openai 的帧停在 await 上，它的 pump
                 # 任务（正等上游，超时最长 15 分钟）会继续占用连接与上游配额。
                 # 必须在 aclose 返回前同步关掉，不能指望 async-generator 的 GC 终结器
@@ -1652,8 +1732,37 @@ async def finalize_chapter(
     job.status = "done"
     job.actual_words = chapter.word_count
     job.finished_at = datetime.now(timezone.utc)
+    # FIX-7：正文已入书稿，草稿使命结束——清空（残留旧稿会让「恢复草稿」入口复活已定稿内容）
+    job.draft_text = None
+    job.draft_updated_at = None
     await db.commit()
     return {"ok": True, "word_count": chapter.word_count, "state_updated": state_updated}
+
+
+@router.get("/projects/{project_id}/jobs/{job_id}/draft")
+async def get_job_draft(
+    project_id: int,
+    job_id: int,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """读取某章任务的未定稿草稿（FIX-7）：弹窗打开时恢复用。
+
+    无草稿返回 ``{"text": "", "updated_at": null}``，不报错——前端据此决定
+    是否预填，缺省形态不该逼调用方处理 404。
+    """
+    p = await _get_project(project_id, user, db)
+    job = await db.get(AiChapterJob, job_id)
+    if job is None or job.project_id != p.id:
+        raise HTTPException(404, "章节任务不存在")
+    if job.status == "done":
+        # 纵深防御（FIX-7 复评顺带项）：done 行的正文已入书稿，即使库里残留草稿
+        # 也不许吐给前端——恢复入口应把 done 行当成「无草稿」（UI 已挡，这里焊死）。
+        return {"text": "", "updated_at": None}
+    return {
+        "text": job.draft_text or "",
+        "updated_at": job.draft_updated_at.isoformat() if job.draft_updated_at else None,
+    }
 
 
 @router.post("/projects/{project_id}/jobs/{job_id}/review")
