@@ -19,7 +19,14 @@ from collections.abc import AsyncIterable, Iterable
 
 from fastapi.responses import StreamingResponse
 
-__all__ = ["SSE_HEADERS", "SSE_MEDIA_TYPE", "paced_upstream", "sse_headers", "sse_streaming"]
+__all__ = [
+    "SSE_HEADERS",
+    "SSE_MEDIA_TYPE",
+    "paced_await",
+    "paced_upstream",
+    "sse_headers",
+    "sse_streaming",
+]
 
 SSE_MEDIA_TYPE = "text/event-stream"
 
@@ -78,6 +85,54 @@ async def paced_upstream(pump, *, keepalive: float | None = None):
         # 客户端断开后那条正等着 15 分钟读超时的请求还会占着连接与配额。
         # asyncio.wait 不会把子任务的取消抛回本帧（本帧自己被打断时它会正常再抛）。
         await asyncio.wait({task}, timeout=2.0)
+
+
+async def paced_await(awaitable, *, keepalive: float | None = None):
+    """「长 await + 静默心跳」的可复用件（FIX-6B，与 paced_upstream 同风格）。
+
+    场景：SSE 流里除了等上游，还有**本地发起的多段长调用**——batch 每章正文生成
+    之后的 AI 味改写 / 状态文件更新 / 关系同步 / 摘要都是完整的一次 LLM 往返
+    （超时口径最长 15 分钟）。裸 await 期间整条流一个字节都不发，Envoy/CF 会在
+    15 秒～100 秒级把这条「看似空闲」的连接掐掉，整批停在当前章（天演探针实测
+    该段静默 3.01 秒起步，放宽超时后最坏 15 分钟）。
+
+    用法（结果通过最后一帧交回，异常原样外抛）::
+
+        box: list = []
+        async for kind, item in paced_await(some_long_coro()):
+            if kind == "idle":
+                yield ": keepalive\\n\\n"
+            else:            # ("done", result)
+                box.append(item)
+        result = box[0]
+
+    契约：
+    - 每静默 gap 秒产出 ``("idle", None)``（gap 走 llm_timeouts.keepalive_seconds）；
+    - awaitable 完成后产出 ``("done", result)`` 并收尾；
+    - awaitable 的异常在迭代处**原样外抛**（绝不包装、绝不吞）——怎么处置失败
+      （落 failed / 用原稿）仍归调用方决定，本函数只负责「等待期间线上有字节」；
+    - 上层中途弃用本生成器（客户端断开）时，finally 取消底层任务，不留一个
+      还在等 15 分钟超时的孤儿协程。
+    """
+    import asyncio
+
+    from . import llm_timeouts
+
+    gap = llm_timeouts.keepalive_seconds(keepalive)
+    task = asyncio.ensure_future(awaitable)
+    try:
+        while True:
+            done, _pending = await asyncio.wait({task}, timeout=gap)
+            if done:
+                # 任务若带异常，task.result() 在这里把原异常抛回调用方（async for 处）。
+                yield ("done", task.result())
+                return
+            yield ("idle", None)
+    finally:
+        if not task.done():
+            task.cancel()
+            # 同 paced_upstream：只 cancel 不等待会把「是否真的停了」推给调度运气。
+            await asyncio.wait({task}, timeout=2.0)
 
 
 def sse_streaming(

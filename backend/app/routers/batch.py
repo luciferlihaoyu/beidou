@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 
 import httpx as _httpx
 from fastapi import APIRouter, Depends, HTTPException
@@ -27,8 +28,9 @@ from .. import llm_timeouts
 from ..anti_llm import ANTI_LLM_RULES, deflavor_rewrite_prompt, detect
 from ..db import get_db
 from ..deps import count_words, get_current_user
+from ..failure_kinds import classify_failure
 from ..models import AiChapterJob, AiProject, Chapter, Novel, User, Volume, utcnow
-from ..sse import paced_upstream, sse_streaming
+from ..sse import paced_await, paced_upstream, sse_streaming
 from ..utils import chapter_display_title, order_chapters, strip_html
 from .ai_factory import (
     _estimate_tokens,
@@ -47,6 +49,8 @@ from .ai_factory import (
 from .ai_factory import router as _ai_factory_router  # noqa: F401  仅确保初始化顺序
 
 router = APIRouter(prefix="/api/ai-factory", tags=["ai-factory"])
+
+logger = logging.getLogger("beidou.batch")
 
 
 
@@ -202,6 +206,25 @@ async def batch_run(
     from .ai_factory import _assemble_context
 
     async def generate():
+        async def _hb(awaitable, box: list):
+            """FIX-6B：等一个长 await 期间按心跳间隔向本流发 ': keepalive'，结果放 box[0]。
+
+            为什么需要：每章正文生成之后还有 AI 味改写 / 状态文件更新 / 关系同步 /
+            摘要四段完整 LLM 往返（超时口径最长各 15 分钟）。过去全是裸 await，
+            期间整条 SSE 一个字节不发——天演探针实测该段静默 3.01 秒起步，Envoy/CF
+            在 15 秒～100 秒级就掐断，整批停在当前章。paced_await 的异常在
+            async for 处**原样外抛**（绝不吞），怎么处置失败仍由各调用点决定。
+            """
+            stream = paced_await(awaitable)
+            try:
+                async for kind, item in stream:
+                    if kind == "idle":
+                        yield ": keepalive\n\n"
+                    else:
+                        box.append(item)
+            finally:
+                await stream.aclose()
+
         total = len(pending)
         yield _sse({"event": "start", "total": total})
         done_n = 0
@@ -327,8 +350,15 @@ async def batch_run(
                 if report["score"] < 70:
                     yield _sse({"event": "rewrite", "job_id": job.id, "score": report["score"]})
                     try:
-                        rewritten = await _chat_text(summary_llm, _SYSTEM, deflavor_rewrite_prompt(text, report), max_tokens=6000)
-                        rewritten = rewritten.strip()
+                        # FIX-6B：改写是一整次 LLM 调用（最长 15 分钟），等待期间照发心跳。
+                        # 异常语义不变：仍由下面的 except 兜住「改写失败就用原稿」。
+                        rewrite_box: list = []
+                        async for _frame in _hb(
+                            _chat_text(summary_llm, _SYSTEM, deflavor_rewrite_prompt(text, report), max_tokens=6000),
+                            rewrite_box,
+                        ):
+                            yield _frame
+                        rewritten = rewrite_box[0].strip()
                         if len(rewritten) > 100:
                             after = detect(rewritten)
                             if after["score"] > report["score"]:
@@ -363,18 +393,45 @@ async def batch_run(
                 except Exception:  # noqa: BLE001
                     pass
 
-                # ---- 状态文件增量更新（共享函数，失败不阻塞；含伏笔章龄戳记）----
-                state_updated = await _update_state_files(p, chapter, text, summary_llm, db, include_particle=True)
-                # ---- 人物关系自动同步（失败不阻塞）----
-                from .ai_factory import _sync_relations_from_chapter
-
-                await _sync_relations_from_chapter(p, novel, text, summary_llm, db)
-
-                # ---- 本章摘要 + job 收尾 ----
+                # ---- 状态文件增量更新 + 人物关系自动同步（FIX-6B：两段都是完整 LLM 往返，
+                #      等待期间照发心跳；异常必须把该章落 failed——过去这里裸 await 一旦
+                #      炸掉，整条流无声死掉、任务永远停在 writing 等卡死扫描捞尸）----
+                state_box: list = []
                 try:
-                    job.summary = (
-                        await _chat_text(summary_llm, _SYSTEM, f"把以下章节正文压缩成 150 字剧情摘要（只输出摘要）：\n{text[:4000]}", max_tokens=400)
-                    ).strip()[:500]
+                    async for _frame in _hb(
+                        _update_state_files(p, chapter, text, summary_llm, db, include_particle=True), state_box
+                    ):
+                        yield _frame
+                    state_updated = state_box[0] if state_box else False
+
+                    from .ai_factory import _sync_relations_from_chapter
+
+                    relation_box: list = []
+                    async for _frame in _hb(
+                        _sync_relations_from_chapter(p, novel, text, summary_llm, db), relation_box
+                    ):
+                        yield _frame
+                except Exception as exc:  # noqa: BLE001
+                    reason = f"定稿后处理失败：{exc.__class__.__name__}: {exc}"[:2000]
+                    logger.warning("batch 定稿后处理失败（job=%s）：%s", job.id, reason)
+                    yield _sse({"event": "error", "message": reason, "job_id": job.id, "title": title})
+                    job.status = "failed"
+                    job.last_error = reason
+                    job.last_error_code = classify_failure(reason).code
+                    await db.commit()
+                    return
+
+                # ---- 本章摘要 + job 收尾（FIX-6B：摘要也是一整次 LLM 调用，等待期间发心跳）----
+                try:
+                    summary_box: list = []
+                    async for _frame in _hb(
+                        _chat_text(
+                            summary_llm, _SYSTEM, f"把以下章节正文压缩成 150 字剧情摘要（只输出摘要）：\n{text[:4000]}", max_tokens=400
+                        ),
+                        summary_box,
+                    ):
+                        yield _frame
+                    job.summary = summary_box[0].strip()[:500]
                 except Exception:  # noqa: BLE001
                     pass
                 from datetime import datetime, timezone

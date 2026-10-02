@@ -279,7 +279,9 @@ async def _generate_chapter(p: AiProject, novel: Novel, job: AiChapterJob, chapt
     if p.current_focus:
         system += f"\n【当前阶段焦点】{p.current_focus[:300]}"
 
-    # 非流式生成（夜里没人看流，单次请求更简单可靠）
+    # 整章生成统一走 _chat_text（FIX-6A 后其内部向上游请求流式并累积 delta）：
+    # 夜跑虽然没人看流，但边缘（Cloudflare，524=源站 100 秒无响应）只认
+    # 「字节是否在动」——整包一次性返回的思考型模型必被 100 秒掐断（job 5/6/7 实证）。
     text = await _chat_text(chapter_llm, system, context, max_tokens=8000)
     text = text.strip()
     if len(text) < 100:

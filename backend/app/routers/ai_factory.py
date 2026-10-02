@@ -7,7 +7,8 @@ M2：逐章生成（SSE 流式，上下文预算制组装）+ 定稿（状态文
 设计要点（docs/AI_FACTORY.md v2）：
 - book_spec 八字段参考 GOAT：genre/time/place/theme/tone/pov/characters/premise
 - 状态文件四分（AI_NovelGenerator 实证）：global_summary/character_state/plot_arcs + FTS 召回
-- 立项/设定/大纲用非流式 + JSON；正文生成用 SSE 流式（用户体验）
+- 立项/设定/大纲/审校等 JSON 环节统一走 _chat_text（FIX-6A 后内部向上游请求
+  流式并累积 delta，返回值形状不变）；正文生成用 SSE 流式（用户体验）
 - 字数目标全可选，只注入 prompt 作软约束（±20% 浮动，剧情完整优先，绝不截断）
 - 立项确认时才建 Novel（标题 [AI] 前缀，与人工书区分）
 """
@@ -123,45 +124,130 @@ async def _chat_text(
     max_tokens: int = 4000,
     usage_sink: dict | None = None,
 ) -> str:
-    """非流式 chat completion，返回纯文本。
+    """chat completion：向上游请求**流式**并累积 delta，返回与旧非流式一致的最终文本。
+
+    为什么必须流式（FIX-6A，线上 2026-10-01 job 5/6/7 实证）：旧实现写死
+    ``stream: False``，整章 8000 token 一次性返回——思考型模型整包常超 100 秒，
+    而上游（tianshu.xianrealme.com，实测 server: cloudflare / cf-ray）在 Cloudflare
+    边缘后面，CF 的 524 = 源站 100 秒无响应，边缘直接把连接掐成
+    「AI 接口返回 524: <!DOCTYPE html>...」。这与用户选哪个模型无关（换模型无效），
+    上一轮把本服务客户端超时放宽到 900 秒也无效——掐断方是 CF 边缘，不是本服务。
+    改成流式累积后边缘持续看到字节，524 消失；调用方（立项/设定/大纲/审校/
+    夜跑/改写/摘要）签名与返回行为不变。
+
+    细节契约：
+    - 请求带 ``stream_options: {"include_usage": True}`` 拿精确 token 用量回填
+      usage_sink；部分网关不认该字段回 4xx → 去掉它重试一次，仍失败才报错；
+    - ``delta.reasoning_content``（思考段）丢弃，一字不许混进正文；
+    - 响应 content-type 不是 text/event-stream（网关忽略 stream 参数直接回 JSON）
+      → 走原 JSON 解析兜底（_content_from_json_response）；
+    - 非 200 文案形状不变：``AI 接口返回 {status}: {body[:200]}``；
+    - 上游中途断流/空内容 → empty_output_error（断流已收到的半截正文也整段弃用，
+      绝不把半章当成品返回）；
+    - 超时仍走 llm_timeouts.openai_timeout(json_seconds())，不新增裸超时。
 
     usage_sink：传入 dict 时回填精确 token 用量（{"prompt": N, "completion": M}，
     端点不返回 usage 则保持 0）——供成本统计埋点。
     """
     url = _normalize_base(config.base_url) + "/v1/chat/completions"
-    payload = {
-        "model": config.model,
-        "messages": [
-            {"role": "system", "content": system},
-            {"role": "user", "content": user_prompt},
-        ],
-        "stream": False,
-        "max_tokens": max_tokens,
-    }
     headers = {"Authorization": f"Bearer {config.api_key}"}
-    # 非流式 JSON 调用（立项/设定/大纲/审校）统一走 llm_timeouts：默认 15 分钟。
-    # 这些任务一次要吐几千字结构化 JSON，思考型模型 3 分钟很正常，短超时会让
-    # 用户看到「点了一键生成，过一会儿什么都没有」。
+    # 统一走 llm_timeouts：默认 15 分钟。这些任务一次要吐几千字结构化 JSON，
+    # 思考型模型 3 分钟很正常，短超时会让用户看到「点了一键生成，过一会儿什么都没有」。
+    # （解析器必须内联写在 AsyncClient(...) 实参处：AST 契约测试按调用点表达式钉超时。）
     async with httpx.AsyncClient(timeout=llm_timeouts.openai_timeout(llm_timeouts.json_seconds())) as client:
-        resp = await client.post(url, json=payload, headers=headers)
-    if resp.status_code != 200:
-        raise HTTPException(502, f"AI 接口返回 {resp.status_code}: {resp.text[:200]}")
+        for attempt in range(2):
+            send_stream_options = attempt == 0
+            payload = {
+                "model": config.model,
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user_prompt},
+                ],
+                # FIX-6A：让边缘持续看到字节（CF 524 的根治），上游行逐帧累积。
+                "stream": True,
+                "max_tokens": max_tokens,
+            }
+            if send_stream_options:
+                # 精确 usage 随流尾帧回来；不认该字段的网关会回 4xx，下面据此回退。
+                payload["stream_options"] = {"include_usage": True}
+            async with client.stream("POST", url, json=payload, headers=headers) as resp:
+                if resp.status_code != 200:
+                    body = (await resp.aread()).decode(errors="ignore")[:200]
+                    if 400 <= resp.status_code < 500 and send_stream_options:
+                        continue  # 大概率是网关不认 stream_options：去掉重试一次
+                    raise HTTPException(502, f"AI 接口返回 {resp.status_code}: {body}")
+                content_type = (resp.headers.get("content-type") or "").lower()
+                if "text/event-stream" not in content_type:
+                    # 必须的兜底：网关忽略 stream 参数直接回 JSON → 原解析分支。
+                    return _content_from_json_response(await resp.aread(), config, usage_sink)
+                parts: list[str] = []
+                usage: dict = {}
+                try:
+                    async for line in resp.aiter_lines():
+                        if not line.startswith("data:"):
+                            continue
+                        data = line[5:].strip()
+                        if data == "[DONE]":
+                            break
+                        try:
+                            chunk = json.loads(data)
+                        except ValueError:
+                            continue
+                        if isinstance(chunk.get("usage"), dict):
+                            # include_usage 的用量帧（choices 为空），单独记账
+                            usage["prompt"] = usage.get("prompt", 0) + int(chunk["usage"].get("prompt_tokens") or 0)
+                            usage["completion"] = usage.get("completion", 0) + int(
+                                chunk["usage"].get("completion_tokens") or 0
+                            )
+                        choices = chunk.get("choices") or []
+                        if not choices:
+                            continue
+                        delta = choices[0].get("delta") or {}
+                        if delta.get("reasoning_content"):
+                            continue  # 思考段丢弃，不计入正文
+                        piece = delta.get("content")
+                        if piece:
+                            parts.append(piece)
+                except httpx.HTTPError as exc:
+                    # 中途断流：半截正文也整段弃用（半章落库=毒章节），统一按空内容报。
+                    logger.warning("_chat_text 流式中断（%s@%s）：%s", config.model, config.base_url, exc)
+                    parts = []
+                if usage_sink is not None:
+                    usage_sink["prompt"] = usage_sink.get("prompt", 0) + usage.get("prompt", 0)
+                    usage_sink["completion"] = usage_sink.get("completion", 0) + usage.get("completion", 0)
+                content = "".join(parts)
+                if not content.strip():
+                    # 空响应以前直接返回 ""，上层解析失败后静默——界面表现就是
+                    # 「点了一键生成，过一会儿什么都没有」。这里必须给出可操作的原因。
+                    raise HTTPException(
+                        502,
+                        empty_output_error(config.name, config.model, config.base_url, stream=True),
+                    )
+                return content
+    # 不可达：两次尝试要么 return 要么 raise（回退仅一次）。
+    raise HTTPException(502, "AI 接口调用失败：重试耗尽")
+
+
+def _content_from_json_response(raw: bytes, config: AIConfig, usage_sink: dict | None) -> str:
+    """非流式兜底解析：网关忽略 stream 参数直接回 JSON 时走这条（原 _chat_text 主体）。
+
+    保持旧行为：usage 回填 usage_sink；空 content 报 empty_output_error（非流式口径）；
+    形状异常/坏 JSON 统一 502「AI 接口响应格式异常」，不让 JSONDecodeError 漏成 500。
+    """
     try:
-        data = resp.json()
+        data = json.loads(raw)
         if usage_sink is not None:
             usage = data.get("usage") or {}
             usage_sink["prompt"] = usage_sink.get("prompt", 0) + int(usage.get("prompt_tokens") or 0)
             usage_sink["completion"] = usage_sink.get("completion", 0) + int(usage.get("completion_tokens") or 0)
         content = data["choices"][0]["message"]["content"] or ""
         if not content.strip():
-            # 空响应以前直接返回 ""，上层解析失败后静默——界面表现就是
-            # 「点了一键生成，过一会儿什么都没有」。这里必须给出可操作的原因。
             raise HTTPException(
                 502,
                 empty_output_error(config.name, config.model, config.base_url, stream=False),
             )
         return content
-    except (KeyError, IndexError, TypeError) as exc:
+    except (KeyError, IndexError, TypeError, ValueError) as exc:
         raise HTTPException(502, f"AI 接口响应格式异常: {exc}") from exc
 
 
