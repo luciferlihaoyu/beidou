@@ -300,6 +300,40 @@ def _reference_block(p: AiProject) -> str:
     return reference_prompt_block(p)
 
 
+def derive_target_chapters(p) -> int | None:
+    """FIX-8C：全书目标章数推导（纯函数，大纲生成/续写/前端展示共用）。
+
+    作者显式填了 target_chapters → 原样尊重；否则两者都有才算：
+    ceil(target_total_words / target_chapter_words)。任一缺失维持 None
+    （不许在没有依据时编造全书章数）。
+    """
+    import math
+
+    explicit = getattr(p, "target_chapters", None)
+    if explicit:
+        return int(explicit)
+    total = getattr(p, "target_total_words", None)
+    per = getattr(p, "target_chapter_words", None)
+    if total and per and per > 0:
+        return math.ceil(int(total) / int(per))
+    return None
+
+
+def word_floor_instruction(target_words: int) -> str:
+    """FIX-8A：单章字数约束句（单章 generate / 夜跑 / 批量三条路径共用）。
+
+    章节字数是**最低线**，只能上浮、不能下降——旧文案「约 X 字（±20% 浮动）」
+    等于允许写到 0.8X，正是「10 章低于 2000 下限」的源头之一。
+    """
+    if not target_words or target_words <= 0:
+        return ""
+    return (
+        f"\n本章字数要求：不少于 {target_words} 字（硬下限，低于此线系统会自动续写补足），"
+        f"建议写 {target_words}～{int(target_words * 1.3)} 字；"
+        "剧情完整优先，绝不在情节中段强行收尾，也不许注水凑字。"
+    )
+
+
 def _project_out(p: AiProject, novel: Novel | None = None, chapter_count: int = 0) -> dict:
     return {
         "id": p.id,
@@ -315,6 +349,8 @@ def _project_out(p: AiProject, novel: Novel | None = None, chapter_count: int = 
         "target_chapter_words": p.target_chapter_words,
         "target_volumes": p.target_volumes,
         "target_chapters": p.target_chapters,
+        # FIX-8C：推导章数（总字数÷每章字数），前端设置卡/大纲卡/完本预测共用口径
+        "derived_target_chapters": derive_target_chapters(p),
         "outline": json.loads(p.outline_json) if p.outline_json else None,
         "reference": json.loads(p.reference_json) if p.reference_json else None,
         "deconstruct_text": p.deconstruct_text or "",
@@ -716,15 +752,29 @@ async def outline_project(project_id: int, user: User = Depends(get_current_user
     )
     char_line = "；".join(f"{c.name}（{c.role}）" for c in chars[:10])
 
-    n_chapters = p.target_chapters or 30
+    # FIX-8C：章数自动推导。作者设定总字数+每章字数 → 全书章数 = ceil(总 ÷ 每章)；
+    # 一次喂 500 章大纲不现实，本次生成上限 30 章（第一卷），全书目标在 prompt 里讲清楚。
+    derived_chapters = derive_target_chapters(p)
+    n_chapters = min(derived_chapters, 30) if derived_chapters else 30
     n_volumes = p.target_volumes or 3
     cw = p.target_chapter_words or 3000
+
+    if derived_chapters:
+        if p.target_chapters:
+            whole_line = f"本书计划约 {derived_chapters} 章"
+        else:
+            total_w = p.target_total_words
+            per_w = p.target_chapter_words
+            whole_line = f"本书计划约 {derived_chapters} 章（总字数目标 {total_w} 字 ÷ 每章约 {per_w} 字）"
+        batch_line = f"{whole_line}，本次先出第一卷（约 {n_chapters} 章、至多 {max(1, min(n_volumes, -(-n_chapters // 10)))} 卷），后续卷章由系统自动续写补齐。"
+    else:
+        batch_line = f"本次生成约 {n_chapters} 章"
 
     prompt = (
         f"小说立项：\n{json.dumps(spec, ensure_ascii=False, indent=2)}\n"
         f"角色：{char_line}\n"
         + (f"风格：{p.style_notes}\n" if p.style_notes else "")
-        + f"\n请设计全书大纲：共 {n_volumes} 卷、约 {n_chapters} 章（每章目标约 {cw} 字，仅作节奏参考）。\n"
+        + f"\n请设计大纲：{batch_line}（每章目标不少于 {cw} 字，仅作节奏参考）。\n"
         "输出 JSON（只输出 JSON）：\n"
         "{\n"
         '  "volumes": [\n'
@@ -796,6 +846,257 @@ async def outline_project(project_id: int, user: User = Depends(get_current_user
     await db.commit()
     novel = await db.get(Novel, p.novel_id)
     return _project_out(p, novel, total_chapters)
+
+
+# ---------- FIX-8D：大纲自动续写（推进到总字数目标的发动机）----------
+
+
+def _last_outline_tail(p: AiProject) -> str:
+    """现有大纲 JSON 的尾部（最后一卷标题 + 最后一章 outline），供续写接续。"""
+    try:
+        data = json.loads(p.outline_json or "{}")
+        vols = data.get("volumes") or []
+        if not vols:
+            return ""
+        last = vols[-1]
+        tail = f"最后一卷《{last.get('title', '')}》"
+        chs = last.get("chapters") or []
+        if chs:
+            c = chs[-1]
+            tail += f"，最后一章《{c.get('title', '')}》：{c.get('outline', '')}"
+        return tail
+    except (ValueError, TypeError):
+        return ""
+
+
+async def _outline_continue_core(p: AiProject, user: User, db: AsyncSession) -> dict:
+    """大纲续写核心（端点与自动钩子共用）：算剩余 → 组上下文 → 续写 → 追加式落库。
+
+    铁律：**绝不删除/修改任何已有行**（大纲重建 outline_project 里那段「删光
+    Chapter/Volume/Job」的逻辑在这里严禁复用）——续写只做追加。
+    """
+    derived = derive_target_chapters(p)
+    if not derived:
+        raise HTTPException(400, "未配置总字数/每章字数目标，无法推导全书章数；请先在项目设置补全")
+    # 查询顺序固定为 jobs → chapters → volumes（maybe_auto_continue_outline 钩子同序）
+    jobs = ((await db.execute(select(AiChapterJob).where(AiChapterJob.project_id == p.id))).scalars().all())
+    chapters = ((await db.execute(select(Chapter).where(Chapter.novel_id == p.novel_id))).scalars().all())
+    volumes = ((await db.execute(select(Volume).where(Volume.novel_id == p.novel_id))).scalars().all())
+
+    outline_count = len(chapters)
+    chap_map = {c.id: c for c in chapters}
+    done_words = sum(
+        (chap_map[j.chapter_id].word_count or 0)
+        for j in jobs
+        if j.status == "done" and j.chapter_id in chap_map
+    )
+    target_total = p.target_total_words or 0
+    if target_total and done_words >= target_total:
+        raise HTTPException(400, f"已达总字数目标（已定稿 {done_words} 字 ≥ 目标 {target_total} 字），不再续写大纲")
+    remaining = derived - outline_count
+    if remaining <= 0:
+        raise HTTPException(400, f"已达总字数目标（大纲 {outline_count} 章已覆盖推导章数 {derived}），不再续写")
+    goal = min(remaining, 30)
+    start = outline_count + 1
+
+    # 输入上下文：全局摘要 / 最近 8 章记忆卡 / 大纲尾部 / 状态文件（有什么用什么）
+    ordered = order_chapters(chapters, volumes)
+    number_map = {c.id: i + 1 for i, c in enumerate(ordered)}
+    recent_cards = sorted(
+        (j for j in jobs if j.status == "done" and j.summary and j.chapter_id in number_map),
+        key=lambda j: number_map[j.chapter_id],
+    )[-8:]
+    cards = "\n".join(f"第{number_map[j.chapter_id]}章：{j.summary[:150]}" for j in recent_cards)
+
+    config = await _pick_config(user, db, p.outline_llm)
+    spec = json.loads(p.book_spec_json or "{}")
+    context_parts = [f"小说立项：{json.dumps(spec, ensure_ascii=False)[:600]}"]
+    if p.global_summary:
+        context_parts.append(f"前情摘要：{p.global_summary[:2000]}")
+    if cards:
+        context_parts.append(f"最近章节记忆卡：\n{cards}")
+    tail = _last_outline_tail(p)
+    if tail:
+        context_parts.append(f"现有大纲尾部：{tail}")
+    for label, val in (
+        ("角色当前状态", p.character_state),
+        ("伏笔台账", p.plot_arcs),
+        ("支线板", p.subplot_board),
+        ("资源账本", p.particle_ledger),
+    ):
+        if val:
+            context_parts.append(f"{label}：{str(val)[:800]}")
+
+    prompt = (
+        "\n".join(context_parts)
+        + f"\n\n全书计划约 {derived} 章；现有大纲已写到第 {outline_count} 章。"
+        + f"\n请接续设计第 {start}～{start + goal - 1} 章（共 {goal} 章）的大纲："
+        "延续现有卷结构（可新开一卷，标题自拟、编号顺延），剧情从现有大纲尾部自然接续，"
+        "不得与记忆卡/伏笔台账矛盾；每章 outline 80 字内、具体到事件。\n"
+        "输出 JSON（只输出 JSON）：\n"
+        "{\n"
+        '  "volumes": [\n'
+        "    {\n"
+        '      "title": "新卷标题（编号顺延）",\n'
+        '      "summary": "本卷主线（50 字内）",\n'
+        '      "chapters": [{"title": "章名（不含第几章）", "outline": "本章剧情要点+出场角色+情绪目标（80 字内）"}]\n'
+        "    }\n"
+        "  ]\n"
+        "}\n"
+    )
+    raw = await _chat_text(config, _SYSTEM, prompt, max_tokens=8000)
+    try:
+        data = _parse_json(raw)
+    except ValueError:
+        raw = await _chat_text(config, _SYSTEM, prompt + "\n注意：只输出合法 JSON，不要任何解释。", max_tokens=8000)
+        try:
+            data = _parse_json(raw)
+        except ValueError as e:
+            raise HTTPException(502, f"AI 输出解析失败（已重试一次）：{e}") from e
+    volumes_data = [v for v in ((data or {}).get("volumes") or []) if isinstance(v, dict)][:10]
+    planned = sum(len(v.get("chapters") or []) for v in volumes_data)
+    if not volumes_data or planned <= 0:
+        raise HTTPException(502, "AI 未产出任何续写章节")
+
+    # 追加式落库：新卷（sort_order 接现有末尾）+ 新章（卷内从 0 顺排）+ pending 任务
+    base_vol_sort = (max(v.sort_order for v in volumes) + 1) if volumes else 0
+    added = 0
+    for vi, v in enumerate(volumes_data):
+        chs = [c for c in (v.get("chapters") or []) if isinstance(c, dict)][:40]
+        if not chs:
+            continue
+        volume = Volume(
+            novel_id=p.novel_id,
+            title=str(v.get("title", f"第{base_vol_sort + vi + 1}卷"))[:200],
+            sort_order=base_vol_sort + vi,
+        )
+        db.add(volume)
+        await db.flush()
+        for ci, c in enumerate(chs):
+            chapter = Chapter(
+                novel_id=p.novel_id,
+                volume_id=volume.id,
+                title=str(c.get("title", ""))[:200],
+                content="",
+                sort_order=ci,
+                status="draft",
+            )
+            db.add(chapter)
+            await db.flush()
+            db.add(
+                AiChapterJob(
+                    project_id=p.id,
+                    chapter_id=chapter.id,
+                    status="pending",
+                    outline=str(c.get("outline", ""))[:2000],
+                )
+            )
+            added += 1
+    if added == 0:
+        # 未 commit，挂起的 add 由请求栈回滚；不必显式 rollback（测试替身也没有该接口）
+        raise HTTPException(502, "AI 返回的大纲没有可用章节")
+
+    # 大纲 JSON 快照追加新卷（前端大纲预览卡从 project.outline 渲染；已有卷条目不动）
+    try:
+        snapshot = json.loads(p.outline_json or "{}")
+        vol_list = snapshot.setdefault("volumes", [])
+        vol_list.extend(volumes_data)
+        p.outline_json = json.dumps(snapshot, ensure_ascii=False)
+    except (ValueError, TypeError):
+        p.outline_json = json.dumps({"volumes": volumes_data}, ensure_ascii=False)
+
+    await db.commit()
+    message = f"已续写第 {start}～{start + added - 1} 章大纲（{len(volumes_data)} 卷 {added} 章）"
+    logger.info("大纲续写（project=%s）：%s", p.id, message)
+    return {
+        "ok": True,
+        "added_volumes": len(volumes_data),
+        "added_chapters": added,
+        "chapter_range": [start, start + added - 1],
+        "message": message,
+    }
+
+
+# 进程内防重入登记（project_id）：端点与自动钩子并发共用。check 与 add 之间无 await，
+# 单事件循环内天然互斥；进程重启即清——与续写调用本身同生命周期，够用。
+OUTLINE_CONTINUE_RUNNING: set[int] = set()
+
+
+@router.post("/projects/{project_id}/outline/continue")
+async def outline_continue(project_id: int, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    """给 writing 项目追加续写一批大纲（目标章数 = min(剩余, 30)，剩余 = 推导 − 现有）。
+
+    防重入：同项目已有续写在跑 → 409；登记 finally 必释（一次失败不许永久锁死）。
+    """
+    p = await _get_project(project_id, user, db)
+    if p.status != "writing":
+        raise HTTPException(400, f"当前状态 {p.status} 不能续写大纲（需已进入写作阶段）")
+    if p.novel_id is None:
+        raise HTTPException(400, "项目未关联小说")
+    if p.id in OUTLINE_CONTINUE_RUNNING:
+        raise HTTPException(409, "该项目已有大纲续写在执行，请稍候")
+    OUTLINE_CONTINUE_RUNNING.add(p.id)
+    try:
+        return await _outline_continue_core(p, user, db)
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001  续写失败转 502（finally 负责放锁）
+        logger.exception("大纲续写失败（project=%s）", p.id)
+        raise HTTPException(502, f"大纲续写失败：{str(exc)[:300]}") from exc
+    finally:
+        OUTLINE_CONTINUE_RUNNING.discard(p.id)
+
+
+async def maybe_auto_continue_outline(p: AiProject, db: AsyncSession) -> dict | None:
+    """FIX-8D 自动钩子（夜跑开头 / 批量批末）：pending 任务不足且未达标 → 自动续一批大纲。
+
+    返回续写结果 dict；None = 不需要续写 / 让路。任何异常都不外抛——
+    续写钩子绝不能拦下当晚已排好的生成，失败以 ``outline_continue_error`` 返回
+    （夜跑战报据此带上失败原因，用户能看出钩子是否还活着）。完本（已定稿 ≥
+    总字数目标）→ 不续写，返回 finished_book 标记供战报打「全书完本」。
+
+    防重入（复评必修 2）：check 与 add 之间**零 await**——check 后立即登记，
+    后面无论多少个 await，并发触发（夜跑钩子 × 用户点按钮 / 双批量）都只有一个
+    能越过临界区，杜绝双重续写、重复落卷章。
+    """
+    try:
+        if p.id in OUTLINE_CONTINUE_RUNNING:
+            return None
+        OUTLINE_CONTINUE_RUNNING.add(p.id)  # 临界区：与上一行之间不得插入任何 await
+        # 内层 finally 覆盖**全部** early-return 分支（derived 缺失 / 完本 / pending 足够 /
+        # 无剩余 / 无 user）——add 提前后任何分支漏 discard 都会让项目永久锁死。
+        try:
+            derived = derive_target_chapters(p)
+            if not derived:
+                return None
+            jobs = ((await db.execute(select(AiChapterJob).where(AiChapterJob.project_id == p.id))).scalars().all())
+            chapters = ((await db.execute(select(Chapter).where(Chapter.novel_id == p.novel_id))).scalars().all())
+            pending_count = sum(1 for j in jobs if j.status in ("pending", "failed"))
+            chap_map = {c.id: c for c in chapters}
+            done_words = sum(
+                (chap_map[j.chapter_id].word_count or 0)
+                for j in jobs
+                if j.status == "done" and j.chapter_id in chap_map
+            )
+            target_total = p.target_total_words or 0
+            if target_total and done_words >= target_total:
+                return {"finished_book": True, "message": f"全书完本（已定稿 {done_words} 字 ≥ 目标 {target_total} 字）"}
+            if pending_count >= 3:
+                return None
+            if derived - len(chapters) <= 0:
+                return None
+            user = await db.get(User, p.user_id)
+            if user is None:
+                return None
+            return await _outline_continue_core(p, user, db)
+        finally:
+            OUTLINE_CONTINUE_RUNNING.discard(p.id)
+    except HTTPException as exc:
+        logger.warning("大纲自动续写让路（project=%s）：%s", p.id, getattr(exc, "detail", exc))
+        return {"ok": False, "outline_continue_error": str(getattr(exc, "detail", exc))[:200]}
+    except Exception as exc:  # noqa: BLE001  钩子失败不阻断夜跑/批跑，但要留痕
+        logger.exception("大纲自动续写失败（project=%s，不阻断夜跑）", p.id)
+        return {"ok": False, "outline_continue_error": f"{exc.__class__.__name__}: {exc}"[:200]}
 
 
 # ==================== M2：逐章生成 / 定稿 / 审校 ====================
@@ -1120,11 +1421,8 @@ async def _assemble_context(p: AiProject, novel: Novel, chapter: Chapter, job: A
     task = f"现在请写{chapter_display_title(chapter.title, number)}。"
     if job.outline:
         task += f"\n本章大纲：{job.outline}"
-    if p.target_chapter_words:
-        task += (
-            f"\n本章目标约 {p.target_chapter_words} 字（±20% 浮动，剧情完整优先，"
-            "绝不在情节中段强行收尾）。"
-        )
+    # FIX-8A：字数下限口径（单章 generate / 夜跑 / 批量三条路径都经这里，一处硬化全覆盖）
+    task += word_floor_instruction(p.target_chapter_words or 0)
     task += "\n直接输出正文（纯文本，段落之间空一行），不要输出章节标题、不要任何解释。"
     parts.append(task)
     return "\n\n".join(parts)
@@ -1138,6 +1436,54 @@ def _text_to_html(text: str) -> str:
         for p in re.split(r"\n{2,}", text)
         if p.strip()
     )
+
+
+def _continuation_prompt(written: str, target_words: int, have_words: int) -> str:
+    """FIX-8A 补足轮的续写 prompt（流式与非流式共用同一口径）。"""
+    return (
+        "【衔接续写】以下是本章已写出的正文（截尾展示）：\n"
+        f"{written[-3000:]}\n\n"
+        f"已写约 {have_words} 字，离本章硬性下限还差一些。请从当前情节自然衔接继续写"
+        f"（不要重复已有内容、不要复述前文），使全章不少于 {target_words} 字（硬下限）；"
+        "保持人物、时间线与文风一致，只输出续写正文，不要章节标题、不要任何解释。"
+    )
+
+
+async def _ensure_min_words(
+    config: AIConfig,
+    system: str,
+    text: str,
+    target_words: int,
+    max_tokens: int = 6000,
+    usage_sink: dict | None = None,
+) -> str:
+    """FIX-8A（夜跑/批量路径）：生成后字数低于硬下限 → 流式续写一轮并拼接。
+
+    章节字数是最低线，只能上浮。规则：
+    - 已达标 / 已超 2 倍上限 / 未设目标 → 原样返回（不烧 token）；
+    - 续写走 _chat_text（其内部向上游请求流式并累积 delta，治 524 的成果不回退）；
+    - 续写失败 / 空产出 → 保留现状（不算失败，绝不把异常抛进夜跑主链）；
+    - usage_sink（复评顺手 5）：传入 dict 时精确回填补足轮 token 用量，调用方
+      并入 _record_usage——补足轮不再漏计。
+    调用顺序必须是「先补足、再改写、再拆分」。
+    """
+    if not target_words or target_words <= 0 or not text:
+        return text
+    have = count_words(text)
+    if have >= target_words or have >= target_words * 2:
+        return text
+    prompt = _continuation_prompt(text, target_words, have)
+    try:
+        more = (
+            await _chat_text(config, system, prompt, max_tokens=max_tokens, usage_sink=usage_sink)
+        ).strip()
+    except Exception as exc:  # noqa: BLE001  补足失败保留现状
+        logger.warning("字数补足失败（下限 %s 字，实得 %s 字，job 不详）：%s", target_words, have, str(exc)[:200])
+        return text
+    if not more:
+        return text
+    logger.info("字数补足完成：%s 字 → %s 字（下限 %s）", have, count_words(text + more), target_words)
+    return (text.rstrip() + "\n\n" + more).strip()
 
 
 class GenerateIn(BaseModel):
@@ -1187,6 +1533,11 @@ async def generate_chapter(
     instruction = data.instruction.strip() if data and data.instruction.strip() else ""
     # FIX-3：闭包只捕主键。响应体阶段（流已开跑）不许再碰请求级会话。
     project_pk, novel_pk, chapter_pk, job_pk = p.id, novel.id, chapter.id, job.id
+    # FIX-8A：字数目标与 system 在请求期取定（响应体阶段不再摸 ORM）；config_box 由
+    # _prepare 流内填充，供补足轮复用同一次生成的模型配置。
+    chapter_target_words = p.target_chapter_words or 0
+    topup_system = system
+    config_box: list = []
 
     async def _prepare():
         """流内准备：选模型 → 组装上下文 → 任务转 writing 落库，返回 (config, messages)。
@@ -1210,6 +1561,7 @@ async def generate_chapter(
             if proj is None or chapter_row is None or job_row is None or novel_row is None:
                 raise HTTPException(404, "生成准备阶段：项目/章节/任务已不存在（可能刚被删除）")
             config = await _pick_config(user, s, proj.chapter_llm)
+            config_box.append(config)  # FIX-8A：补足轮复用本配置
             context = await _assemble_context(proj, novel_row, chapter_row, job_row, s)
             if instruction:
                 context += f"\n\n【作者重写指示（最高优先级，务必遵守）】\n{instruction}"
@@ -1254,6 +1606,11 @@ async def generate_chapter(
     inner = resp.body_iterator
     # FIX-7：sink 收集「已发给客户端的正文」，包装层收尾时落 draft_text（三路径兜底）
     draft_sink: list[str] = []
+    # FIX-8A：补足生成器在内层（紧跟原始流），登记/草稿包装在最外层——
+    # 草稿收到「正文+补足」全文；补足期间 ACTIVE_JOBS 登记不松（不许被卡死扫描捞走）。
+    # 重绑定 inner（sse_hardening 的 AST 守卫要求包装调用点传「换包前取出的 inner 迭代器」，
+    # 补足生成器同样是换包前的迭代器，满足守卫语义）。
+    inner = _topup_stream(inner, job_pk, chapter_target_words, config_box, system=topup_system)
     resp.body_iterator = _track_active_stream(inner, job.id, draft_sink)
     return resp
 
@@ -1399,6 +1756,42 @@ def _collect_stream_content(chunk: object, sink: list[str]) -> None:
                 sink.append(delta)
 
 
+def _sse_frame_kinds(chunk: object) -> dict:
+    """结构化判帧（FIX-8 复评必修 1）：解析 chunk 里的 SSE 帧，按键返回标志。
+
+    为什么不能用子串判断：正文 delta 里含 ``她说"done`` 时，帧字节是
+    ``data: {"content": "她说\\"done"} ``——子串 ``"done`` 恰好命中 → 整帧被当
+    done 吞掉（客户端静默丢字、done.chars 对不上实收）；``"error`` 跨界同理会把
+    内容帧误判成失败帧，让该章永不补足。修法与 _collect_stream_content 同一姿势：
+    逐行 json.loads 出 dict 后**按键**判断，解析失败的残帧一律视为「非控制帧」
+    （透传，绝不静默丢）。
+    """
+    kinds = {"done": False, "error": False, "stage": False}
+    if isinstance(chunk, (bytes, bytearray)):
+        chunk = chunk.decode("utf-8", "ignore")
+    if not isinstance(chunk, str) or not chunk:
+        return kinds
+    for line in chunk.splitlines():
+        line = line.strip()
+        if not line.startswith("data:"):
+            continue
+        payload = line[5:].strip()
+        if not payload or payload == "[DONE]":
+            continue
+        try:
+            frame = json.loads(payload)
+        except ValueError:
+            continue
+        if isinstance(frame, dict):
+            if "done" in frame:
+                kinds["done"] = True
+            if "error" in frame:
+                kinds["error"] = True
+            if "stage" in frame:
+                kinds["stage"] = True
+    return kinds
+
+
 async def _save_job_draft(job_id: int, text: str) -> None:
     """草稿落库（FIX-7）：累积正文非空才覆盖写 draft_text 并 commit；空则不动。
 
@@ -1479,6 +1872,100 @@ def _track_active_stream(iterator, job_id: int, content_sink: list[str] | None =
                         logger.debug("关闭内层流失败（job=%s）：%s", job_id, exc)
 
     return tracked()
+
+
+# FIX-8A：UI 流式补足的轮数上限（两轮后仍不足保留现状并记日志，不算失败、不许死循环）
+TOPUP_MAX_ROUNDS = 2
+
+
+async def _topup_stream(iterator, job_id: int, target_words: int, config_box: list, system: str = ""):
+    """FIX-8A（UI 流式路径）：正文补足生成器——内层流结束后按累积字数决定续写轮。
+
+    帧协议契约（前端零改动就能看到正文继续往下写）：
+    - 续写轮只透传 ``{"content": …}`` 帧（形状与首段完全一致），connected/model/done
+      帧一律拦下——前端绝不能看到第二次握手或提前的 done；
+    - 内层流的 done 帧拦下不透传，由本层最后统一发一帧（chars 汇总正文+补足两段）；
+    - 内层 error 帧 → 原样透传且不补足（保持旧收尾形状：error 后没有 done）；
+    - 补足轮上游失败 → 吞掉 error 不打扰客户端，保留已生成的现状（不算失败）；
+    - 补足最多 TOPUP_MAX_ROUNDS 轮；单章总量 ≥ target*2 即停（防爆）；
+    - 未设目标（target_words<=0）→ 帧原样转发，零行为变化。
+
+    调用次序（见 generate_chapter）：``_topup_stream`` 在内层（紧跟原始流），
+    ``_track_active_stream``（登记 + FIX-7 草稿 sink）在最外层——这样草稿收到的是
+    「正文+补足」全文，且 ACTIVE_JOBS 登记贯穿补足全程（补足期间不许被卡死扫描捞走）。
+    config_box 由端点的 _prepare 闭包在流内填充（补足轮复用同一次生成的模型配置）。
+    """
+    if not target_words or target_words <= 0:
+        async for chunk in iterator:
+            yield chunk
+        return
+
+    texts: list[str] = []
+    inner_failed = False
+    async for chunk in iterator:
+        # 复评必修 1：结构化判帧（子串判断会把含 `她说"done` 的正文帧吞掉/误判）
+        kinds = _sse_frame_kinds(chunk)
+        if kinds["error"]:
+            inner_failed = True
+        _collect_stream_content(chunk, texts)
+        if not kinds["done"]:
+            yield chunk
+    if inner_failed or not texts:
+        return  # 首段就失败：error 帧已透传，无正文可补
+
+    from .ai import _stream_openai  # 延迟导入：续写调用同样走流式（治 524 的成果）
+
+    for round_no in range(TOPUP_MAX_ROUNDS):
+        written = "".join(texts)
+        have = count_words(written)
+        if have >= target_words or have >= target_words * 2:
+            break
+        config = config_box[0] if config_box else None
+        if config is None:
+            logger.warning("字数补足中止（job=%s）：流内未拿到模型配置", job_id)
+            break
+        messages = [
+            {"role": "system", "content": system or _SYSTEM},
+            {"role": "user", "content": _continuation_prompt(written, target_words, have)},
+        ]
+        # _stream_openai 返回 StreamingResponse，取其 body_iterator（与 generate_chapter 同姿势）
+        cont_stream = (await _stream_openai(config, messages)).body_iterator
+        got_any = False
+        aborted = False
+        try:
+            async for chunk in cont_stream:
+                kinds = _sse_frame_kinds(chunk)  # 复评必修 1：结构化判帧
+                if kinds["error"]:
+                    logger.warning(
+                        "字数补足第 %s 轮失败（job=%s，已写 %s/%s 字）：保留现状，不算失败",
+                        round_no + 1, job_id, have, target_words,
+                    )
+                    aborted = True
+                    break
+                if kinds["done"] or kinds["stage"]:
+                    continue  # 续写轮的握手/收尾帧不透传
+                _collect_stream_content(chunk, texts)
+                yield chunk
+                got_any = True
+        finally:
+            # 客户端断开砸在补足 yield 上时，必须显式关掉续写轮的上游流（FIX-4 的教训：
+            # 不能指望 async-generator 的 GC 终结器，残留任务会一直占着上游连接）。
+            aclose = getattr(cont_stream, "aclose", None)
+            if aclose is not None:
+                try:
+                    await aclose()
+                except BaseException as exc:  # noqa: BLE001  含 GeneratorExit
+                    logger.debug("关闭补足流失败（job=%s）：%s", job_id, exc)
+        if aborted or not got_any:
+            break  # 补足失败 / 零产出：不重复尝试，保留现状
+
+    total_chars = sum(len(t) for t in texts)
+    if count_words("".join(texts)) < target_words:
+        logger.info(
+            "字数补足结束仍低于下限（job=%s：%s/%s 字）——保留现状，已在日志标注（不算失败）",
+            job_id, count_words("".join(texts)), target_words,
+        )
+    yield f"data: {json.dumps({'done': True, 'chars': total_chars}, ensure_ascii=False)}\n\n"
 
 
 # 生成中断判定：任务停在 writing 超过这个时长即认为「卡死」。
@@ -1699,6 +2186,23 @@ async def finalize_chapter(
     if chapter.status == "draft":
         chapter.status = "writing"
     await db.commit()
+
+    # 1.5 FIX-8B 超长自动拆分（写完正文之后、更新状态文件之前）：
+    # 拆分原先只挂夜跑/批量，UI「逐章生成→finalize」不拆——用户书里 11 章 ≥3200 字
+    # （平均 6499 字）全部是从这条缝漏进书稿的。阈值与落库语义与夜跑完全一致。
+    # 注意必须在 sync_chapter **之前**：否则 FTS 会把「拆分前的全文」索引进原章，
+    # 而拆分后原章只剩第一段，索引与正文不一致。
+    novel_obj = await db.get(Novel, p.novel_id)
+    split_into = 1
+    if novel_obj is not None and p.target_chapter_words:
+        from ..chapter_split import _maybe_split_chapter
+
+        split_into = await _maybe_split_chapter(p, novel_obj, job, chapter, data.content_text, db)
+        if split_into > 1:
+            logger.info(
+                "finalize 拆分（project=%s，job=%s）：%.0f 字拆为 %s 章",
+                p.id, job.id, count_words(data.content_text), split_into,
+            )
     try:
         from ..search_fts import sync_chapter
 
@@ -1707,21 +2211,24 @@ async def finalize_chapter(
         pass
 
     # 2. AI 更新状态文件（共享函数，含伏笔章龄戳记）
+    # 拆分时 chapter.content 只剩第一段——状态文件必须吃整章全文（与夜跑同语义）。
     config = await _pick_config(user, db, p.summary_llm)
-    state_updated = await _update_state_files(p, chapter, strip_html(chapter.content), config, db)
+    state_input = data.content_text if split_into > 1 else strip_html(chapter.content)
+    state_updated = await _update_state_files(p, chapter, state_input, config, db)
 
     # 2.5 人物关系自动同步（失败不阻塞）
     if p.novel_id:
-        novel_obj = await db.get(Novel, p.novel_id)
+        if novel_obj is None:
+            novel_obj = await db.get(Novel, p.novel_id)
         if novel_obj is not None:
-            await _sync_relations_from_chapter(p, novel_obj, strip_html(chapter.content), config, db)
+            await _sync_relations_from_chapter(p, novel_obj, state_input, config, db)
 
     # 3. 本章摘要 + job 状态
     try:
         config = await _pick_config(user, db, p.summary_llm)
         job.summary = (
             await _chat_text(
-                config, _SYSTEM, f"把以下章节正文压缩成 150 字剧情摘要（只输出摘要）：\n{strip_html(chapter.content)[:4000]}", max_tokens=400
+                config, _SYSTEM, f"把以下章节正文压缩成 150 字剧情摘要（只输出摘要）：\n{state_input[:4000]}", max_tokens=400
             )
         ).strip()[:500]
     except Exception:  # noqa: BLE001
@@ -1736,7 +2243,7 @@ async def finalize_chapter(
     job.draft_text = None
     job.draft_updated_at = None
     await db.commit()
-    return {"ok": True, "word_count": chapter.word_count, "state_updated": state_updated}
+    return {"ok": True, "word_count": chapter.word_count, "state_updated": state_updated, "split_into": split_into}
 
 
 @router.get("/projects/{project_id}/jobs/{job_id}/draft")

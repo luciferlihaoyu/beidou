@@ -25,7 +25,7 @@ import ChapterGenPanel from "@/components/ChapterGenPanel";
 import SetupStagePanel from "@/components/SetupStagePanel";
 import DeconstructCard from "@/components/DeconstructCard";
 import ModelRouteDialog from "@/components/ModelRouteDialog";
-import { aiFactoryM5, downloadExportPack } from "@/lib/api";
+import { aiFactoryM5, downloadExportPack, outlineContinue } from "@/lib/api";
 import { aiFactoryApi, type AiBookSpec, type AiProject } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -101,6 +101,23 @@ export default function FactoryProject() {
       toast.error(e instanceof Error ? e.message : "操作失败");
     } finally {
       setBusy(null);
+    }
+  }
+
+  // FIX-8D：续写下一卷大纲（追加式，不动已有章节）；成功后刷新任务列表与项目
+  const [continuing, setContinuing] = useState(false);
+  async function doOutlineContinue() {
+    setContinuing(true);
+    try {
+      const r = await outlineContinue(projectId);
+      toast.success(
+        r.message || `已续写第 ${r.chapter_range[0]}～${r.chapter_range[1]} 章（新增 ${r.added_chapters} 章）`
+      );
+      load();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "续写失败");
+    } finally {
+      setContinuing(false);
     }
   }
 
@@ -421,9 +438,11 @@ export default function FactoryProject() {
             <Sparkles className="mx-auto mb-2 h-8 w-8 text-primary/40" />
             <p className="mb-1 text-sm text-muted-foreground">
               生成卷-章大纲
-              {project.target_volumes || project.target_chapters
-                ? `（目标：${project.target_volumes ?? 3} 卷 / ${project.target_chapters ?? 30} 章）`
-                : "（默认 3 卷 × 10 章）"}
+              {project.derived_target_chapters
+                ? `（本书计划约 ${project.derived_target_chapters.toLocaleString()} 章，本次先出第一卷 ≤30 章，后续自动续写）`
+                : project.target_volumes || project.target_chapters
+                  ? `（目标：${project.target_volumes ?? 3} 卷 / ${project.target_chapters ?? 30} 章）`
+                  : "（默认 3 卷 × 10 章）"}
             </p>
             <p className="mb-3 text-xs text-muted-foreground/70">每章含剧情要点；生成后建卷章骨架，逐章生成在下一步</p>
             <Button
@@ -478,9 +497,33 @@ export default function FactoryProject() {
             {project.outline?.volumes && (
               <details className="rounded-lg border border-border bg-card">
                 <summary className="cursor-pointer px-4 py-2.5 text-sm font-medium hover:text-primary">
+                  {/* FIX-8C/8D：区分「已有大纲」与「全书预计」（大纲 30 章 ≠ 全书 30 章） */}
                   大纲预览（{project.outline.volumes.length} 卷）
+                  {project.derived_target_chapters && (
+                    <span className="ml-2 text-xs font-normal text-muted-foreground">
+                      大纲 {project.chapter_count} 章 / 全书预计 {project.derived_target_chapters.toLocaleString()} 章
+                    </span>
+                  )}
                 </summary>
                 <div className="space-y-3 border-t border-border p-3">
+                  {project.derived_target_chapters && project.chapter_count < project.derived_target_chapters && (
+                    <div className="flex items-center justify-between rounded-md border border-dashed border-border px-3 py-2">
+                      <p className="text-xs text-muted-foreground">
+                        还差约 {(project.derived_target_chapters - project.chapter_count).toLocaleString()} 章到达全书目标
+                        {project.target_total_words ? `（已定稿字数达标后自动完本）` : ""}
+                      </p>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="h-7 text-xs"
+                        disabled={continuing}
+                        onClick={() => void doOutlineContinue()}
+                      >
+                        {continuing ? <Loader2 className="mr-1 h-3 w-3 animate-spin" /> : <Sparkles className="mr-1 h-3 w-3" />}
+                        续写下一卷
+                      </Button>
+                    </div>
+                  )}
                   {project.outline.volumes.map((v, vi) => (
                     <div key={vi} className="rounded-lg border border-border p-3">
                       <div className="mb-1 text-sm font-medium">{v.title}</div>

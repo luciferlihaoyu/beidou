@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import inspect
 import json
-import re
 from datetime import datetime, timezone
 
 from sqlalchemy import select
@@ -18,10 +17,12 @@ from sqlalchemy import select
 from .anti_llm import ANTI_LLM_RULES, detect, deflavor_rewrite_prompt
 from .db import SessionLocal
 from .models import AiChapterJob, AiProject, Chapter, Novel, Volume, utcnow
+from .chapter_split import _maybe_split_chapter, split_long_chapter  # noqa: F401  re-export
 from .routers.ai_factory import (
     _SYSTEM,
     _assemble_context,
     _chat_text,
+    _ensure_min_words,
     _estimate_tokens,
     _normalize_base,
     _pick_config,
@@ -29,6 +30,7 @@ from .routers.ai_factory import (
     _stamp_plot_arcs,  # noqa: F401  保持与 finalize 一致的导入面
     _sync_relations_from_chapter,
     _update_state_files,
+    maybe_auto_continue_outline,
 )
 from .deps import count_words
 from .models import User
@@ -70,137 +72,11 @@ def _nightly_now() -> datetime:
         return datetime.now()
 
 
-# ---------- 超长自动分章（纯函数 + 落库）----------
+# ---------- 超长自动分章（FIX-8B：实现挪到 app/chapter_split.py 共享）----------
 
-# 场景分隔符行允许出现的符号（*** / —— / ··· / …… 这类 3+ 重复符号行）
-_SEP_CHARS = set("*-—–=~·•…_.#")
-_CN_NUM = "一二三四"
-
-
-def _is_scene_break(line: str) -> bool:
-    """场景分隔符行：整行仅含同一符号的重复（≥3 个；全角破折号/省略号 2 个即算）。"""
-    s = line.strip()
-    if len(s) < 2 or len(set(s)) != 1 or s[0] not in _SEP_CHARS:
-        return False
-    return len(s) >= 3 or s[0] in "—–…"
-
-
-def split_long_chapter(text: str, target_words: int) -> list[str]:
-    """超长章节自动拆分（纯函数）：双换行分段 + 贪心装填。
-
-    - 段落累加到当前桶，桶字数 ≥ target_words 封口开新桶
-    - 场景分隔符行优先作分桶边界：桶已过半（≥ target*0.5）时遇到就封口，
-      分隔符行归入下一桶开头
-    - 防失控：拆出份数 > 4 则不拆；拆完任一桶 < target*0.4 说明太碎，也不拆
-    - 不拆时返回单元素列表（原文）
-    """
-    whole = text.strip()
-    if not whole or target_words <= 0:
-        return [text]
-    paras = [p.strip() for p in re.split(r"\n{2,}", whole) if p.strip()]
-    if len(paras) < 2:
-        return [whole]
-    buckets: list[list[str]] = []
-    cur: list[str] = []
-    cur_words = 0
-    for para in paras:
-        if cur and _is_scene_break(para) and cur_words >= target_words * 0.5:
-            buckets.append(cur)
-            cur, cur_words = [], 0
-        cur.append(para)
-        cur_words += count_words(para)
-        if cur_words >= target_words:
-            buckets.append(cur)
-            cur, cur_words = [], 0
-    if cur:
-        buckets.append(cur)
-    parts = ["\n\n".join(b) for b in buckets]
-    if len(parts) > 4 or (
-        len(parts) > 1 and any(count_words(pt) < target_words * 0.4 for pt in parts)
-    ):
-        return [whole]
-    return parts
-
-
-async def _maybe_split_chapter(p: AiProject, novel: Novel, job: AiChapterJob, chapter: Chapter, text: str, db) -> int:
-    """超长自动分章落库：定稿正文超过 target_chapter_words*1.6 时拆分。
-
-    第一段写回原章（标题不变），后续段各建新章（同卷、sort_order 顺延）并配
-    status="done" 的 AiChapterJob；后续段只写正文+字数+FTS——摘要/状态文件/
-    关系同步由调用方对完整章统一跑（每段都跑太贵）。返回拆出的份数（1=未拆）。
-    """
-    target = p.target_chapter_words or 0
-    if target <= 0 or count_words(text) <= target * 1.6:
-        return 1
-    parts = split_long_chapter(text, target)
-    n = len(parts)
-    if n <= 1:
-        return 1
-    from .routers.ai_factory import _text_to_html  # 延迟导入避免循环
-
-    # 第一段写回原章，原 job 对应第一段
-    chapter.content = _text_to_html(parts[0])
-    chapter.word_count = count_words(chapter.content)
-    job.actual_words = chapter.word_count
-
-    # 原章之后（同卷）的章节 sort_order 依次 +n-1，给新章腾位
-    cond = (
-        Chapter.volume_id.is_(None)
-        if chapter.volume_id is None
-        else Chapter.volume_id == chapter.volume_id
-    )
-    siblings = (
-        await db.execute(
-            select(Chapter).where(
-                Chapter.novel_id == novel.id, cond, Chapter.sort_order > chapter.sort_order
-            )
-        )
-    ).scalars().all()
-    for sib in siblings:
-        sib.sort_order += n - 1
-
-    base = chapter.title.strip() or "未命名"
-    if n == 2:
-        suffixes = ["（下）"]
-    elif n == 3:
-        suffixes = ["（中）", "（下）"]
-    else:
-        suffixes = [f"·{_CN_NUM[i]}" for i in range(1, n)]  # ·二 ·三 ·四
-    now = datetime.now(timezone.utc)
-    new_ids: list[int] = []
-    for i, part in enumerate(parts[1:], start=1):
-        html = _text_to_html(part)
-        new_ch = Chapter(
-            novel_id=novel.id,
-            volume_id=chapter.volume_id,
-            title=f"{base}{suffixes[i - 1]}"[:200],
-            content=html,
-            sort_order=chapter.sort_order + i,
-            word_count=count_words(html),
-        )
-        db.add(new_ch)
-        await db.flush()  # 拿新章 id 建 job / 同步 FTS
-        new_ids.append(new_ch.id)
-        db.add(
-            AiChapterJob(
-                project_id=p.id,
-                chapter_id=new_ch.id,
-                status="done",
-                actual_words=new_ch.word_count,
-                attempt=1,
-                finished_at=now,
-            )
-        )
-    await db.commit()
-    # FTS 同步拆出的新章（原章由调用方管线统一同步；失败不影响拆分结果）
-    try:
-        from .search_fts import sync_chapter
-
-        for cid in new_ids:
-            await sync_chapter(db, cid)
-    except Exception:  # noqa: BLE001
-        pass
-    return n
+# 拆分逻辑（split_long_chapter / _maybe_split_chapter）已挪到 app/chapter_split.py，
+# 由夜跑、批量、UI finalize 三条路径统一调用；再导出见顶部 import 区
+# （batch.py 的 `from ..nightly import _maybe_split_chapter` 与既有测试导入面不断）。
 
 
 async def _generate_one_with_retry(p: AiProject, novel: Novel, job: AiChapterJob, chapter: Chapter, num: int, db, on_retry=None) -> dict:
@@ -298,6 +174,17 @@ async def _generate_chapter(p: AiProject, novel: Novel, job: AiChapterJob, chapt
             "reason_code": "empty_output",
         }
 
+    # FIX-8A 字数下限：章节字数是最低线，只能上浮——生成后不足就续写一轮拼接。
+    # 顺序必须是「先补足、再改写、再拆分」：改写会动措辞（补足要拿原始上下文衔接），
+    # 拆分要按最终字数决定（先拆后补会把下限算到段上）。_ensure_min_words 顶层已导入。
+    # 复评顺手 5：补足轮 token 精确入账（usage_sink 回填，调用方并入 _record_usage）。
+    target_words = p.target_chapter_words or 0
+    text_before_topup = text
+    topup_usage: dict = {}
+    if target_words > 0:
+        text = await _ensure_min_words(chapter_llm, system, text, target_words, usage_sink=topup_usage)
+    topped_up = target_words > 0 and text != text_before_topup
+
     # AI 味检测 + 自动改写（与 batch_run 同阈值）
     report = detect(text)
     rewritten = False
@@ -339,13 +226,15 @@ async def _generate_chapter(p: AiProject, novel: Novel, job: AiChapterJob, chapt
     except Exception:  # noqa: BLE001
         pass
 
-    # 成本账本（粗估）
+    # 成本账本（粗估）+ 补足轮精确用量（复评顺手 5：续写轮不再漏计）
     est_prompt = _estimate_tokens(context) + _estimate_tokens(text[:4000])
     est_completion = _estimate_tokens(text) + 120
     if rewritten:
         est_prompt += _estimate_tokens(text[:8000])
         est_completion += _estimate_tokens(text)
     _record_usage(p, est_prompt, est_completion)
+    if topup_usage:
+        _record_usage(p, int(topup_usage.get("prompt", 0)), int(topup_usage.get("completion", 0)))
     await db.commit()
 
     final_score = detect(strip_html(chapter.content))["score"]
@@ -373,6 +262,14 @@ async def run_nightly_for_project(project_id: int, user_id: int) -> dict:
         if novel is None:
             return {"ok": False, "error": "小说不存在"}
 
+        # FIX-8D 自动续写钩子（夜跑开头）：pending 任务不足且离总字数目标还远时，
+        # 先给大纲续一批章节（失败不阻断当晚已排的生成——结果只进战报）。
+        outline_note: dict | None = None
+        try:
+            outline_note = await maybe_auto_continue_outline(p, db)
+        except Exception:  # noqa: BLE001  续写钩子任何异常都不许拦下夜跑
+            outline_note = None
+
         jobs = ((await db.execute(select(AiChapterJob).where(AiChapterJob.project_id == p.id))).scalars().all())
         chapters = ((await db.execute(select(Chapter).where(Chapter.novel_id == p.novel_id))).scalars().all())
         volumes = ((await db.execute(select(Volume).where(Volume.novel_id == p.novel_id))).scalars().all())
@@ -381,6 +278,15 @@ async def run_nightly_for_project(project_id: int, user_id: int) -> dict:
         pending = [j for j in jobs if j.status in ("pending", "failed") and j.chapter_id]
         pending.sort(key=lambda j: number_map.get(j.chapter_id or 0, 99999))
         pending = pending[: max(1, min(p.nightly_chapters or 3, 10))]
+        # 钩子刚续出新章时，把新 pending 章排进今晚的队列尾部（仍受 nightly_chapters 上限约束）
+        if outline_note and outline_note.get("added_chapters"):
+            fresh = [
+                j
+                for j in (await db.execute(select(AiChapterJob).where(AiChapterJob.project_id == p.id))).scalars().all()
+                if j.status == "pending" and j.chapter_id and j not in pending
+            ]
+            fresh.sort(key=lambda j: getattr(j, "id", 0) or 0)
+            pending = pending + fresh[: max(0, min(p.nightly_chapters or 3, 10) - len(pending))]
 
         results: list[dict] = []
         low_streak = 0
@@ -419,6 +325,11 @@ async def run_nightly_for_project(project_id: int, user_id: int) -> dict:
             "errors": [r for r in finals if not r.get("ok")],
             "retries": [r for r in results if r.get("retry")],
         }
+        # FIX-8D：自动续写结果 / 全书完本标记写进战报（用户次日打开项目页即可看到）
+        if outline_note is not None:
+            report["outline_continue"] = outline_note
+            if outline_note.get("finished_book"):
+                report["finished_book"] = True
         p.nightly_last_run = json.dumps(report, ensure_ascii=False)
         await db.commit()
         return report
@@ -558,6 +469,29 @@ async def run_batch_background(project_id: int, user_id: int, count: int, job_id
                     else:
                         low_streak = 0
                 entry["current"] = ""
+
+            # FIX-8D 批末自动续写：一批跑完后 pending 不足且未达标 → 补一批大纲。
+            # 失败只记录进 results，不影响本批已完成的章节。
+            try:
+                note = await maybe_auto_continue_outline(p, db)
+                if note is not None:
+                    entry["outline_continue"] = note
+                    if note.get("ok", True):
+                        entry["results"].append(
+                            {
+                                "ok": True,
+                                "outline_continue": True,
+                                "added_chapters": note.get("added_chapters", 0),
+                                "message": note.get("message", "大纲已自动续写"),
+                            }
+                        )
+                    else:
+                        # 复评顺手 4：失败也要留痕（否则书会无声停止生长，没人知道钩子死了）
+                        entry["results"].append(
+                            {"ok": False, "error": f"大纲自动续写失败：{note.get('outline_continue_error', '未知原因')}"}
+                        )
+            except Exception as exc:  # noqa: BLE001
+                entry["results"].append({"ok": False, "error": f"大纲自动续写失败：{str(exc)[:120]}"})
     except Exception as exc:  # noqa: BLE001
         entry["error"] = str(exc)[:200]
     finally:

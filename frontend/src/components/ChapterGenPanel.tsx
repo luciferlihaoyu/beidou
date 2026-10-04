@@ -248,8 +248,11 @@ export default function ChapterGenPanel({
     setFinalizing(true);
     try {
       const r = await aiFactoryM2.finalize(project.id, genJob.id, genOutput);
+      // 复评必修 3：拆分场景用户刚看着 6500 字定稿，toast 只写首段字数（2400）会误导
       toast.success(
-        `已定稿（${r.word_count.toLocaleString()} 字）` + (r.state_updated ? "，状态文件已更新" : "")
+        r.split_into && r.split_into > 1
+          ? `已定稿，并自动拆分为 ${r.split_into} 章（共 ${r.word_count.toLocaleString()} 字）`
+          : `已定稿（${r.word_count.toLocaleString()} 字）` + (r.state_updated ? "，状态文件已更新" : "")
       );
       setGenJob(null);
       setGenOutput("");
@@ -389,6 +392,15 @@ export default function ChapterGenPanel({
             {project.target_total_words ? (
               <span className="text-muted-foreground"> / 目标 {(project.target_total_words / 10000).toFixed(1)}万字</span>
             ) : null}
+            {/* FIX-8C：推导章数与算式（设置目标后全书规模一目了然） */}
+            {project.derived_target_chapters ? (
+              <span className="ml-2 text-xs text-muted-foreground">
+                全书预计 {project.derived_target_chapters.toLocaleString()} 章
+                {project.target_total_words && project.target_chapter_words
+                  ? `（${project.target_total_words.toLocaleString()} ÷ ${project.target_chapter_words.toLocaleString()}）`
+                  : ""}
+              </span>
+            ) : null}
           </span>
           <label className="flex cursor-pointer items-center gap-1.5 text-xs text-muted-foreground">
             <input
@@ -406,9 +418,18 @@ export default function ChapterGenPanel({
             style={{ width: `${jobs.length ? (doneCount / jobs.length) * 100 : 0}%` }}
           />
         </div>
-        {/* 完本预测：按近 7 天定稿速度推算 */}
+        {/* 完本预测：按近 7 天定稿速度推算（FIX-8C：全书章数用推导口径，别被 30 章首批大纲骗到） */}
         {(() => {
-          const target = project.target_chapters ?? jobs.length;
+          // 已定稿字数 ≥ 总字数目标 → 完本（有 target 才判）
+          if (project.target_total_words && totalWords >= project.target_total_words) {
+            return (
+              <p className="text-[11px] text-green-600 dark:text-green-400">
+                🎉 全书完本（已定稿 {totalWords.toLocaleString()} 字 ≥ 目标{" "}
+                {(project.target_total_words / 10000).toFixed(0)} 万字）
+              </p>
+            );
+          }
+          const target = project.derived_target_chapters ?? jobs.length;
           const remaining = Math.max(0, target - doneCount);
           if (remaining === 0) return null;
           const weekAgo = Date.now() - 7 * 86400_000;
@@ -420,8 +441,10 @@ export default function ChapterGenPanel({
           const eta = new Date(Date.now() + days * 86400_000);
           return (
             <p className="text-[11px] text-muted-foreground">
-              📅 近 7 天定稿 {recentDone} 章，剩 {remaining} 章 —— 按此速度预计{" "}
+              📅 全书预计 {target.toLocaleString()} 章，近 7 天定稿 {recentDone} 章，还剩 {remaining.toLocaleString()} 章 ——
+              按此速度预计{" "}
               <span className="font-medium text-foreground">{eta.getMonth() + 1} 月 {eta.getDate()} 日</span>完本
+              {project.target_total_words ? `（${totalWords.toLocaleString()} / ${project.target_total_words.toLocaleString()} 字）` : ""}
             </p>
           );
         })()}

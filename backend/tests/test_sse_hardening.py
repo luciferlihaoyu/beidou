@@ -62,7 +62,8 @@ def make_bundle(**project_over):
     """造一套（项目 / 任务 / 章节 / 小说）+ FakeDB，供 generate_chapter 直接调用。"""
     p = SimpleNamespace(
         id=1, user_id=1, status="writing", novel_id=11, chapter_llm=None, summary_llm=None,
-        target_chapter_words=2000, context_recent_chapters=2, reference_novel_id=None,
+        target_chapter_words=None,  # FIX-8A：字数目标交给 test_fix8_wordcount 专测，这里守住无目标的流转发
+        context_recent_chapters=2, reference_novel_id=None,
         author_intent="", current_focus="", tokens_prompt=0, tokens_completion=0,
     )
     job = SimpleNamespace(
@@ -1217,7 +1218,7 @@ class TestPrepareOwnsItsSession:
                 await s.flush()
                 proj = AiProject(
                     user_id=u.id, novel_id=nv.id, status="writing", chapter_llm=None,
-                    target_chapter_words=2000, context_recent_chapters=1, author_intent="", current_focus="",
+                    target_chapter_words=None, context_recent_chapters=1, author_intent="", current_focus="",
                     seed_prompt="少年得剑，入山问仙。",
                 )
                 s.add(proj)

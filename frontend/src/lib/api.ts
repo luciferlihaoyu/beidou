@@ -482,6 +482,8 @@ export interface AiProject {
   target_chapter_words: number | null;
   target_volumes: number | null;
   target_chapters: number | null;
+  /** FIX-8C：推导章数（显式章数优先，否则 ceil(总字数÷每章字数)；两者缺一即 null） */
+  derived_target_chapters: number | null;
   outline: { volumes?: AiOutlineVolume[] } | null;
   global_summary: string;
   auto_mode: boolean;
@@ -580,7 +582,7 @@ export interface AiChapterJob {
 export const aiFactoryM2 = {
   jobs: (projectId: number) => api.get<AiChapterJob[]>(`/api/ai-factory/projects/${projectId}/jobs`),
   finalize: (projectId: number, jobId: number, contentText: string) =>
-    api.post<{ ok: boolean; word_count: number; state_updated: boolean }>(
+    api.post<{ ok: boolean; word_count: number; state_updated: boolean; split_into?: number }>(
       `/api/ai-factory/projects/${projectId}/jobs/${jobId}/finalize`,
       { content_text: contentText }
     ),
@@ -596,6 +598,17 @@ export const aiFactoryM2 = {
   updateProject: (projectId: number, data: Record<string, unknown>) =>
     api.put<AiProject>(`/api/ai-factory/projects/${projectId}`, data),
 };
+
+/** FIX-8D：大纲自动续写一批（目标章数 = min(剩余, 30)；已达标 400 / 防重入 409） */
+export function outlineContinue(projectId: number) {
+  return api.post<{
+    ok: boolean;
+    added_volumes: number;
+    added_chapters: number;
+    chapter_range: [number, number];
+    message: string;
+  }>(`/api/ai-factory/projects/${projectId}/outline/continue`, {});
+}
 
 // ---------- AI 工厂 M3：批量连跑 / 增强审校 / 追读力 ----------
 

@@ -344,6 +344,22 @@ async def batch_run(
                     await db.commit()
                     return
 
+                # ---- FIX-8A 字数下限补足（先补足、再改写、再拆分）----
+                # 复评顺手 5：补足轮 token 精确入账（usage_sink 回填，生成完成处并入记账）
+                topup_usage: dict = {}
+                if p.target_chapter_words:
+                    from .ai_factory import _ensure_min_words
+
+                    before_topup = text
+                    text = await _ensure_min_words(chapter_llm, system, text, p.target_chapter_words, usage_sink=topup_usage)
+                    if text != before_topup:
+                        yield _sse({
+                            "event": "content",
+                            "job_id": job.id,
+                            "text": text[len(before_topup):],
+                            "topup": True,
+                        })
+
                 # ---- AI 味检测 + 自动改写（batch-ai-deflavor 循环思想）----
                 report = detect(text)
                 yield _sse({"event": "deai", "job_id": job.id, "score": report["score"]})
@@ -452,6 +468,9 @@ async def batch_run(
                     est_prompt += _estimate_tokens(text[:8000])
                     est_completion += _estimate_tokens(text)
                 _record_usage(p, est_prompt, est_completion)
+                # 复评顺手 5：补足轮精确用量单独入账（topup_usage 由上方补足调用回填）
+                if topup_usage:
+                    _record_usage(p, int(topup_usage.get("prompt", 0)), int(topup_usage.get("completion", 0)))
                 await db.commit()
 
                 if final_score < 60:

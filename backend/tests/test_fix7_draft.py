@@ -60,7 +60,8 @@ def make_draft_bundle(*, draft_text=None, draft_updated_at=None, **job_over):
     """造一套（项目/任务/章节/小说）+ FakeDB；job 预置草稿字段（FIX-7 新增）。"""
     p = SimpleNamespace(
         id=1, user_id=1, status="writing", novel_id=11, chapter_llm=None, summary_llm=None,
-        target_chapter_words=2000, context_recent_chapters=2, reference_novel_id=None,
+        target_chapter_words=None,  # FIX-8A 后非 None 会触发流内补足轮（桩会重复吐同样内容）；字数场景由 test_fix8_wordcount 专测
+        context_recent_chapters=2, reference_novel_id=None,
         author_intent="", current_focus="", tokens_prompt=0, tokens_completion=0,
     )
     job = SimpleNamespace(

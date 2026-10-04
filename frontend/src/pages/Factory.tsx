@@ -402,7 +402,7 @@ export default function Factory() {
                   <Input
                     className="mt-1"
                     type="number"
-                    placeholder="如 300"
+                    placeholder="留空则按 总字数÷每章字数 自动推导"
                     value={form.target_chapters ?? ""}
                     onChange={(e) => setForm({ ...form, target_chapters: numInput(e.target.value) })}
                   />
@@ -428,7 +428,7 @@ export default function Factory() {
                   />
                 </div>
                 <p className="col-span-2 text-[11px] text-muted-foreground">
-                  目标只作 AI 生成参考（约 ±20% 浮动），剧情完整优先，绝不硬截断。
+                  每章字数是硬下限（只能上浮，不足会自动续写补足）；总字数÷每章字数 = 全书章数，大纲会按此自动分批生成与续写。
                 </p>
               </div>
             )}
