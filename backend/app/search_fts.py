@@ -12,7 +12,7 @@
 
 from __future__ import annotations
 
-from sqlalchemy import select, text
+from sqlalchemy import bindparam, select, text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
 
 from .utils import strip_html
@@ -253,12 +253,31 @@ def _match_expr(q: str) -> str:
 
 
 async def search_library_fts(
-    db: AsyncSession, query: str, novel_id: int | None = None, limit: int = 30
+    db: AsyncSession,
+    query: str,
+    novel_id: int | None = None,
+    limit: int = 30,
+    allowed_novel_ids: set[int] | None = None,
 ) -> list[dict]:
     """资料库全文搜索。
 
-    novel_id 给了 → 搜「公共库 + 该书专属」；没给 → 搜全部。
-    返回 [{id, title, snippet, novel_id, folder_id, tags}]。
+    novel_id 给了 → 搜「公共库 + 该书专属」（语义完全不变）；没给 → 看 allowed_novel_ids：
+      - allowed_novel_ids 非 None：把「公共库 + 该集合内的小说」的 scope **下推进 SQL**
+        （残余 4），在带 scope 的集合里取相关度前 N；空集合 = 只搜公共库。
+      - allowed_novel_ids 为 None（默认）：不加 scope 条件（全表 MATCH），保持旧行为，
+        由调用方自行兜底过滤。
+
+    ⚠ 为什么要下推（残余 4）：过去 novel_id=None 时先在全库取相关度 top N，再回路由层
+    按用户过滤——多用户下常见词的 top N 可能全是他人条目，本人条目被挤出，用户搜不到
+    自己的东西。把 scope 下推进 SQL 后，top N 是在「公共库 + 本人小说」的集合里取的。
+
+    ⚠ 安全契约：scope 下推只是把可见范围收得更紧；调用方（routers/library.py 的
+    /api/library/search）仍保留按「公共库 + 本人拥有的小说」的路由层兜底过滤（纵深防御，
+    回归钉：tests/test_library_search_scope.py、tests/test_restore_residuals.py）。
+
+    id 一律走可展开绑定参数（bindparam expanding），**绝不**把 id f-string 进 SQL。
+
+    返回 [{id, title, snippet, novel_id, folder_id, tags, source}]。
     """
     q = (query or "").strip()
     if not q:
@@ -266,22 +285,31 @@ async def search_library_fts(
     match = _match_expr(q)
     scope_cond = ""
     params: dict = {"q": match, "lim": limit}
+    use_expanding = False
     if novel_id is not None:
         scope_cond = "AND (scope = :nid OR scope = :pub)"
         params["nid"] = novel_id
         params["pub"] = _PUBLIC_SCOPE
-    rows = (
-        await db.execute(
-            text(
-                "SELECT rowid AS id, title, "
-                "  snippet(library_items_fts, 2, '<mark>', '</mark>', '…', 16) AS snippet "
-                "FROM library_items_fts "
-                f"WHERE library_items_fts MATCH :q {scope_cond} "
-                "ORDER BY rank LIMIT :lim"
-            ),
-            params,
-        )
-    ).fetchall()
+    elif allowed_novel_ids is not None:
+        params["pub"] = _PUBLIC_SCOPE
+        if allowed_novel_ids:
+            scope_cond = "AND (scope = :pub OR scope IN :allowed)"
+            params["allowed"] = list(allowed_novel_ids)
+            use_expanding = True
+        else:
+            # 空集合：只搜公共库
+            scope_cond = "AND scope = :pub"
+    stmt = text(
+        "SELECT rowid AS id, title, "
+        "  snippet(library_items_fts, 2, '<mark>', '</mark>', '…', 16) AS snippet "
+        "FROM library_items_fts "
+        f"WHERE library_items_fts MATCH :q {scope_cond} "
+        "ORDER BY rank LIMIT :lim"
+    )
+    if use_expanding:
+        # 运行期把 IN :allowed 安全展开成 IN (?, ?, …)，占位符个数随集合大小生成
+        stmt = stmt.bindparams(bindparam("allowed", expanding=True))
+    rows = (await db.execute(stmt, params)).fetchall()
     if not rows:
         return []
     from .models import LibraryItem

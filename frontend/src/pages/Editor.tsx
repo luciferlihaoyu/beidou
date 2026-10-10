@@ -417,9 +417,71 @@ export default function Editor() {
   // 写作区最外层容器（挂排版 CSS 变量 + Ctrl/Cmd+滚轮监听）
   const writingAreaRef = useRef<HTMLDivElement | null>(null);
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const pendingHtml = useRef<string | null>(null);
+  // 待保存内容与章节号绑成原子对象：flushSave 只认这里的 chapterId，绝不读 activeIdRef。
+  // 这样即便切章后 activeIdRef 已指向新章，旧章未存正文也只会 PUT 回它自己的章节号，
+  // 从根本上杜绝「B 章 id + A 章正文」的串章覆盖 / 丢稿事故（P0-2）。
+  const pendingSave = useRef<{ chapterId: number; html: string } | null>(null);
   const activeIdRef = useRef<number | null>(null);
   activeIdRef.current = activeId;
+
+  // flushSave / onEditorUpdate 必须声明在下面「初始加载 effect」之前，好让该 effect 的 deps 合法引用 flushSave
+  // （否则触发 TS2448 使用前声明）。两者皆为无副作用的 useCallback，上移不改变行为，也不破坏 hook 调用顺序一致性。
+  const flushSave = useCallback(async () => {
+    // 只认 pendingSave 里绑定的 chapterId —— 不再读 activeIdRef。
+    // 切章时 activeIdRef 已指向新章，读它就会把旧章正文发去新章 id（串章事故病根）。
+    const pending = pendingSave.current;
+    if (pending === null) return;
+    const { chapterId, html } = pending;
+    pendingSave.current = null;
+    setSaveState("saving");
+    try {
+      const updated = await updateChapter(novelId, chapterId, { content: html });
+      setChapters((prev) =>
+        prev.map((c) => (c.id === chapterId ? { ...c, word_count: updated.word_count } : c))
+      );
+      // 指示灯守卫（残余1）：仅当用户仍停留在本次 PUT 的章节时，才把指示灯置为"已保存"。
+      // 否则旧章的慢 PUT 迟到返回时，会把用户已切入的新章真实状态（dirty）盖成"已保存"，
+      // 误导用户以为已安全、关页即丢稿。⚠ 守卫只作用于指示灯；PUT 目标始终用 pending 里的
+      // chapterId（P0-2 病根修复，绝不动摇）。
+      if (activeIdRef.current === chapterId) setSaveState("saved");
+    } catch {
+      // 失败重试（残余1）：本次待存内容已被消费（pendingSave 置 null）。若期间没有产生更新的
+      // 待存内容（pendingSave 仍为 null），把它写回，让下一次 flushSave（下次击键或切章）重试
+      // 同一 {chapterId, html}；若已有更新的 pendingSave，则不覆盖它（保留最新章节的待存内容）。
+      if (pendingSave.current === null) {
+        pendingSave.current = { chapterId, html };
+      }
+      if (activeIdRef.current === chapterId) setSaveState("dirty");
+      toast.error("自动保存失败，请检查网络");
+    }
+  }, [novelId]);
+
+  const onEditorUpdate = useCallback(
+    (html: string) => {
+      // 击键这一刻，当前编辑器实例仍归属旧章，activeIdRef.current 就是旧章 id
+      // （TiptapEditor key=`${activeId}:${reloadTick}` 按章重挂载，旧实例已销毁、onUpdate 不跨章派发）。
+      // 把正文与章节号在同一时刻绑死，flushSave 之后无论何时执行都能落到正确章节。
+      const chapterId = activeIdRef.current;
+      pendingSave.current = chapterId === null ? null : { chapterId, html };
+      setSaveState("dirty");
+      // 写作统计
+      const split = splitWords(html);
+      const words = split.total;
+      setLiveSplit(split);
+      const delta = words - prevWords.current;
+      if (delta > 0) {
+        prevWords.current = words;
+        setSessionChars((s) => s + delta);
+        setTodayWords((t) => t + delta);
+      } else {
+        prevWords.current = words;
+      }
+      setLiveWords(words);
+      if (saveTimer.current) clearTimeout(saveTimer.current);
+      saveTimer.current = setTimeout(() => void flushSave(), 1200);
+    },
+    [flushSave]
+  );
 
   /**
    * 拉取章节列表。
@@ -453,6 +515,9 @@ export default function Editor() {
           loadVolumes(),
         ]);
         setNovel(n);
+        // 重置 activeId 前先落盘上一章未存内容，防止串章（初始化时 pendingSave 为 null，是安全 no-op；
+        // 真正的兜底是切章 cleanup 与 handleStatusFilterChange，此处保持"所有 setActiveId 前先 flush"的不变式）。
+        await flushSave();
         if (list.length > 0) setActiveId(list[0].id);
         // 今日已写字数以服务端统计为准
         api
@@ -464,7 +529,7 @@ export default function Editor() {
         navigate("/");
       }
     })();
-  }, [novelId, loadChapters, loadVolumes, navigate]);
+  }, [novelId, loadChapters, loadVolumes, navigate, flushSave]);
 
   // 加载当前章节正文
   useEffect(() => {
@@ -486,47 +551,6 @@ export default function Editor() {
       })
       .catch((err) => toast.error(err instanceof Error ? err.message : "章节加载失败"));
   }, [activeId, novelId]);
-
-  const flushSave = useCallback(async () => {
-    const chapterId = activeIdRef.current;
-    if (chapterId === null || pendingHtml.current === null) return;
-    const html = pendingHtml.current;
-    pendingHtml.current = null;
-    setSaveState("saving");
-    try {
-      const updated = await updateChapter(novelId, chapterId, { content: html });
-      setChapters((prev) =>
-        prev.map((c) => (c.id === chapterId ? { ...c, word_count: updated.word_count } : c))
-      );
-      setSaveState("saved");
-    } catch {
-      setSaveState("dirty");
-      toast.error("自动保存失败，请检查网络");
-    }
-  }, [novelId]);
-
-  const onEditorUpdate = useCallback(
-    (html: string) => {
-      pendingHtml.current = html;
-      setSaveState("dirty");
-      // 写作统计
-      const split = splitWords(html);
-      const words = split.total;
-      setLiveSplit(split);
-      const delta = words - prevWords.current;
-      if (delta > 0) {
-        prevWords.current = words;
-        setSessionChars((s) => s + delta);
-        setTodayWords((t) => t + delta);
-      } else {
-        prevWords.current = words;
-      }
-      setLiveWords(words);
-      if (saveTimer.current) clearTimeout(saveTimer.current);
-      saveTimer.current = setTimeout(() => void flushSave(), 1200);
-    },
-    [flushSave]
-  );
 
   // 切章/离开前强制保存
   useEffect(() => {
@@ -614,6 +638,8 @@ export default function Editor() {
     if (batchPicked.size === 0) return;
     if (action === "delete" && !window.confirm(`批量删除 ${batchPicked.size} 章？会进废纸篓，30 天内可恢复。`)) return;
     try {
+      // 批量操作前先落盘当前章未存内容：若当前章被删，进废纸篓的才是最新正文；也避免随后 activeId 跳变遗留串章。
+      await flushSave();
       await api.post(`/api/novels/${novelId}/chapters/batch`, {
         action,
         chapter_ids: Array.from(batchPicked),
@@ -848,6 +874,7 @@ export default function Editor() {
       setChDialog(null);
       setChTitle("");
       await Promise.all([loadChapters(), loadVolumes()]);
+      void flushSave(); // 切到新章前先落盘上一章未存内容，防止串章
       setActiveId(chapter.id);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "创建失败");
@@ -857,6 +884,8 @@ export default function Editor() {
   async function deleteChapter(chapter: Chapter) {
     if (!window.confirm(`删除「${chapter.display_title}」？正文将一并删除。`)) return;
     try {
+      // 删除前先落盘当前章未存内容：若删的正是当前章，进废纸篓归档的才是最新正文；也避免 activeId 跳变串章。
+      await flushSave();
       await api.delete(`/api/novels/${novelId}/chapters/${chapter.id}`);
       const list = await loadChapters();
       void loadVolumes();
@@ -953,6 +982,8 @@ export default function Editor() {
    * 若当前章节被过滤掉，把 activeId 切到过滤后列表的第一项（保持写作区不空白）。
    */
   async function handleStatusFilterChange(next: "all" | ChapterStatus) {
+    // 过滤 tab 切换会让当前章可能被过滤掉、activeId 跳变；先落盘未存内容防串章。
+    void flushSave();
     setStatusFilter(next);
     const list = await listChapters(
       novelId,
@@ -1115,18 +1146,43 @@ export default function Editor() {
     await applyChapterTransform((t) => t.replace(/^[ \t\u3000]+/, ""), "清理段首空格", false);
   }
 
+  /**
+   * 弃用（discard）编辑器侧尚未落盘的防抖内容：清防抖定时器 + 置空 pendingSave。
+   * 专用于「快照恢复」路径——恢复是用户显式动作，语义上取代未存的 1.2s 内击键，应丢弃而非
+   * 落盘（落盘会用旧正文 PUT 冲掉刚恢复的快照）。两处共用同一实现：
+   *   ① SnapshotPanel 的 onBeforeRestore（restore 请求发出前，主，关闭 in-flight 窄竞态）；
+   *   ② onRestored（请求后，冗余兜底）。
+   */
+  function discardPendingEdits() {
+    if (saveTimer.current) {
+      clearTimeout(saveTimer.current);
+      saveTimer.current = null;
+    }
+    pendingSave.current = null;
+  }
+
   /** 快照面板恢复成功后重新拉章节正文并重挂编辑器 */
   async function reloadActiveChapter() {
     const id = activeIdRef.current;
     if (id === null) return;
     try {
+      // 前置 flush 仅为防御性兜底：本函数当前唯一调用点是快照恢复(onRestored)，恢复路径已在
+      // 回调里 discard 待存内容（clearTimeout + pendingSave=null），故此处 flushSave 遇
+      // pending===null 立即 return、恒为 no-op。保留它是给将来「确需先保住未存编辑再重载」的
+      // 新调用者兜底。⚠ 方向辨析：替换(:1291)/拆分(:1450) 是「先 flush 落盘 → 再改服务端」；
+      // 快照恢复相反，是「restore 已改完服务端 → 再 reload」，此路径绝不能靠 flush 落盘，
+      // 否则会用旧正文 PUT 冲掉刚恢复的快照——只能 discard（见 onRestored 回调）。
+      await flushSave();
       const c = await api.get<Chapter>(`/api/novels/${novelId}/chapters/${id}`);
       if (activeIdRef.current !== id) return; // 恢复期间切章了，丢弃过期结果
       setActiveContent(c.content ?? "");
       setLiveWords(c.word_count);
       setLiveSplit(chapterToSplit(c));
       prevWords.current = c.word_count;
-      pendingHtml.current = null;
+      // 重载后清空 pending：此刻服务器正文（恢复路径下即刚回滚的快照）已是权威；GET 期间
+      // 万一又积累了待存内容也一并弃用，防止被后续定时器幽灵保存。恢复路径上游已 discard
+      // 并清了定时器，此处为兜底二次清空（非"裸清空"——上游已确保不会 flush 旧正文）。
+      pendingSave.current = null;
       setSaveState("saved");
       setReloadTick((t) => t + 1);
       // 恢复后的章节总字数也可能变化，刷新侧边目录
@@ -1263,7 +1319,7 @@ export default function Editor() {
         setLiveWords(c.word_count);
         setLiveSplit(chapterToSplit(c));
         prevWords.current = c.word_count;
-        pendingHtml.current = null;
+        pendingSave.current = null;
         setReloadTick((t) => t + 1); // 强制重挂载编辑器以显示新内容
       }
       await runSearch();
@@ -1422,7 +1478,7 @@ export default function Editor() {
       setLiveWords(c.word_count);
       setLiveSplit(chapterToSplit(c));
       prevWords.current = c.word_count;
-      pendingHtml.current = null;
+      pendingSave.current = null;
       setReloadTick((t) => t + 1); // 强制重挂载编辑器以显示新内容
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "拆分失败");
@@ -2718,6 +2774,7 @@ export default function Editor() {
           chapters={chapters}
           volumes={volumes}
           onJumpChapter={(id) => {
+            void flushSave(); // 跳章前先落盘上一章未存内容，防止串章
             setActiveId(id);
             setActiveContent(null);
           }}
@@ -2740,6 +2797,7 @@ export default function Editor() {
           novelId={novelId}
           chapters={chapters}
           onJumpChapter={(id) => {
+            void flushSave(); // 跳章前先落盘上一章未存内容，防止串章
             setActiveId(id);
             setActiveContent(null);
           }}
@@ -2811,6 +2869,7 @@ export default function Editor() {
             }
             // 段落恢复：跳到目标章节 + 追加段落到末尾
             if (payload.chapterId) {
+              void flushSave(); // 跳到恢复目标章前先落盘上一章未存内容，防止串章（P0-2 排查发现的漏网路径）
               setActiveId(payload.chapterId);
               setActiveContent(null);
               // 等编辑器重挂载后再 append：观察 reloadTick 或延迟
@@ -2831,6 +2890,7 @@ export default function Editor() {
           chapters={chapters}
           aiConfigs={aiConfigs}
           onJumpChapter={(id) => {
+            void flushSave(); // 跳章前先落盘上一章未存内容，防止串章
             setActiveId(id);
             setActiveContent(null);
             // 触发加载（与点击章节列表同路径）
@@ -3099,7 +3159,15 @@ export default function Editor() {
           onOpenChange={setSnapshotOpen}
           novelId={novelId}
           chapterId={activeId}
-          onRestored={() => void reloadActiveChapter()}
+          onBeforeRestore={discardPendingEdits}
+          onRestored={() => {
+            // 冗余兜底：主 discard 已前移到 onBeforeRestore（restore 请求发出前，关闭 in-flight
+            // 窗口内防抖定时器 PUT 旧正文冲掉快照的窄竞态）。此处再 discard 一次，覆盖"请求
+            // in-flight 期间又有击键"的极窄残留（面板打开时编辑器不可聚焦，正常不发生）。快照
+            // 恢复取代未存击键，故 discard 而非 flush；随后 reloadActiveChapter 的 flush 变 no-op。
+            discardPendingEdits();
+            void reloadActiveChapter();
+          }}
         />
       )}
 

@@ -1,5 +1,7 @@
 """设定系统：角色 / 世界观 / 伏笔 / 大纲树。"""
 
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy import select
@@ -8,6 +10,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..db import get_db
 from ..deps import get_owned_novel
 from ..models import Character, Foreshadowing, Novel, NovelTerm, OutlineNode, WorldviewEntry
+
+logger = logging.getLogger("beidou.settings")
 
 router = APIRouter(prefix="/api/novels/{novel_id}/settings", tags=["settings"])
 
@@ -88,8 +92,8 @@ async def delete_character(item_id: int, novel: Novel = Depends(get_owned_novel)
                     "relations": item.relations,
                 },
             )
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001  P0-1 同步加固：失败记日志，不阻断删除
+        logger.error("废纸篓归档失败 kind=character novel=%s item_id=%s: %s", novel.id, item_id, exc)
     await db.delete(item)
     await db.commit()
     return {"ok": True}
@@ -165,8 +169,8 @@ async def delete_worldview(item_id: int, novel: Novel = Depends(get_owned_novel)
                     "content": item.content,
                 },
             )
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001  P0-1 同步加固：失败记日志，不阻断删除
+        logger.error("废纸篓归档失败 kind=setting novel=%s item_id=%s: %s", novel.id, item_id, exc)
     await db.delete(item)
     await db.commit()
     return {"ok": True}
@@ -244,8 +248,8 @@ async def delete_foreshadowing(
                     "status": item.status,
                 },
             )
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001  P0-1 同步加固：失败记日志，不阻断删除
+        logger.error("废纸篓归档失败 kind=foreshadow novel=%s item_id=%s: %s", novel.id, item_id, exc)
     await db.delete(item)
     await db.commit()
     return {"ok": True}

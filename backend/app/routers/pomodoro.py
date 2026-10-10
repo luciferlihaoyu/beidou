@@ -57,7 +57,7 @@ async def complete_pomo(
     - 返回今日累计（写完后客户端可同步刷新）"""
     if data.novel_id is not None:
         novel = await db.get(Novel, data.novel_id)
-        if novel is None or novel.owner_id != user.id:
+        if novel is None or novel.user_id != user.id:
             raise HTTPException(404, "小说不存在")
     log = PomoLog(
         user_id=user.id,
@@ -93,7 +93,7 @@ async def today_pomo(
     today_start, _ = _today_beijing_range()
     if novel_id is not None:
         novel = await db.get(Novel, novel_id)
-        if novel is None or novel.owner_id != user.id:
+        if novel is None or novel.user_id != user.id:
             raise HTTPException(404, "小说不存在")
     today_q = select(func.count(PomoLog.id)).where(
         PomoLog.user_id == user.id,

@@ -47,6 +47,10 @@ SECRET_PATH.write_text(SECRET_BODY, encoding="utf-8")
 
 os.environ["STATIC_DIR"] = str(STATIC_DIR)
 os.environ["DATA_DIR"] = str(DATA_DIR)
+# 钉死测试环境的部署模式：凭据门禁随 BEIDOU_ENV 变化（production + 内置默认键会在
+# 模块导入期直接 RuntimeError，炸在 pytest 收集阶段）。测试一律按 development 跑；
+# 需要测生产行为的用例（test_config_guard）自行以显式入参覆盖，不经环境变量。
+os.environ["BEIDOU_ENV"] = "development"
 
 atexit.register(shutil.rmtree, _TMP_ROOT, ignore_errors=True)
 

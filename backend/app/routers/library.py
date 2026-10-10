@@ -264,7 +264,8 @@ async def search_items(
 ):
     """资料库全文搜索：FTS5 + snippet 高亮，按相关度排序。
 
-    novel_id 给了 → 搜「公共库 + 该书专属」；没给 → 搜全部。
+    novel_id 给了 → 搜「公共库 + 该书专属」；没给 → 搜「公共库 + 本人拥有的
+    小说专属库」（他人小说的命中在本层整体丢弃，见下方 P0 越权修复）。
     响应 = ItemOut + snippet（<mark> 高亮命中词）。
     """
     if not q.strip():
@@ -272,9 +273,19 @@ async def search_items(
     await _check_scope(novel_id, user, db)
     from ..search_fts import search_library_fts
 
-    hits = await search_library_fts(db, q, novel_id=novel_id)
+    # 残余 4：novel_id 缺省时，把可见 scope 集合（本人拥有的小说）**下推进 SQL**，
+    # 让 FTS 在「公共库 + 本人小说」的集合里取相关度 top N；否则常见词的 top N 可能
+    # 全被他人条目占满，本人条目被挤出，用户搜不到自己的东西。
+    own_novel_ids: set[int] | None = None
+    if novel_id is None:
+        rows = await db.execute(select(Novel.id).where(Novel.user_id == user.id))
+        own_novel_ids = set(rows.scalars().all())
+
+    hits = await search_library_fts(db, q, novel_id=novel_id, allowed_novel_ids=own_novel_ids)
     if not hits:
         return []
+    # P0 越权修复（IDOR）路由层兜底过滤（纵深防御，保留）：FTS 层已按 scope 下推收窄，
+    # 这里再按「公共库 + 本人拥有的小说」核一遍，任何一层失守都不至泄露他人小说专属库全文。
     ids = [h["id"] for h in hits]
     items = (await db.execute(select(LibraryItem).where(LibraryItem.id.in_(ids)))).scalars().all()
     by_id = {i.id: i for i in items}
@@ -283,6 +294,8 @@ async def search_items(
         it = by_id.get(h["id"])
         if it is None:
             continue  # FTS 与主表不一致（极端情况），跳过
+        if own_novel_ids is not None and it.novel_id is not None and it.novel_id not in own_novel_ids:
+            continue  # 他人小说专属库：整条丢弃，id/标题/snippet 一律不出网
         d = _item_out(it)
         d["snippet"] = h["snippet"]
         out.append(d)

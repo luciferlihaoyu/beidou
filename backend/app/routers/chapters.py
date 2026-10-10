@@ -5,6 +5,7 @@
 """
 
 import json
+import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -17,6 +18,8 @@ from ..models import Chapter, Novel, Volume
 from ..utils import chapter_display_title, order_chapters
 
 router = APIRouter(prefix="/api/novels/{novel_id}/chapters", tags=["chapters"])
+
+logger = logging.getLogger("beidou.chapters")
 
 
 class ChapterOut(BaseModel):
@@ -256,8 +259,13 @@ async def update_chapter(
                 )
                 # 已在 archive_to_recycle 内 add，不需要额外 commit
                 await db.commit()
-        except Exception:  # noqa: BLE001  废纸篓失败不影响保存
-            pass
+        except Exception as exc:  # noqa: BLE001  废纸篓失败不影响保存，但必须可观测（P0-1）
+            logger.error(
+                "废纸篓归档失败 kind=paragraph chapter=%s novel=%s: %s",
+                chapter.id,
+                novel.id,
+                exc,
+            )
     # 同步 FTS 索引（P3-1 全文搜索）：title / content 改了就 upsert
     if content_changed or data.title is not None:
         try:
@@ -300,8 +308,8 @@ async def _delete_one_chapter(db: AsyncSession, novel: Novel, chapter: Chapter) 
                 "tags": chapter.tags,
             },
         )
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001
+        logger.error("废纸篓归档失败 kind=chapter chapter=%s novel=%s: %s", chapter.id, novel.id, exc)
     # 删 FTS 行（必须在 commit 前；CASCADE 不会触发虚拟表）
     try:
         from ..search_fts import remove_chapter
@@ -475,7 +483,7 @@ async def _get_novel_owner(db: AsyncSession, novel_id: int) -> "User":
     from ..models import Novel as _N, User
 
     n = await db.get(_N, novel_id)
-    return await db.get(User, n.owner_id) if n else None
+    return await db.get(User, n.user_id) if n else None
 
 
 @router.post("/reorder")

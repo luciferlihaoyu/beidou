@@ -94,16 +94,21 @@
 git clone https://github.com/luciferlihaoyu/beidou.git
 cd beidou
 
-# 2. 配置环境变量
+# 2. 配置环境变量（必填强凭据）
 cp .env.example .env
-# 编辑 .env 修改密钥和默认密码
+# 生成强随机密钥写入 .env（不设置或沿用示例值，生产模式会拒绝启动）
+printf 'SECRET_KEY=%s\n' "$(openssl rand -hex 32)" >> .env
+# 再把 .env 里的 ADMIN_PASSWORD 改成 12 位以上的强口令
 
 # 3. 一键启动
 docker compose up -d
 
 # 4. 访问
-open http://localhost:8080
+open http://localhost:3000
 ```
+
+> 若暂时无法更换历史遗留的弱密钥，可在 `.env` 中设 `ALLOW_WEAK_CREDS=1` 临时放行启动
+> （会持续打印 ERROR 日志），换好密钥后请立即删除该行。
 
 ### 本地开发
 
@@ -125,8 +130,9 @@ npm run dev
 
 ### 默认管理员
 
-- 用户名：`admin`
-- 密码：`admin123`
+- 用户名：由 `.env` 的 `ADMIN_USERNAME` 指定（默认 `admin`）
+- 密码：由 `.env` 的 `ADMIN_PASSWORD` 指定——**首次启动前必须设置**（12 位以上；
+  生产模式未设置/弱口令会拒绝启动，开发模式空值同样拒绝启动）
 - 请在首次登录后立即修改密码
 
 ---

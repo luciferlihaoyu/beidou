@@ -18,12 +18,15 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.exc import StaleDataError
 
 from ..db import get_db
 from ..deps import get_current_user
@@ -34,10 +37,13 @@ from ..models import (
     Novel,
     RecycleBin,
     User,
+    Volume,
     WorldviewEntry,
 )
 
 router = APIRouter(prefix="/api/recycle", tags=["recycle"])
+
+logger = logging.getLogger("beidou.recycle")
 
 RETENTION_DAYS = 30
 
@@ -133,12 +139,15 @@ async def restore_entry(
 ):
     """恢复一条废纸篓条目：按 kind 重建实体（章节/人物/设定/伏笔）。"""
     entry = await db.get(RecycleBin, entry_id)
-    if entry is None or entry.user_id != user.id:
+    # 残余 3：admin 代恢复必须真正可用。真实归档流一律以「小说属主」为 entry.user_id，
+    # 若这里只认 `entry.user_id == user.id`，admin 会在此被 404 挡死，:141 的 admin
+    # 旁路永不执行（死代码）。放宽为与 deps.py:34 get_owned_novel 一致的 admin 口径。
+    if entry is None or (entry.user_id != user.id and user.role != "admin"):
         raise HTTPException(404, "条目不存在")
     if entry.novel_id is None:
         raise HTTPException(400, "无归属小说，无法恢复")
     novel = await db.get(Novel, entry.novel_id)
-    if novel is None or novel.owner_id != user.id:
+    if novel is None or (novel.user_id != user.id and user.role != "admin"):
         raise HTTPException(404, "归属小说已删除，无法恢复")
 
     try:
@@ -148,13 +157,28 @@ async def restore_entry(
 
     kind = entry.kind
     if kind == "chapter":
+        # 残余 2 / 收尾 L1：payload 里的 volume_id 可能指向已删除的分卷，或（脏 payload、
+        # 硬删、并发下）指向**别的小说**的分卷。直接塞进新章节会留下悬挂/跨小说引用（本仓
+        # FK 关）或在 commit 时抛 IntegrityError → 500（FK 开的部署）。恢复前既校验分卷
+        # 「仍存在」也校验它「属于本小说」，任一不满足都置 None，避免恢复出一张坏章节。
+        volume_id = data.get("volume_id")
+        if volume_id is not None:
+            vol = await db.get(Volume, volume_id)
+            if vol is None or vol.novel_id != novel.id:
+                logger.warning(
+                    "恢复章节 entry=%s：关联分卷 volume_id=%s 不存在或不属于小说 %s，置为未分卷",
+                    entry_id,
+                    volume_id,
+                    novel.id,
+                )
+                volume_id = None
         new_ch = Chapter(
             novel_id=novel.id,
             title=data.get("title", entry.name or "未命名章节"),
             content=data.get("content", ""),
             word_count=data.get("word_count", 0),
             sort_order=data.get("sort_order", 0),
-            volume_id=data.get("volume_id"),
+            volume_id=volume_id,
             status=data.get("status", "draft"),
             tags=data.get("tags", "[]"),
         )
@@ -190,7 +214,28 @@ async def restore_entry(
 
     # 删除废纸篓条目
     await db.delete(entry)
-    await db.commit()
+    # 残余 2 / 收尾 L4 兜底：把 commit 处的两类 ORM/DB 失败都收敛掉，绝不裸奔成 500。
+    # - IntegrityError：关联数据已不存在（FK 开的部署、脏引用）→ 400（请求引用的关联无效）。
+    # - StaleDataError：并发双恢复同一废纸篓条目，后提交者发现条目已被前者删除/改动，
+    #   ORM 乐观锁失配 → 409 Conflict（资源状态冲突，语义比 400 更贴切；与 IntegrityError
+    #   不同继承链，必须单独 except）。两者都先 rollback 再抛。
+    try:
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(400, "恢复失败：关联数据已不存在（可能分卷已删除）")
+    except StaleDataError:
+        await db.rollback()
+        raise HTTPException(409, "该条目已被恢复或删除，请刷新后重试")
+    # 残余 1：恢复章节后重建 FTS 索引，否则恢复回来的章节在全站搜索里搜不到。
+    # 失败不阻断恢复（章节已落库），仅记 warning，与项目既有 FTS 钩子风格一致。
+    if kind == "chapter":
+        try:
+            from ..search_fts import sync_chapter
+
+            await sync_chapter(db, new_ch.id)
+        except Exception:  # noqa: BLE001  FTS 失败不影响恢复结果
+            logger.warning("恢复章节后同步 FTS 索引失败 entry=%s", entry_id)
     return {"ok": True, "kind": kind}
 
 

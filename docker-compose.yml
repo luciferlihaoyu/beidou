@@ -4,10 +4,17 @@ services:
     ports:
       - "3000:3000"
     environment:
-      # 生产环境务必修改
-      SECRET_KEY: ${SECRET_KEY:-please-change-me-to-a-long-random-string}
+      # P0-3 加固：生产模式 + 强凭据必填，不再有公开占位兜底。
+      BEIDOU_ENV: production
+      # 生成强随机串：openssl rand -hex 32（得 64 字符）
+      # ⚠ 值必须整体加双引号：`${VAR:?消息}` 里若出现 ": "（冒号+空格），YAML 会把它
+      #   误判为映射开始符而直接解析失败（本文件曾因此让所有 compose 部署无法启动）。
+      SECRET_KEY: "${SECRET_KEY:?required - run openssl rand -hex 32}"
       ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
-      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-admin123}
+      ADMIN_PASSWORD: "${ADMIN_PASSWORD:?required - min 12 chars}"
+      # 弱凭据放行开关（默认关闭）：仅当现网暂时无法更换公开占位密钥时设 1 保命，
+      # 启动会持续打印 ERROR 日志；换好密钥后请撤掉。留空即关闭。
+      ALLOW_WEAK_CREDS: "${ALLOW_WEAK_CREDS:-}"
     volumes:
       - beidou-data:/data
     restart: unless-stopped

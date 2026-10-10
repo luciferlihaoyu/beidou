@@ -28,6 +28,12 @@ interface SnapshotPanelProps {
   chapterId: number;
   /** 恢复成功后由父级重新加载章节正文 */
   onRestored: () => void;
+  /**
+   * 恢复请求「发出之前」回调：父级据此 discard 编辑器侧尚未落盘的防抖内容（清防抖定时器 +
+   * 置空 pendingSave），关闭"restore in-flight 期间定时器触发 flushSave、PUT 旧正文冲掉刚
+   * 恢复快照"的窄竞态。可选——不传则退化为仅在 onRestored 之后处理。
+   */
+  onBeforeRestore?: () => void;
 }
 
 const TRIGGER_LABEL: Record<Snapshot["trigger"], string> = {
@@ -60,6 +66,7 @@ export default function SnapshotPanel({
   novelId,
   chapterId,
   onRestored,
+  onBeforeRestore,
 }: SnapshotPanelProps) {
   const [list, setList] = useState<Snapshot[]>([]);
   const [loading, setLoading] = useState(false);
@@ -147,6 +154,9 @@ export default function SnapshotPanel({
     if (!restoreTarget) return;
     setRestoring(true);
     try {
+      // 关键时序：restore 请求「发出之前」先让父级 discard 编辑器待存内容 + 清防抖定时器，
+      // 关闭"请求 in-flight 期间防抖定时器触发 flushSave、PUT 旧正文冲掉快照"的窄竞态。
+      onBeforeRestore?.();
       const r = await api.post<RestoreResult>(
         `/api/novels/${novelId}/chapters/${chapterId}/snapshots/${restoreTarget.id}/restore`
       );
@@ -161,7 +171,7 @@ export default function SnapshotPanel({
     } finally {
       setRestoring(false);
     }
-  }, [restoreTarget, novelId, chapterId, loadList, onRestored]);
+  }, [restoreTarget, novelId, chapterId, loadList, onRestored, onBeforeRestore]);
 
   return (
     <>

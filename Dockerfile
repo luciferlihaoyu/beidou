@@ -19,7 +19,8 @@ COPY --from=frontend /fe/dist ./static
 
 ENV DATA_DIR=/data \
     STATIC_DIR=/app/static \
-    PORT=3000
+    PORT=3000 \
+    BEIDOU_ENV=production
 VOLUME /data
 EXPOSE 3000
 
