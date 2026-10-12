@@ -127,6 +127,7 @@ def make_project(**over):
         market_json=None,
         cover_prompt=None,
         kb_query=None,
+        last_kb_sync_at="",  # t6 新字段：_project_out 会读取，替身须带全（auto_kb_sync 见下方 t3 处，不重复）
         platform="",
         custom_words="",
         tokens_prompt=0,
