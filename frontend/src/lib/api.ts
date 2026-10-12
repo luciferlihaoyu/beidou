@@ -506,6 +506,8 @@ export interface AiProject {
   market: AiMarketReport | null;
   cover_prompt: AiCoverPrompt | null;
   kb_query: string;
+  last_kb_sync_at: string;
+  auto_kb_sync: boolean;
   platform: string;
   custom_words: string;
   tokens_prompt: number;

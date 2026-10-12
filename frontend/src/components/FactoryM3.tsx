@@ -42,6 +42,23 @@ import {
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 
+// 相对时间：刚过 / N 分钟前 / N 小时前 / N 天前，更久直接给日期。
+// 后端 last_kb_sync_at 存的是无时区后缀的 UTC ISO 串：无 Z/偏移则补 Z 按 UTC 解析。
+function relTime(iso: string): string {
+  if (!iso) return "";
+  const normalized = /Z$|[+-]\d{2}:\d{2}$/.test(iso) ? iso : `${iso}Z`;
+  const diff = Date.now() - new Date(normalized).getTime();
+  if (Number.isNaN(diff)) return "";
+  if (diff < 60_000) return "刚刚";
+  const mins = Math.floor(diff / 60_000);
+  if (mins < 60) return `${mins} 分钟前`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours} 小时前`;
+  const days = Math.floor(hours / 24);
+  if (days < 30) return `${days} 天前`;
+  return new Date(normalized).toLocaleDateString();
+}
+
 // ---------------- 批量连跑弹窗 ----------------
 
 interface BatchLine {
@@ -523,6 +540,32 @@ export function M3Toolbar({
             value={kbQuery}
             onChange={(e) => setKbQuery(e.target.value)}
           />
+          {/* t6：同步状态 + 自动同步开关——checked 由 project 驱动，失败不落 state 即回滚显示 */}
+          <div className="mt-2 flex items-center justify-between text-xs text-muted-foreground">
+            <span>
+              同步状态：{project.last_kb_sync_at ? `上次同步：${relTime(project.last_kb_sync_at)}` : "未同步"}
+            </span>
+            <label className="flex cursor-pointer items-center gap-1.5">
+              <input
+                type="checkbox"
+                className="accent-primary"
+                checked={project.auto_kb_sync ?? true}
+                onChange={async () => {
+                  // 不用 e.target.checked（label 包裹点击时事件目标可能不是 input），
+                  // 以当前项目状态取反为准——失败不改 project，显示自动回弹
+                  const next = !(project.auto_kb_sync ?? true);
+                  try {
+                    const p = await aiFactoryM2.updateProject(project.id, { auto_kb_sync: next });
+                    onProjectChange(p);
+                    toast.success(next ? "定稿后自动同步璇玑已开启" : "定稿后自动同步璇玑已关闭");
+                  } catch (err) {
+                    toast.error(err instanceof Error ? err.message : "保存失败");
+                  }
+                }}
+              />
+              定稿后自动同步璇玑
+            </label>
+          </div>
           <div className="mt-2 flex items-center justify-between">
             <Button
               variant="ghost"
