@@ -20,6 +20,7 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
+from fastapi import BackgroundTasks
 
 from app.models import AiChapterJob, AiProject, Chapter, Novel
 from app.routers import ai as ai_mod
@@ -63,6 +64,7 @@ def make_draft_bundle(*, draft_text=None, draft_updated_at=None, **job_over):
         target_chapter_words=None,  # FIX-8A 后非 None 会触发流内补足轮（桩会重复吐同样内容）；字数场景由 test_fix8_wordcount 专测
         context_recent_chapters=2, reference_novel_id=None,
         author_intent="", current_focus="", tokens_prompt=0, tokens_completion=0,
+        auto_kb_sync=True,  # t3 定稿后自动同步（模型默认开）
     )
     job = SimpleNamespace(
         id=7, project_id=1, chapter_id=21, status="pending", attempt=0, started_at=None,
@@ -373,7 +375,7 @@ class TestFinalizeClearsDraft:
         install_finalize_guards(monkeypatch, p, db)
 
         data = factory_mod.FinalizeIn(content_text="这是一段足够长且合格的正文内容，已经超过了二十个字的最低门槛。")
-        r = asyncio.run(factory_mod.finalize_chapter(1, 7, data, fake_user(), db))
+        r = asyncio.run(factory_mod.finalize_chapter(1, 7, data, BackgroundTasks(), fake_user(), db))
 
         assert r["ok"] is True
         assert job.status == "done"
@@ -395,7 +397,7 @@ class TestFinalizeClearsDraft:
         # FakeDB，否则它会摸到真实临时库（job 不存在→静默 return），测出假绿。
         monkeypatch.setattr(factory_mod, "SessionLocal", make_session_factory(db))
         data = factory_mod.FinalizeIn(content_text="这是一段足够长且合格的正文内容，已经超过了二十个字的最低门槛。")
-        r = asyncio.run(factory_mod.finalize_chapter(1, 7, data, fake_user(), db))
+        r = asyncio.run(factory_mod.finalize_chapter(1, 7, data, BackgroundTasks(), fake_user(), db))
         assert r["ok"] is True and job.status == "done" and job.draft_text is None
 
         commits_before = db.commits

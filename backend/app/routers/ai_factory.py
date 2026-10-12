@@ -21,7 +21,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -371,6 +371,8 @@ def _project_out(p: AiProject, novel: Novel | None = None, chapter_count: int = 
         "market": json.loads(p.market_json) if p.market_json else None,
         "cover_prompt": json.loads(p.cover_prompt) if p.cover_prompt else None,
         "kb_query": p.kb_query,
+        "last_kb_sync_at": p.last_kb_sync_at,
+        "auto_kb_sync": p.auto_kb_sync,
         "platform": p.platform,
         "custom_words": p.custom_words,
         "tokens_prompt": p.tokens_prompt or 0,
@@ -479,6 +481,26 @@ async def delete_project(
 
 
 # ---------- 阶段 1：立项（book_spec 八字段，参考 GOAT）----------
+
+
+def _default_kb_query(spec: dict) -> str:
+    """t4：立项 book_spec → 默认璇玑检索词（书名 + genre + theme/premise 前 40 字，整段截 200）。
+
+    纯函数便于单测；字段缺失 / 类型不对一律安全降级返回空串或剩余片段——检索词只是锦上添花，绝不炸立项。
+    """
+    if not isinstance(spec, dict):
+        return ""
+    titles = spec.get("titles")
+    pieces: list[str] = []
+    if isinstance(titles, list) and titles and str(titles[0]).strip():
+        pieces.append(str(titles[0]).strip())
+    if isinstance(spec.get("genre"), str) and spec["genre"].strip():
+        pieces.append(spec["genre"].strip())
+    for key in ("theme", "premise"):  # 主题/梗概各截前 40 字，防长文本挤爆检索词
+        v = spec.get(key)
+        if isinstance(v, str) and v.strip():
+            pieces.append(v.strip()[:40])
+    return " ".join(pieces)[:200].strip()
 
 
 class InitIn(BaseModel):
@@ -591,6 +613,8 @@ async def init_project(
     p.book_spec_json = json.dumps(spec, ensure_ascii=False)
     if spec.get("genre") and not p.genre:
         p.genre = str(spec["genre"])[:50]
+    if not (p.kb_query or "").strip():  # t4：立项即预填璇玑检索词，新项目开箱启用知识源召回
+        p.kb_query = _default_kb_query(spec)
     await db.commit()
     return _project_out(p)
 
@@ -635,6 +659,8 @@ async def confirm_book_spec(
     if p.status not in ("draft", "setup"):
         raise HTTPException(400, f"当前状态 {p.status} 不能修改立项")
     p.book_spec_json = json.dumps(data.book_spec, ensure_ascii=False)
+    if not (p.kb_query or "").strip():  # t4：确认立项即预填璇玑检索词（已有值不覆盖）
+        p.kb_query = _default_kb_query(data.book_spec)
     if p.novel_id is None:
         novel = Novel(
             user_id=user.id,
@@ -1314,6 +1340,36 @@ async def _update_state_files(
         return False
 
 
+async def _recall_own_spec(p: AiProject, kc) -> str | None:
+    """t5：确定性召回本书设定集——按标题精确匹配「北斗·{书名}·设定集」取第 1 篇，content 截 600。
+
+    书名口径与 _do_kb_sync 一致（spec.titles[0]，兜底 seed_prompt[:20]）；只认 title 完全
+    一致，防止搜到别的书。找不到 / 异常一律返回 None，绝不阻塞生成（mock 此函数即可单测）。
+    """
+    try:
+        from .integrations import _xuanji_call
+
+        spec = json.loads(p.book_spec_json or "{}")
+        titles = spec.get("titles")
+        if isinstance(titles, list) and titles and str(titles[0]).strip():
+            title = str(titles[0]).strip()
+        else:
+            title = (p.seed_prompt or "")[:20]
+        doc_title = f"北斗·{title}·设定集"
+        docs = await _xuanji_call(kc, "kb.searchDocuments", {"query": doc_title})
+        if not isinstance(docs, list):
+            return None
+        hit = next((d for d in docs if isinstance(d, dict) and d.get("title") == doc_title), None)
+        if hit is None:
+            return None
+        full = await _xuanji_call(kc, "kb.getDocument", {"id": hit.get("id")})
+        if isinstance(full, dict) and full.get("content"):
+            return f"【本书设定集（璇玑同步，一致性最高优先）】\n《{full.get('title', doc_title)}》：{str(full['content'])[:600]}"
+    except Exception:  # noqa: BLE001  知识库不可达不阻塞生成
+        return None
+    return None
+
+
 async def _assemble_context(p: AiProject, novel: Novel, chapter: Chapter, job: AiChapterJob, db: AsyncSession) -> str:
     """上下文预算制组装（§3.1）：立项 + 状态文件三件套 + 角色卡 + 最近 N 章 + 本章任务。"""
     parts = [f"作品：《{novel.title}》"]
@@ -1379,6 +1435,20 @@ async def _assemble_context(p: AiProject, novel: Novel, chapter: Chapter, job: A
         if cards:
             lines = [f"第{order_map[j.chapter_id]}章：{j.summary[:150]}" for j in cards]
             parts.append("【最近章节记忆卡（保持剧情连贯，不得矛盾）】\n" + "\n".join(lines))
+
+    # 本书设定集确定性注入（t5：不依赖搜索命中，生成上下文必含本书最新设定集；失败静默不影响生成）
+    try:
+        kc = (
+            (await db.execute(select(IntegrationConfig).where(IntegrationConfig.user_id == p.user_id)))
+            .scalars()
+            .first()
+        )
+        if kc and kc.xuanji_url:
+            own = await _recall_own_spec(p, kc)
+            if own:
+                parts.append(own)
+    except Exception:  # noqa: BLE001  知识库不可达不阻塞生成
+        pass
 
     # 璇玑知识库参考资料（项目配置了 kb_query 才启用；失败静默不影响生成）
     if p.kb_query:
@@ -2158,12 +2228,14 @@ async def finalize_chapter(
     project_id: int,
     job_id: int,
     data: FinalizeIn,
+    background_tasks: BackgroundTasks,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     """定稿：正文写入章节 + 更新状态文件四分（AI 增量总结）+ job done。
 
     状态文件更新失败不阻塞定稿（正文已落库），返回里带 state_updated 标记。
+    定稿成功后按 auto_kb_sync 调度璇玑知识库自动同步（后台任务，t3）。
     """
     p = await _get_project(project_id, user, db)
     if p.novel_id is None:
@@ -2243,6 +2315,13 @@ async def finalize_chapter(
     job.draft_text = None
     job.draft_updated_at = None
     await db.commit()
+
+    # 4. 定稿成功 → 自动同步璇玑知识库（t3）。延迟导入避免与 ai_extras 循环依赖；
+    # 后台任务自建 session，失败在函数内兜底，绝不阻塞定稿响应。
+    if p.auto_kb_sync:
+        from .ai_extras import _auto_kb_sync_after_finalize
+
+        background_tasks.add_task(_auto_kb_sync_after_finalize, p.id, user.id)
     return {"ok": True, "word_count": chapter.word_count, "state_updated": state_updated, "split_into": split_into}
 
 
@@ -2341,6 +2420,7 @@ class ProjectSettingsIn(BaseModel):
     author_intent: str | None = Field(default=None, max_length=2000)
     current_focus: str | None = Field(default=None, max_length=2000)
     kb_query: str | None = Field(default=None, max_length=200)
+    auto_kb_sync: bool | None = None  # 定稿后自动同步璇玑（前端开关）
     platform: str | None = Field(default=None, max_length=20)
     custom_words: str | None = Field(default=None, max_length=500)
     nightly_enabled: bool | None = None

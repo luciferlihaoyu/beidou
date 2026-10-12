@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import datetime, timezone
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
@@ -178,25 +179,81 @@ async def cover_prompt(
     return {**result, "tiangong_task": task_created}
 
 
-@router.post("/projects/{project_id}/kb-sync")
-async def kb_sync(project_id: int, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
-    """把项目设定打包上传璇玑知识库（幂等 upsert，同标题覆盖）。
+def _render_outline_tree(nodes: list) -> str:
+    """OutlineNode 扁平列表（已按 sort_order 排序）→ 缩进树文本（kb-sync 打包用）。
 
-    打包内容：立项 book_spec + 角色卡 + 世界观条目 + 状态文件摘要。
-    上传后璇玑侧可被检索——配合项目 kb_query 形成「设定入知识库 → 生成时召回」闭环。
+    - parent 关系用两空格缩进体现，各层内保持 sort_order 序
+    - parent_id 指向不在集合内的「孤儿」节点按根挂（外键 CASCADE 之外的数据残留在
+      存量库里见过），深度 20 兜底防环
+    - 行格式：``- 标题：内容``（内容截 200 字，与角色卡/世界观口径一致）
+    """
+    ids = {n.id for n in nodes}
+    by_parent: dict = {}
+    for n in nodes:
+        parent = n.parent_id if n.parent_id in ids else None  # 孤儿按根挂
+        by_parent.setdefault(parent, []).append(n)  # nodes 已有序，append 保序
+    lines: list[str] = []
+    visited: set[int] = set()
+
+    def _walk(parent_id, depth: int) -> None:
+        for n in by_parent.get(parent_id, []):
+            if n.id in visited:  # 防环：同一节点只输出一次
+                continue
+            visited.add(n.id)
+            line = "  " * depth + f"- {n.title}"
+            if n.content:
+                line += f"：{n.content[:200]}"
+            lines.append(line)
+            if depth < 20:  # 深度兜底
+                _walk(n.id, depth + 1)
+
+    _walk(None, 0)
+    for n in nodes:  # 环残团兜底：可达树装不下的节点平铺收尾，绝不静默丢数据
+        if n.id not in visited:
+            lines.append(f"- {n.title}" + (f"：{n.content[:200]}" if n.content else ""))
+    return "\n".join(lines)
+
+
+async def _do_kb_sync(p: AiProject, kc, db: AsyncSession) -> dict:
+    """kb-sync 主体：打包设定集（含大纲）并上传璇玑知识库，返回路由原结构。
+
+    打包内容：立项 book_spec + 大纲（卷章骨架/快照）+ 作者意图 + 剧情摘要 +
+    角色状态 + 角色卡 + 世界观条目。上传幂等 upsert（同标题覆盖）。
+
+    t2 抽取：供手动路由（kb_sync）与定稿后台任务（_auto_kb_sync_after_finalize）
+    共用。本函数不写留痕字段、不 commit——由调用方决定。
     """
     from sqlalchemy import select as _select
 
-    from ..models import Character, WorldviewEntry
-    from .integrations import _xuanji_mcp
+    from ..models import Character, OutlineNode, WorldviewEntry
+    from .integrations import _xuanji_ensure_folder, _xuanji_mcp
 
-    p = await _get_project(project_id, user, db)
     spec = json.loads(p.book_spec_json or "{}")
     title = (spec.get("titles") or [p.seed_prompt[:20]])[0]
 
     parts = [f"# 《{title}》设定集（北斗 AI 工厂同步）\n"]
     if spec:
         parts.append("## 立项\n" + json.dumps(spec, ensure_ascii=False, indent=2))
+    # t1 大纲：优先卷章骨架（OutlineNode 树），无关联小说时回退 outline_json 快照
+    outline_text = ""
+    if p.novel_id:
+        nodes = (
+            (
+                await db.execute(
+                    _select(OutlineNode)
+                    .where(OutlineNode.novel_id == p.novel_id)
+                    .order_by(OutlineNode.sort_order)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        if nodes:
+            outline_text = "## 大纲（卷章骨架）\n" + _render_outline_tree(nodes)
+    elif p.outline_json:
+        outline_text = "## 大纲快照\n" + p.outline_json
+    if outline_text:
+        parts.append(outline_text[:16000])  # 大纲段整体截断，别让超长骨架挤爆文档
     if p.author_intent:
         parts.append(f"## 作者意图\n{p.author_intent}")
     if p.global_summary:
@@ -220,8 +277,26 @@ async def kb_sync(project_id: int, user: User = Depends(get_current_user), db: A
             parts.append("## 世界观\n" + "\n".join(f"- [{w.category}] {w.title}：{(w.content or '')[:200]}" for w in wvs))
     content = "\n\n".join(parts)
 
+    doc_title = f"北斗·{title}·设定集"
+    folder_id = await _xuanji_ensure_folder(kc, "北斗小说资料")
+    args: dict = {"title": doc_title, "content": content}
+    if folder_id is not None:
+        args["folderId"] = folder_id
+    result = await _xuanji_mcp(kc, "document_upsert", args)
+    return {"ok": True, "title": doc_title, "chars": len(content), "result": result}
+
+
+@router.post("/projects/{project_id}/kb-sync")
+async def kb_sync(project_id: int, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    """把项目设定打包上传璇玑知识库（幂等 upsert，同标题覆盖）。
+
+    t2 薄壳：校验集成配置 → _do_kb_sync 打包上传 → 写 last_kb_sync_at 留痕。
+    """
+    from sqlalchemy import select as _select
+
     from ..models import IntegrationConfig as IC
 
+    p = await _get_project(project_id, user, db)
     kc = (
         (await db.execute(_select(IC).where(IC.user_id == user.id)))
         .scalars()
@@ -230,14 +305,48 @@ async def kb_sync(project_id: int, user: User = Depends(get_current_user), db: A
     if not kc or not kc.xuanji_url:
         raise HTTPException(400, "请先在「账号设置 → 集成」里配置璇玑地址和 API Key")
 
-    from .integrations import _xuanji_ensure_folder
+    result = await _do_kb_sync(p, kc, db)
+    p.last_kb_sync_at = datetime.now(timezone.utc).isoformat()
+    await db.commit()
+    return result
 
-    folder_id = await _xuanji_ensure_folder(kc, "北斗小说资料")
-    args: dict = {"title": f"北斗·{title}·设定集", "content": content}
-    if folder_id is not None:
-        args["folderId"] = folder_id
-    result = await _xuanji_mcp(kc, "document_upsert", args)
-    return {"ok": True, "title": f"北斗·{title}·设定集", "chars": len(content), "result": result}
+
+async def _auto_kb_sync_after_finalize(project_id: int, user_id: int) -> None:
+    """定稿成功后自动同步璇玑知识库（t3，BackgroundTasks 后台任务）。
+
+    - 自建 SessionLocal session：后台任务执行时请求已结束，绝不能复用请求 session
+    - auto_kb_sync 已关 / 未配置 xuanji_url → 静默返回
+    - 全程 try/except 兜底，异常只 logging 一行——同步只是锦上添花，绝不上抛打扰定稿
+    """
+    import logging
+
+    from sqlalchemy import select as _select
+
+    from ..db import SessionLocal
+    from ..models import IntegrationConfig as IC
+
+    try:
+        async with SessionLocal() as db:
+            p = await db.get(AiProject, project_id)
+            if p is None or not p.auto_kb_sync:
+                return
+            kc = (
+                (await db.execute(_select(IC).where(IC.user_id == user_id)))
+                .scalars()
+                .first()
+            )
+            if not kc or not kc.xuanji_url:
+                return
+            result = await _do_kb_sync(p, kc, db)
+            p.last_kb_sync_at = datetime.now(timezone.utc).isoformat()
+            await db.commit()
+        logging.getLogger("beidou.ai_extras").info(
+            "定稿自动同步璇玑成功：project=%s chars=%s", project_id, result.get("chars")
+        )
+    except Exception as exc:  # noqa: BLE001  同步失败绝不阻塞/惊扰定稿（t3 铁律）
+        logging.getLogger("beidou.ai_extras").warning(
+            "定稿后自动同步璇玑失败（已忽略）：project=%s err=%s", project_id, exc
+        )
 
 
 # ================= 投稿导出包 =================

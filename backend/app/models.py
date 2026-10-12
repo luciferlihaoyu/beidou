@@ -383,6 +383,9 @@ class AiProject(Base):
     nightly_chapters: Mapped[int] = mapped_column(default=3)  # 每晚连跑章数（1-10）
     nightly_last_run: Mapped[str] = mapped_column(String(300), default="")  # JSON：{date, done, errors}
     subplot_board: Mapped[str] = mapped_column(Text, default="")  # 支线进度板：A/B/C 线状态
+    # 璇玑知识库同步（KB 写方向自动化）
+    last_kb_sync_at: Mapped[str] = mapped_column(String(40), default="")  # 最近一次成功同步的 UTC ISO 串
+    auto_kb_sync: Mapped[bool] = mapped_column(default=True)  # 定稿后自动同步璇玑（默认开）
     created_at: Mapped[datetime] = mapped_column(default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(default=utcnow, onupdate=utcnow)
 

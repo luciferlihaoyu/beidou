@@ -22,6 +22,7 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
+from fastapi import BackgroundTasks
 
 from app.models import AiChapterJob, AiProject, Chapter, Novel, Volume
 from app.routers import ai as ai_mod
@@ -133,6 +134,7 @@ def make_project(**over):
         nightly_enabled=False,
         nightly_chapters=3,
         nightly_last_run=None,
+        auto_kb_sync=True,  # t3 定稿后自动同步（模型默认开）
         chapter_count=0,
         created_at=datetime(2026, 10, 1, tzinfo=timezone.utc),
         updated_at=datetime(2026, 10, 1, tzinfo=timezone.utc),
@@ -756,7 +758,7 @@ class TestFinalizeSplit:
     def _finalize(self, monkeypatch, p, db, text: str):
         install_finalize(monkeypatch, p, db)
         data = factory_mod.FinalizeIn(content_text=text)
-        return asyncio.run(factory_mod.finalize_chapter(1, 7, data, fake_user(), db))
+        return asyncio.run(factory_mod.finalize_chapter(1, 7, data, BackgroundTasks(), fake_user(), db))
 
     def test_finalize_splits_overlong_chapter(self, monkeypatch):
         """核心诉求②：UI「逐章生成→finalize」也必须拆——此前只有夜跑/批量拆。"""
