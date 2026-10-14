@@ -136,6 +136,13 @@ class ItemOut(ItemIn):
     id: int
     created_at: str
     updated_at: str
+    # M2（批F）：璇玑同步元数据**全量透出**——全是非敏感字段（文档 id、两个旗、基线时间戳），
+    # 前端要拿它画条目徽标（✓已同步 / ⟳待回写 / ⚠冲突）与「源：璇玑·相对时间」副文本，
+    # 缺了就只能靠再发一轮请求去猜。默认值只在手工构造 ItemOut 时兜底，实际出口一律走 _item_out。
+    xj_doc_id: str = ""
+    xj_local_dirty: bool = False
+    xj_conflict: bool = False
+    xj_doc_updated_at: str = ""
 
     model_config = {"from_attributes": True}
 
@@ -152,6 +159,12 @@ def _item_out(item: LibraryItem) -> dict:
         "source": item.source,
         "created_at": item.created_at.isoformat(),
         "updated_at": item.updated_at.isoformat(),
+        # M2（批F）：列表/详情/搜索/导入四处出口共用本函数（见 list_items / create_item /
+        # update_item / search 与 import 端点），故四字段一次补齐即全线生效。
+        "xj_doc_id": item.xj_doc_id or "",
+        "xj_local_dirty": bool(item.xj_local_dirty),
+        "xj_conflict": bool(item.xj_conflict),
+        "xj_doc_updated_at": item.xj_doc_updated_at or "",
     }
 
 

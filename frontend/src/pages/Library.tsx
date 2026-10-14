@@ -22,11 +22,14 @@ import { toast } from "sonner";
 import AppShell from "@/components/AppShell";
 import {
   api,
+  ApiError,
+  xuanjiApi,
   type LibraryFolder,
   type LibraryItem,
   type Novel,
   type OrganizeSuggestion,
 } from "@/lib/api";
+import { relTime } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -93,6 +96,8 @@ export default function Library({ novelId }: { novelId?: number }) {
   const [xjQ, setXjQ] = useState("");
   const [xjPreview, setXjPreview] = useState<{ id: number; title: string; content: string } | null>(null);
   const [xjImporting, setXjImporting] = useState(false);
+  // 批F：行内冲突裁决的进行中条目 id（只锁这一行的两个按钮）
+  const [resolving, setResolving] = useState<number | null>(null);
 
   const loadFolders = useCallback(() => {
     api
@@ -159,6 +164,61 @@ export default function Library({ novelId }: { novelId?: number }) {
       toast.error((e as Error).message);
     } finally {
       setSaving(false);
+    }
+  }
+
+  /** 批F：行内裁决一条同步冲突（keep_local = 保住本地版强推璇玑 / take_xuanji = 拉璇玑版覆盖本地）。
+   *
+   *  **200 但 outcome=failed 不是错误**：读/写通道只是这一趟没通，dirty 已保留、下一轮批量兜底
+   *  会自动重推 → 黄色提示，不报红。400（断锚 / 非冲突 / 未配地址）→ 红 toast 显示后端 detail；
+   *  503（take_xuanji 读通道故障）→ 黄提示，本地零改动、可安全重试。
+   */
+  async function resolveConflict(item: LibraryItem, action: "keep_local" | "take_xuanji") {
+    setResolving(item.id);
+    try {
+      const r = await xuanjiApi.resolveItem(item.id, action);
+      if (r.outcome === "failed") {
+        toast.warning("璇玑暂不可达，稍后自动重试", { duration: 8000 });
+      } else if (action === "take_xuanji") {
+        toast.success("已取璇玑版覆盖本地正文（本地标题保留）");
+      } else {
+        toast.success("已保留本地版并回写璇玑");
+      }
+      await refreshAfterResolve(item.id);
+    } catch (e) {
+      const err = e as ApiError;
+      if (err.status === 503) toast.warning("璇玑暂时不可读，请稍后重试", { duration: 8000 });
+      else toast.error(err.message, { duration: 10000 });
+    } finally {
+      setResolving(null);
+    }
+  }
+
+  /** 裁决后的局部刷新：先按当前筛选重载列表；若这条正开在编辑区，再回读一遍正文灌进草稿
+   *  ——``take_xuanji`` 会改写服务端正文，留着旧草稿再一保存就把刚取回的璇玑版盖回去了
+   *  （后端没有单条详情端点，故按页面同 scope 复用列表接口取这一条）。
+   *  编辑区若有未保存改动则**不硬灌**，只提示——不把用户正在写的字当面换掉。 */
+  async function refreshAfterResolve(id: number) {
+    loadItems();
+    if (active?.id !== id) return;
+    if (dirty) {
+      toast.info("这条的正文已按裁决更新，请重新打开条目查看（编辑区未保存的改动没动）", {
+        duration: 10000,
+      });
+      return;
+    }
+    try {
+      const rows = await api.get<LibraryItem[]>(
+        `/api/library/items${scopeQuery ? `?${scopeQuery}` : ""}`
+      );
+      const fresh = rows.find((r) => r.id === id);
+      if (!fresh) return;
+      setItems((prev) => prev.map((i) => (i.id === id ? fresh : i)));
+      setActive(fresh);
+      setDraft({ title: fresh.title, content: fresh.content, tags: fresh.tags, folder_id: fresh.folder_id });
+      setDirty(false);
+    } catch {
+      /* 回读失败不影响裁决（早已落库），列表那发 loadItems 会自己报错 */
     }
   }
 
@@ -564,37 +624,112 @@ export default function Library({ novelId }: { novelId?: number }) {
                   {q ? "没有匹配的条目" : "暂无条目，点右上角「新建条目」"}
                 </p>
               )}
-              {items.map((item) => (
-                <button
-                  key={item.id}
-                  onClick={() => openItem(item)}
-                  className={`w-full rounded-md px-2.5 py-2 text-left transition-colors hover:bg-muted ${
-                    active?.id === item.id ? "bg-muted" : ""
-                  }`}
-                >
-                  <div className="truncate text-sm font-medium">{item.title}</div>
-                  {item.snippet ? (
-                    /* B2 FTS 命中摘要：snippet 来自服务端 snippet()，只含 <mark> 标签 */
-                    <div
-                      className="mt-0.5 line-clamp-2 text-xs text-muted-foreground [&_mark]:bg-primary/20 [&_mark]:text-primary"
-                      dangerouslySetInnerHTML={{ __html: item.snippet }}
-                    />
-                  ) : (
-                    <div className="mt-0.5 line-clamp-1 text-xs text-muted-foreground">
-                      {item.summary || item.content.slice(0, 40) || "（空）"}
+              {items.map((item) => {
+                // 批F：只给「有璇玑锚」的条目画徽标，手工条目一个标识都不加
+                const synced = Boolean(item.xj_doc_id);
+                const rel = relTime(item.xj_doc_updated_at);
+                const sourceTip = `源：璇玑 · ${rel ?? "时间未知"}`;
+                return (
+                  // 原来这里是 <button>：徽标旁边要放「保留本地 / 取璇玑版」两个真按钮，
+                  // 按钮不能嵌在按钮里（非法 HTML，点击还会冒泡成「打开条目」），故改 role=button
+                  // 的 div，并补键盘可达（Enter/空格）。布局类名原样保留。
+                  <div
+                    key={item.id}
+                    role="button"
+                    tabIndex={0}
+                    onClick={() => openItem(item)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        openItem(item);
+                      }
+                    }}
+                    className={`w-full cursor-pointer rounded-md px-2.5 py-2 text-left transition-colors hover:bg-muted ${
+                      active?.id === item.id ? "bg-muted" : ""
+                    }`}
+                  >
+                    <div className="flex items-center gap-1.5" title={synced ? sourceTip : undefined}>
+                      <span className="truncate text-sm font-medium">{item.title}</span>
+                      {synced &&
+                        (item.xj_conflict ? (
+                          // 冲突优先：红色系最显眼，其余两态都不该盖过它
+                          <Badge
+                            variant="outline"
+                            className="shrink-0 border-destructive/50 px-1 py-0 text-[10px] font-normal text-destructive"
+                          >
+                            ⚠ 冲突
+                          </Badge>
+                        ) : item.xj_local_dirty ? (
+                          <Badge
+                            variant="outline"
+                            className="shrink-0 border-amber-500/50 px-1 py-0 text-[10px] font-normal text-amber-600 dark:text-amber-400"
+                          >
+                            ⟳ 待回写
+                          </Badge>
+                        ) : (
+                          <Badge
+                            variant="outline"
+                            className="shrink-0 px-1 py-0 text-[10px] font-normal text-muted-foreground"
+                          >
+                            ✓ 已同步
+                          </Badge>
+                        ))}
                     </div>
-                  )}
-                  {item.tags && (
-                    <div className="mt-1 flex flex-wrap gap-1">
-                      {item.tags.split(",").filter(Boolean).slice(0, 3).map((t) => (
-                        <Badge key={t} variant="secondary" className="px-1 py-0 text-[10px] font-normal">
-                          {t.trim()}
-                        </Badge>
-                      ))}
-                    </div>
-                  )}
-                </button>
-              ))}
+                    {item.snippet ? (
+                      /* B2 FTS 命中摘要：snippet 来自服务端 snippet()，只含 <mark> 标签 */
+                      <div
+                        className="mt-0.5 line-clamp-2 text-xs text-muted-foreground [&_mark]:bg-primary/20 [&_mark]:text-primary"
+                        dangerouslySetInnerHTML={{ __html: item.snippet }}
+                      />
+                    ) : (
+                      <div className="mt-0.5 line-clamp-1 text-xs text-muted-foreground">
+                        {item.summary || item.content.slice(0, 40) || "（空）"}
+                      </div>
+                    )}
+                    {synced && (
+                      <div className="mt-0.5 text-[10px] text-muted-foreground">{sourceTip}</div>
+                    )}
+                    {item.tags && (
+                      <div className="mt-1 flex flex-wrap gap-1">
+                        {item.tags.split(",").filter(Boolean).slice(0, 3).map((t) => (
+                          <Badge key={t} variant="secondary" className="px-1 py-0 text-[10px] font-normal">
+                            {t.trim()}
+                          </Badge>
+                        ))}
+                      </div>
+                    )}
+                    {item.xj_conflict && (
+                      <div className="mt-1.5 flex gap-1.5">
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="h-6 px-2 text-[11px]"
+                          disabled={resolving === item.id}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            void resolveConflict(item, "keep_local");
+                          }}
+                        >
+                          {resolving === item.id && <Loader2 className="mr-1 h-3 w-3 animate-spin" />}
+                          保留本地
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="h-6 px-2 text-[11px]"
+                          disabled={resolving === item.id}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            void resolveConflict(item, "take_xuanji");
+                          }}
+                        >
+                          取璇玑版
+                        </Button>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
             </div>
           </ScrollArea>
         </section>

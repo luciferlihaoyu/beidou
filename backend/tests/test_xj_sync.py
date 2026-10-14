@@ -1550,3 +1550,74 @@ async def test_config_put_omitted_sync_fields_are_untouched(api):
     assert got["xj_sync_enabled"] is False, "显式 False 要写进去"
     assert got["xj_sync_folders"] == "", "显式空串 = 清空白名单"
     assert got["xj_sync_interval_min"] == 60
+
+
+# ---------- N1（批F）：resolve 三口径 × 关键分支表驱动 ----------
+
+#: 正常可读的璇玑侧文档（take_xuanji 成功分支已在 ⑤b 单测，本表只走「不成」的分支）
+_DOC_OK = {"id": 101, "title": "璇玑正名", "content": "璇玑版正文", "folderId": 1, "updatedAt": _to_iso(5)}
+
+
+@pytest.mark.parametrize(
+    "action,docs,read_fail,mcp_fail,status,outcome,conflict,dirty,writes",
+    [
+        # ① 读通道故障：读不动 ≠ 文档没了（C1）→ 503，本地**零改动**、可安全重试
+        pytest.param("take_xuanji", {101: _DOC_OK}, True, False, 503, None, True, True, 0, id="take_xuanji-读故障-503"),
+        # ② 读通道明确回 null（断锚）→ 400
+        pytest.param("take_xuanji", {}, False, False, 400, None, True, True, 0, id="take_xuanji-断锚-400"),
+        # ③ keep_local 读故障 → 200 outcome=failed：dirty 保留待下轮批量兜底，**不当错误**
+        pytest.param("keep_local", {101: _DOC_OK}, True, False, 200, "failed", False, True, 0, id="keep_local-读故障-200-failed"),
+        # ④ keep_local 写故障 → 同上（写没成，dirty 与基线都不动）
+        pytest.param("keep_local", {101: _DOC_OK}, False, True, 200, "failed", False, True, 1, id="keep_local-写故障-200-failed"),
+        # ⑤ keep_local 断锚 → 400，且 conflict **必须回置**（推不成的稿子仍需人工看见）
+        pytest.param("keep_local", {}, False, False, 400, None, True, True, 0, id="keep_local-断锚-400-冲突回置"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_n1_resolve_three_state_matrix(
+    sl, monkeypatch, action, docs, read_fail, mcp_fail, status, outcome, conflict, dirty, writes
+):
+    """N1（批F）表驱动：resolve 的「成功 200 / 断锚 400 / 读通道故障 503」三口径关键分支。
+
+    每行都是一次**真实** ``resolve_item`` 调用（冲突条目 + 已配地址），钉住四条不许含糊的口径：
+
+    - ``failed`` 不是错误：读/写通道故障时 keep_local 走 200 + outcome=failed，**dirty 保留**
+      （下轮自动重推），前端只提示「稍后自动重试」；
+    - take_xuanji 读故障走 503「璇玑暂时不可读」，且**绝不改本地任何一列**（基线也不动）；
+    - 断锚（读通道明确回 null）才归 400——两种 action 都不例外；
+    - keep_local 断锚时 conflict 回置为 True（裁决没成，稿子不能就此从冲突队列消失）。
+    """
+    recorded = _patch_xuanji_call(
+        monkeypatch,
+        docs=docs,
+        fail_ids=(101,) if read_fail else (),
+        fail_exc=RuntimeError("璇玑读通道网络故障") if read_fail else None,
+        mcp_fail=mcp_fail,
+    )
+    await _make_config(sl, xj_sync_enabled=True)
+    user = await _caller(sl)
+    item = await _make_item(
+        sl,
+        title="我的别名",
+        content="本地版正文",
+        xj_local_dirty=True,
+        xj_conflict=True,
+        xj_doc_updated_at=_to_iso(1),
+    )
+
+    async with sl() as db:
+        u = await db.merge(user)
+        if status == 200:
+            out = await library_mod.resolve_item(item.id, library_mod.ResolveIn(action=action), u, db)
+            assert out == {"action": action, "outcome": outcome, "item_id": item.id}
+        else:
+            with pytest.raises(HTTPException) as exc:
+                await library_mod.resolve_item(item.id, library_mod.ResolveIn(action=action), u, db)
+            assert exc.value.status_code == status, f"{action} 应回 {status}"
+
+    fresh = (await _items(sl))[0]
+    assert (fresh.xj_conflict, fresh.xj_local_dirty) == (conflict, dirty), "两个旗的终态"
+    assert fresh.content == "本地版正文", "本表无成功入方向，正文一律不动"
+    assert fresh.title == "我的别名", "标题是本地别名，任何分支都不许改写"
+    assert fresh.xj_doc_updated_at == _to_iso(1), "基线只由成功写/读前移，失败一律保持原值"
+    assert len(recorded["upserts"]) == writes, "只有走到写通道的那一行才该有 upsert 尝试"

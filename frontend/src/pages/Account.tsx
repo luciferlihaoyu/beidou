@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useState } from "react";
-import { DatabaseBackup, Download, KeyRound, Loader2, MoreHorizontal, PenLine, Plug, Plus, Sparkles, Star, Trash2 } from "lucide-react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { DatabaseBackup, Download, KeyRound, Loader2, MoreHorizontal, PenLine, Plug, Plus, RefreshCw, Sparkles, Star, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import AppShell from "@/components/AppShell";
-import { api, type AIConfig, type IntegrationState } from "@/lib/api";
+import { api, xuanjiApi, type AIConfig, type IntegrationState, type XuanjiTree } from "@/lib/api";
+import { relTime } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -21,7 +22,15 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
+
+/** 反向同步的硬排除目录（与后端 ``xj_sync.XJ_EXCLUDED_FOLDER`` 同名）：
+ *  它是**正向**设定集同步的落点，拉回来会自我循环，故界面置灰不可勾。 */
+const XJ_EXCLUDED_FOLDER = "北斗小说资料";
+
+/** 间隔下拉的常用档（与后端 5..1440 钳位一致；当前值不在档内时另补一行，绝不静默改值） */
+const XJ_INTERVAL_CHOICES = [5, 10, 30, 60];
 
 interface ConfigForm {
   name: string;
@@ -65,6 +74,11 @@ export default function Account() {
     xuanji_url: "",
     xuanji_api_key: "",
     auto_backup_enabled: false,
+    // 批F：反向同步三键。表单要编辑就**回传原值**（M1 的 Optional 约定允许省略，
+    // 但这里始终显式带上，免得「改完文件夹又保存」把别的字段带成 None 语义）。
+    xj_sync_enabled: false,
+    xj_sync_folders: "",
+    xj_sync_interval_min: 10,
   });
   const [integSaving, setIntegSaving] = useState(false);
   const [alistTesting, setAlistTesting] = useState(false);
@@ -74,6 +88,10 @@ export default function Account() {
   const [backupsLoading, setBackupsLoading] = useState(false);
   const [downloading, setDownloading] = useState<string | null>(null);
   const [xuanjiTesting, setXuanjiTesting] = useState(false);
+  // 批F：反向同步块 —— 目录树（勾选数据源）+ 两个忙碌态
+  const [xjTree, setXjTree] = useState<XuanjiTree | null>(null);
+  const [xjTreeLoading, setXjTreeLoading] = useState(false);
+  const [xjSyncing, setXjSyncing] = useState(false);
 
   const load = useCallback(() => {
     api.get<AIConfig[]>("/api/ai/configs").then(setConfigs).catch((e) => toast.error(e.message));
@@ -89,11 +107,106 @@ export default function Account() {
           xuanji_url: s.xuanji_url,
           xuanji_api_key: "",
           auto_backup_enabled: s.auto_backup_enabled ?? false,
+          xj_sync_enabled: s.xj_sync_enabled ?? false,
+          xj_sync_folders: s.xj_sync_folders ?? "",
+          xj_sync_interval_min: s.xj_sync_interval_min ?? 10,
         });
       })
       .catch(() => {});
   }, []);
   useEffect(load, [load]);
+
+  /** 拉璇玑目录树（勾选框唯一数据源）。读不通一律静默：块内已有「先配地址」的提示文案，
+   *  进页面就弹一个红 toast 反而像报错。 */
+  async function loadXjTree() {
+    setXjTreeLoading(true);
+    try {
+      setXjTree(await xuanjiApi.tree());
+    } catch {
+      setXjTree(null);
+    } finally {
+      setXjTreeLoading(false);
+    }
+  }
+
+  // 首屏静默预取一次：**不置 loading**（没配璇玑地址时转圈纯属噪声），
+  // 且必须走 .then 回调而非在 effect 体内直接 setState（否则触发级联渲染告警）。
+  useEffect(() => {
+    let alive = true;
+    xuanjiApi
+      .tree()
+      .then((t) => {
+        if (alive) setXjTree(t);
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  // 已勾选的白名单（名字集合；后端解析期兼容全角逗号，这里统一按半角回传）
+  const xjSelected = useMemo(
+    () => new Set(integForm.xj_sync_folders.split(/[,，]/).map((s) => s.trim()).filter(Boolean)),
+    [integForm.xj_sync_folders]
+  );
+
+  // 每个文件夹的文档数：后端 tree 只平铺返回 documents，计数在本地按 folderId 聚合
+  const xjDocCount = useMemo(() => {
+    const m = new Map<number, number>();
+    for (const d of xjTree?.documents ?? []) {
+      if (d.folderId != null) m.set(d.folderId, (m.get(d.folderId) ?? 0) + 1);
+    }
+    return m;
+  }, [xjTree]);
+
+  /** 勾选/取消一个文件夹 → 逗号拼回 xj_sync_folders。
+   *  顺序按树内顺序排列；**树里没有的旧勾选原样保留**（璇玑侧刚改名或树没拉到时，
+   *  一次点选不该把白名单里别的目录悄悄清掉）。 */
+  function toggleXjFolder(name: string) {
+    const next = new Set(xjSelected);
+    if (next.has(name)) next.delete(name);
+    else next.add(name);
+    const treeNames = (xjTree?.folders ?? []).map((f) => f.name);
+    const ordered = treeNames.filter((n) => next.has(n));
+    const orphans = [...next].filter((n) => !ordered.includes(n));
+    setIntegForm({ ...integForm, xj_sync_folders: [...ordered, ...orphans].join(",") });
+  }
+
+  /** 立即全量同步：阻塞式接口（后端持同步锁跑完一轮），完成才回包——故只做 loading，不设超时。 */
+  async function syncNow() {
+    setXjSyncing(true);
+    try {
+      const r = await xuanjiApi.syncNow();
+      toast.success(
+        `新增 ${r.added} · 更新 ${r.updated} · 跳过 ${r.skipped} · 回写 ${r.pushed} · ` +
+          `待人工 ${r.conflicts} · 失败 ${r.failed + r.push_failed}`,
+        // 六个计数挤一行，5 秒来不及看
+        { duration: 12000 }
+      );
+      load(); // 刷新「上次同步」留痕
+      await loadXjTree();
+    } catch (e) {
+      // 未配地址 / 未勾文件夹 → 400，detail 就是给人看的中文提示
+      toast.error((e as Error).message);
+    } finally {
+      setXjSyncing(false);
+    }
+  }
+
+  /** 间隔下拉档位：当前值不在常用档内就补一行，避免打开页面就静默复位成别的值 */
+  const xjIntervalChoices = useMemo(
+    () =>
+      XJ_INTERVAL_CHOICES.includes(integForm.xj_sync_interval_min)
+        ? XJ_INTERVAL_CHOICES
+        : [...XJ_INTERVAL_CHOICES, integForm.xj_sync_interval_min].sort((a, b) => a - b),
+    [integForm.xj_sync_interval_min]
+  );
+
+  /** 已勾选但当前树里查不到的目录（璇玑侧改名/删目录）：照实提示，别让它无声消失 */
+  const xjOrphanFolders = useMemo(() => {
+    const treeNames = new Set((xjTree?.folders ?? []).map((f) => f.name));
+    return xjTree ? [...xjSelected].filter((n) => !treeNames.has(n)) : [];
+  }, [xjTree, xjSelected]);
 
   async function saveIntegration() {
     setIntegSaving(true);
@@ -570,6 +683,122 @@ export default function Account() {
                     {xuanjiTesting ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : <Plug className="mr-1 h-3.5 w-3.5" />}
                     测试连接
                   </Button>
+                </div>
+
+                {/* 批F：资料库反向同步（M2 出参接入本页） */}
+                <Separator />
+                <div className="space-y-3">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <h4 className="text-sm font-medium">资料库反向同步</h4>
+                      <p className="mt-0.5 text-xs leading-5 text-muted-foreground">
+                        勾选的璇玑文件夹将镜像进公共资料库；璇玑更新会覆盖镜像条目正文（本地改名不受影响）；
+                        你在北斗改过的内容自动回写璇玑；两边都改过的条目标冲突待你裁决。
+                      </p>
+                    </div>
+                    <label className="flex shrink-0 items-center gap-2 text-sm">
+                      <input
+                        type="checkbox"
+                        className="accent-primary"
+                        checked={integForm.xj_sync_enabled}
+                        onChange={(e) => setIntegForm({ ...integForm, xj_sync_enabled: e.target.checked })}
+                      />
+                      启用
+                    </label>
+                  </div>
+
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between">
+                      <Label>同步文件夹（白名单）</Label>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-7 px-2 text-xs"
+                        onClick={() => void loadXjTree()}
+                        disabled={xjTreeLoading}
+                      >
+                        {xjTreeLoading ? (
+                          <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
+                        ) : (
+                          <RefreshCw className="mr-1 h-3.5 w-3.5" />
+                        )}
+                        拉取文件夹
+                      </Button>
+                    </div>
+                    {xjTree ? (
+                      <div className="max-h-56 space-y-0.5 overflow-y-auto rounded-md border border-border p-1.5">
+                        {xjTree.folders.length === 0 && (
+                          <p className="px-1 py-2 text-xs text-muted-foreground">璇玑里还没有文件夹</p>
+                        )}
+                        {xjTree.folders.map((f) => {
+                          const isSink = f.name === XJ_EXCLUDED_FOLDER;
+                          return (
+                            <label
+                              key={f.id}
+                              className={`flex items-center gap-2 rounded px-1.5 py-1 text-sm ${
+                                isSink ? "cursor-not-allowed opacity-50" : "cursor-pointer hover:bg-muted"
+                              }`}
+                            >
+                              <input
+                                type="checkbox"
+                                className="accent-primary"
+                                disabled={isSink}
+                                checked={!isSink && xjSelected.has(f.name)}
+                                onChange={() => toggleXjFolder(f.name)}
+                              />
+                              <span className="truncate">{f.name}</span>
+                              <span className="ml-auto shrink-0 text-xs text-muted-foreground">
+                                {isSink ? "设定集落点，不参与" : `${xjDocCount.get(f.id) ?? 0} 篇`}
+                              </span>
+                            </label>
+                          );
+                        })}
+                      </div>
+                    ) : (
+                      <p className="rounded-md border border-dashed border-border px-2 py-3 text-xs text-muted-foreground">
+                        拉不到璇玑文件夹列表——请先填好上面的「璇玑地址 / API Key」并保存，再点「拉取文件夹」
+                      </p>
+                    )}
+                    {xjOrphanFolders.length > 0 && (
+                      <p className="text-xs text-muted-foreground">
+                        白名单里还有璇玑当前树中查不到的目录：{xjOrphanFolders.join("、")}
+                        （可能已改名或删除，原样保留不动）
+                      </p>
+                    )}
+                  </div>
+
+                  <div className="flex flex-wrap items-end gap-3">
+                    <div className="space-y-2">
+                      <Label>自动同步间隔</Label>
+                      <Select
+                        value={String(integForm.xj_sync_interval_min)}
+                        onValueChange={(v) => setIntegForm({ ...integForm, xj_sync_interval_min: Number(v) })}
+                      >
+                        <SelectTrigger className="h-8 w-28 text-xs">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {xjIntervalChoices.map((m) => (
+                            <SelectItem key={m} value={String(m)}>
+                              {m} 分钟
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <Button variant="outline" size="sm" onClick={() => void syncNow()} disabled={xjSyncing}>
+                      {xjSyncing && <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />}
+                      {xjSyncing ? "同步中…" : "⟳ 立即全量同步"}
+                    </Button>
+                    <span className="pb-1.5 text-xs text-muted-foreground">
+                      上次同步：{relTime(integ?.xj_sync_last_at) ?? "未同步"}
+                    </span>
+                  </div>
+                  {xjSyncing && (
+                    <p className="text-xs text-muted-foreground">
+                      正在跑全量对账（入方向拉取 + 待回写批量兜底），要等这一轮跑完才出结果，别关页面。
+                    </p>
+                  )}
                 </div>
               </div>
             </div>

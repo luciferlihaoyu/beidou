@@ -350,6 +350,14 @@ export interface LibraryItem {
   updated_at: string;
   /** B2 全文搜索命中摘要（含 <mark> 高亮），仅 /api/library/search 返回 */
   snippet?: string;
+  /** M2（批F）：璇玑文档锚（空串 = 非同步条目，不画徽标） */
+  xj_doc_id: string;
+  /** M2：本地已改、尚未回写璇玑 → 徽标「⟳ 待回写」 */
+  xj_local_dirty: boolean;
+  /** M2：两边都改过，待人工裁决 → 徽标「⚠ 冲突」（优先级最高） */
+  xj_conflict: boolean;
+  /** M2：上次同步时璇玑侧 updatedAt 基线，用于「源：璇玑·N 分钟前」 */
+  xj_doc_updated_at: string;
 }
 
 export interface OrganizeSuggestion {
@@ -368,6 +376,67 @@ export interface IntegrationState {
   has_xuanji_key: boolean;
   auto_backup_enabled: boolean;
   last_backup_at: string;
+  /** 批F：资料库反向同步开关（与 AList 备份无关，独立一档） */
+  xj_sync_enabled: boolean;
+  /** 批F：白名单（逗号分隔；后端解析期兼容全角逗号，前端统一回传半角） */
+  xj_sync_folders: string;
+  /** 批F：自动同步间隔（分钟，后端钳位 5..1440） */
+  xj_sync_interval_min: number;
+  /** 批F：**只读**留痕（ISO +00:00）；空串 = 从未同步过 */
+  xj_sync_last_at: string;
+}
+
+/** 璇玑知识库目录树（GET /api/integrations/xuanji/tree）：folders 与 documents 平铺返回，
+ *  文档数由前端按 folderId 聚合（后端不下发计数）。 */
+export interface XuanjiFolderNode {
+  id: number;
+  name: string;
+  parentId: number | null;
+  icon?: string | null;
+}
+
+export interface XuanjiDocNode {
+  id: number;
+  title: string;
+  folderId: number | null;
+  format?: string | null;
+  updatedAt: string;
+}
+
+export interface XuanjiTree {
+  folders: XuanjiFolderNode[];
+  documents: XuanjiDocNode[];
+}
+
+/** POST /api/integrations/xuanji/sync 回执（10 键）：入方向 7 键 + 出方向 3 键。
+ *
+ *  `folders` 是**白名单命中目录的逐目录统计**（同名不同父各占一行），不是数字。 */
+export interface XuanjiSyncResult {
+  added: number;
+  updated: number;
+  /** 本地已改、璇玑未变 → 保护不覆盖（等出方向回写） */
+  protected: number;
+  /** 两边都改过 → 标冲突待人工裁决（= UI 上的「待人工 N」） */
+  conflicts: number;
+  skipped: number;
+  /** 入方向单篇读取失败数 */
+  failed: number;
+  folders: { id: number; name: string; docs: number }[];
+  pushed: number;
+  /** 出方向断锚（璇玑侧文档已不存在） */
+  missing: number;
+  /** 出方向写失败（dirty 保留，下轮自动重推） */
+  push_failed: number;
+}
+
+/** POST /api/library/items/{id}/resolve 回执（成功一律 200）。
+ *
+ *  ⚠️ `outcome` 为 `failed` **不是错误**：读/写通道只是这一趟没成，dirty 已保留、
+ *  下一轮自动重推，前端按黄色「稍后自动重试」提示，不要报红。 */
+export interface XuanjiResolveResult {
+  action: "keep_local" | "take_xuanji";
+  outcome: "pushed" | "failed" | "taken";
+  item_id: number;
 }
 
 // ---------- 章节快照 ----------
@@ -873,6 +942,20 @@ export const xuanjiApi = {
     api.post<{ ok: boolean; title: string; chars: number }>(
       `/api/ai-factory/projects/${projectId}/kb-sync`
     ),
+  /** 璇玑目录树：集成页「资料库反向同步」的文件夹多选数据源（documents 供数文档数） */
+  tree: () => api.get<XuanjiTree>("/api/integrations/xuanji/tree"),
+  /** 手动全量对账（入方向 + dirty 批量兜底回写）。
+   *
+   *  **阻塞式**：后端持全局同步锁跑完一整轮才回包，几十秒是常态——故这里刻意不给
+   *  超时（`request` 本就不设 signal/timeout，fetch 默认无超时），让它跑完。
+   *  未配地址 / 未勾文件夹 → 400（detail 为中文提示，直接红 toast 展示）。 */
+  syncNow: () => api.post<XuanjiSyncResult>("/api/integrations/xuanji/sync"),
+  /** 人工裁决一条同步冲突：keep_local = 保住本地版强推璇玑；take_xuanji = 拉璇玑版覆盖本地。
+   *
+   *  三口径：成功 → 200（keep_local 的 outcome 可能是 `failed`，**那不是错误**）；
+   *  断锚 / 非冲突条目 / 非法 action / 未配地址 → 400；take_xuanji 读通道故障 → 503。 */
+  resolveItem: (id: number, action: "keep_local" | "take_xuanji") =>
+    api.post<XuanjiResolveResult>(`/api/library/items/${id}/resolve`, { action }),
 };
 
 // ---------- 平台敏感词 + 去AI味 ----------
