@@ -492,8 +492,9 @@ def _default_kb_query(spec: dict) -> str:
         return ""
     titles = spec.get("titles")
     pieces: list[str] = []
-    if isinstance(titles, list) and titles and str(titles[0]).strip():
-        pieces.append(str(titles[0]).strip())
+    # 只认真正的字符串：titles=[None] 走 str() 会产出 "None" 这种假书名检索词
+    if isinstance(titles, list) and titles and isinstance(titles[0], str) and titles[0].strip():
+        pieces.append(titles[0].strip())
     if isinstance(spec.get("genre"), str) and spec["genre"].strip():
         pieces.append(spec["genre"].strip())
     for key in ("theme", "premise"):  # 主题/梗概各截前 40 字，防长文本挤爆检索词
@@ -1343,18 +1344,17 @@ async def _update_state_files(
 async def _recall_own_spec(p: AiProject, kc) -> str | None:
     """t5：确定性召回本书设定集——按标题精确匹配「北斗·{书名}·设定集」取第 1 篇，content 截 600。
 
-    书名口径与 _do_kb_sync 一致（spec.titles[0]，兜底 seed_prompt[:20]）；只认 title 完全
-    一致，防止搜到别的书。找不到 / 异常一律返回 None，绝不阻塞生成（mock 此函数即可单测）。
+    书名口径与 _do_kb_sync 完全共用 ai_extras._book_title（titles 首个非空 strip 串，
+    兜底 seed_prompt[:20]）——上传与召回同源，带空白/异形 titles 也不会错位；
+    只认 title 完全一致，防止搜到别的书。找不到 / 异常一律返回 None，绝不阻塞生成
+    （mock 此函数即可单测）。
     """
     try:
+        from .ai_extras import _book_title  # 延迟导入：ai_extras 顶层反向依赖本模块，防循环导入
         from .integrations import _xuanji_call
 
         spec = json.loads(p.book_spec_json or "{}")
-        titles = spec.get("titles")
-        if isinstance(titles, list) and titles and str(titles[0]).strip():
-            title = str(titles[0]).strip()
-        else:
-            title = (p.seed_prompt or "")[:20]
+        title = _book_title(p, spec)
         doc_title = f"北斗·{title}·设定集"
         docs = await _xuanji_call(kc, "kb.searchDocuments", {"query": doc_title})
         if not isinstance(docs, list):
@@ -1436,13 +1436,22 @@ async def _assemble_context(p: AiProject, novel: Novel, chapter: Chapter, job: A
             lines = [f"第{order_map[j.chapter_id]}章：{j.summary[:150]}" for j in cards]
             parts.append("【最近章节记忆卡（保持剧情连贯，不得矛盾）】\n" + "\n".join(lines))
 
-    # 本书设定集确定性注入（t5：不依赖搜索命中，生成上下文必含本书最新设定集；失败静默不影响生成）
+    # 璇玑集成配置行只查一次，供下面两段共用（本书设定集确定性注入 / kb_query 泛搜）——
+    # 原先两段各查一次同表同行；查询失败静默降级为 None，知识库不可达绝不阻塞生成。
+    # 位置定在这里（而非函数第一行）是为了不改变既有 execute 调用次序：本仓库有按
+    # 调用顺序吐结果的假 DB 测试（如 test_fix8_wordcount 的 SeqDB），前插一次查询会
+    # 整体错位。语义等价：两段消费者仍共用这一次查询结果。
     try:
         kc = (
             (await db.execute(select(IntegrationConfig).where(IntegrationConfig.user_id == p.user_id)))
             .scalars()
             .first()
         )
+    except Exception:  # noqa: BLE001
+        kc = None
+
+    # 本书设定集确定性注入（t5：不依赖搜索命中，生成上下文必含本书最新设定集；失败静默不影响生成）
+    try:
         if kc and kc.xuanji_url:
             own = await _recall_own_spec(p, kc)
             if own:
@@ -1455,11 +1464,6 @@ async def _assemble_context(p: AiProject, novel: Novel, chapter: Chapter, job: A
         try:
             from .integrations import _xuanji_call
 
-            kc = (
-                (await db.execute(select(IntegrationConfig).where(IntegrationConfig.user_id == p.user_id)))
-                .scalars()
-                .first()
-            )
             if kc and kc.xuanji_url:
                 docs = await _xuanji_call(kc, "kb.searchDocuments", {"query": p.kb_query})
                 if isinstance(docs, list) and docs:
@@ -2306,7 +2310,7 @@ async def finalize_chapter(
     except Exception:  # noqa: BLE001
         pass
 
-    from datetime import datetime, timezone, timezone
+    from datetime import datetime, timezone
 
     job.status = "done"
     job.actual_words = chapter.word_count

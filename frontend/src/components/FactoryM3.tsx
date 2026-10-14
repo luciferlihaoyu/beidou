@@ -43,7 +43,8 @@ import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 
 // 相对时间：刚过 / N 分钟前 / N 小时前 / N 天前，更久直接给日期。
-// 后端 last_kb_sync_at 存的是无时区后缀的 UTC ISO 串：无 Z/偏移则补 Z 按 UTC 解析。
+// 后端 last_kb_sync_at 是 datetime.now(timezone.utc).isoformat()，实际产出带 +00:00 后缀的 UTC 串；
+// 这里两个分支都兼容：已有 Z/偏移直接解析，历史裸串（无后缀）补 Z 按 UTC 解析。
 function relTime(iso: string): string {
   if (!iso) return "";
   const normalized = /Z$|[+-]\d{2}:\d{2}$/.test(iso) ? iso : `${iso}Z`;
@@ -542,9 +543,7 @@ export function M3Toolbar({
           />
           {/* t6：同步状态 + 自动同步开关——checked 由 project 驱动，失败不落 state 即回滚显示 */}
           <div className="mt-2 flex items-center justify-between text-xs text-muted-foreground">
-            <span>
-              同步状态：{project.last_kb_sync_at ? `上次同步：${relTime(project.last_kb_sync_at)}` : "未同步"}
-            </span>
+            <span>同步状态：{relTime(project.last_kb_sync_at) || "未同步"}</span>
             <label className="flex cursor-pointer items-center gap-1.5">
               <input
                 type="checkbox"

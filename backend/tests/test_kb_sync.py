@@ -11,7 +11,11 @@
   （书名 + genre + theme/premise 前 40 字，截 200），已有 kb_query 不覆盖。
 - t5：生成时确定性注入本书设定集——_recall_own_spec 按标题精确匹配
   「北斗·书名·设定集」取 content 截 600，异常一律返回 None；
-  组装上下文时注入「本书设定集」段（记忆卡之后、kb_query 泛搜之前）。
+  组装上下文时注入「本书设定集」段（记忆卡之后、kb_query 泛搜之前），
+  且 IntegrationConfig 只查一次供两段共用。
+- 加固（独立评审 minor）：书名口径统一到 ai_extras._book_title（上传/召回同源，
+  带空白与异形 titles 不再隐性空转）；大纲环残团每节点恰好输出一次；
+  截断段恰好 16000；「后台函数→真打包→假 mcp」端到端不断链。
 """
 
 import json
@@ -26,6 +30,7 @@ import app.db as app_db
 import app.routers.ai_factory as factory
 import app.routers.ai_extras as extra
 import app.routers.integrations as integ_mod
+from app.deps import count_words
 from app.models import (
     AiChapterJob,
     AiProject,
@@ -133,6 +138,70 @@ def test_outline_tree_rendered_with_indent():
     ]
 
 
+def test_outline_tree_survives_parent_cycles():
+    """环残团：A↔B 互为 parent + A→A 自环 → 每节点恰好输出一次，绝不死循环也不丢数据。"""
+    a = OutlineNode(id=1, parent_id=2, title="甲", sort_order=1)
+    b = OutlineNode(id=2, parent_id=1, title="乙", content="乙的内容", sort_order=2)
+    self_loop = OutlineNode(id=3, parent_id=3, title="自环", sort_order=3)
+    root = OutlineNode(id=4, title="根", sort_order=4)
+    leaf = OutlineNode(id=5, parent_id=4, title="叶", content="叶的内容", sort_order=5)
+
+    text = extra._render_outline_tree([a, b, self_loop, root, leaf])
+
+    lines = text.splitlines()
+    # 根树正常展开；环团（从 None 不可达）平铺收尾
+    assert lines == ["- 根", "  - 叶：叶的内容", "- 甲", "- 乙：乙的内容", "- 自环"]
+    for title in ("甲", "乙", "自环", "根", "叶"):
+        assert sum(1 for ln in lines if title in ln) == 1, f"{title} 应恰好输出一次"
+
+
+def test_book_title_unified_across_boundaries():
+    """书名口径（组B minor1）：titles 首个非空 strip 串；None/非列表/[""] 一律兜底 seed_prompt[:20]。"""
+    p = AiProject(seed_prompt="少年逆袭成剑仙")
+
+    assert extra._book_title(p, {"titles": [" 我欲成魔 "]}) == "我欲成魔"  # strip 生效
+    assert extra._book_title(p, {"titles": [None, " 备选名 "], "genre": "玄幻"}) == "备选名"  # 跳过非串项
+    assert extra._book_title(p, {"titles": [""]}) == "少年逆袭成剑仙"
+    assert extra._book_title(p, {"titles": ["", "  "]}) == "少年逆袭成剑仙"
+    assert extra._book_title(p, {"titles": []}) == "少年逆袭成剑仙"
+    assert extra._book_title(p, {"titles": "不是列表"}) == "少年逆袭成剑仙"
+    assert extra._book_title(p, {"titles": None}) == "少年逆袭成剑仙"
+    assert extra._book_title(p, {}) == "少年逆袭成剑仙"
+    assert extra._book_title(p, None) == "少年逆袭成剑仙"  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_whitespace_title_sync_and_recall_agree(sl, monkeypatch):
+    """titles=[" 我欲成魔 "]：上传文档标题与召回检索词都等于「北斗·我欲成魔·设定集」（不再隐性空转）。"""
+    recorded = _patch_xuanji(monkeypatch)
+    user, p = await _make_project(sl)
+    async with sl() as db:
+        p = await db.get(AiProject, p.id)
+        p.book_spec_json = json.dumps({"titles": [" 我欲成魔 "], "genre": "玄幻"})
+        kc = IntegrationConfig(user_id=user.id, xuanji_url="https://xj.example")
+        db.add(kc)
+        await db.commit()
+
+        result = await extra._do_kb_sync(p, kc, db)
+
+    # 写方向：上传标题 strip 生效
+    assert result["title"] == "北斗·我欲成魔·设定集"
+    assert recorded["args"][0]["title"] == "北斗·我欲成魔·设定集"
+
+    # 读方向：召回侧同口径（检索词与上传标题一字不差）
+    doc_title = "北斗·我欲成魔·设定集"
+    calls = _patch_xuanji_call(
+        monkeypatch, docs=[{"id": 3, "title": doc_title}], document={"title": doc_title, "content": "设定"}
+    )
+    async with sl() as db:
+        p2 = await db.get(AiProject, p.id)
+        kc2 = (await db.execute(select(IntegrationConfig))).scalars().first()
+        out = await factory._recall_own_spec(p2, kc2)
+
+    assert out is not None, "上传用的标题必须能被召回侧精确命中"
+    assert calls[0] == ("kb.searchDocuments", {"query": doc_title})
+
+
 @pytest.mark.asyncio
 async def test_do_kb_sync_includes_outline_tree(sl, monkeypatch):
     """有 novel_id 时：查 OutlineNode 展开为缩进树上传，标题带「## 大纲（卷章骨架）」。"""
@@ -208,7 +277,7 @@ async def test_do_kb_sync_outline_truncated(sl, monkeypatch):
 
     content = captured["content"]
     seg = "## 大纲快照\n" + content.split("## 大纲快照\n", 1)[1]
-    assert len(seg) <= 16000, f"大纲段应整段截断 16000，实际 {len(seg)}"
+    assert len(seg) == 16000, f"大纲段应整段硬截 16000，实际 {len(seg)}"
 
 
 # ---------- t2：共用函数 + 留痕字段 ----------
@@ -229,7 +298,8 @@ async def test_kb_sync_route_stamps_last_sync(sl, monkeypatch):
     assert result == {
         "ok": True,
         "title": "北斗·少年逆袭成剑仙·设定集",
-        "chars": len(result["chars"] * "x"),
+        # 独立口径：chars 应等于 fake mcp 实际收到的上传正文长度（不是拿 chars 反算 chars）
+        "chars": len(recorded["args"][0]["content"]),
         "result": {"ok": True},
     }
     assert result["chars"] > 0
@@ -315,14 +385,18 @@ async def test_finalize_schedules_auto_kb_sync(sl, monkeypatch):
 
     user, p, job = await _make_finalize_fixtures(sl)
     bg = BackgroundTasks()
+    text = "少年背剑下山，一剑破开长空。" * 3
 
     async with sl() as db:
-        result = await finalize_chapter(
-            p.id, job.id, FinalizeIn(content_text="少年背剑下山，一剑破开长空。" * 3), bg, user, db
-        )
+        result = await finalize_chapter(p.id, job.id, FinalizeIn(content_text=text), bg, user, db)
 
-    assert result == {"ok": True, "word_count": result["word_count"], "state_updated": True, "split_into": 1}
-    assert result["word_count"] > 0
+    assert result == {
+        "ok": True,
+        # 独立口径：正文转 HTML 入书稿后重新数一遍，不用返回值自证
+        "word_count": count_words(factory._text_to_html(text)),
+        "state_updated": True,
+        "split_into": 1,
+    }
     task = bg.tasks[0]
     assert task.func.__name__ == "_auto_kb_sync_after_finalize"
     assert task.args == (p.id, user.id)
@@ -408,6 +482,39 @@ async def test_auto_sync_swallows_exceptions(sl, monkeypatch):
         assert p2.last_kb_sync_at == ""  # 失败不写留痕
 
 
+@pytest.mark.asyncio
+async def test_auto_sync_end_to_end_packs_and_uploads(sl, monkeypatch):
+    """组装链路端到端（不 mock _do_kb_sync）：后台函数 → 真打包 → 假 mcp 收到上传。
+
+    守护「后台函数只调了一次打包、打包内容含「## 大纲」「## 立项」、标题格式正确」——
+    只 mock 单侧会漏掉「函数被 mock 掉、真实链路根本没接上」这类断链。
+    """
+    recorded = _patch_xuanji(monkeypatch)
+    monkeypatch.setattr(app_db, "SessionLocal", sl)
+
+    user, p = await _make_project(sl, outline_json='{"volumes": ["第一卷 风起"]}')
+    async with sl() as db:
+        p2 = await db.get(AiProject, p.id)
+        p2.book_spec_json = json.dumps({"titles": ["剑起青萍"], "genre": "玄幻", "premise": "少年得剑灵传承。"})
+        db.add(IntegrationConfig(user_id=user.id, xuanji_url="https://xj.example"))
+        await db.commit()
+
+    await extra._auto_kb_sync_after_finalize(p.id, user.id)
+
+    assert recorded["tools"] == ["document_upsert"]  # 真实链路确实发出了上传（不是 mock 掉了）
+    args = recorded["args"][0]
+    assert args["title"] == "北斗·剑起青萍·设定集"
+    content = args["content"]
+    assert "## 大纲" in content
+    assert "## 立项" in content
+    assert '{"volumes": ["第一卷 风起"]}' in content
+    assert args.get("folderId") == 7
+
+    async with sl() as db:  # 成功路径同样写留痕
+        p3 = await db.get(AiProject, p.id)
+        assert p3.last_kb_sync_at != ""
+
+
 # ---------- t4：立项自动预填 kb_query ----------
 
 
@@ -432,6 +539,10 @@ def test_default_kb_query_pure_function():
     assert factory._default_kb_query({"titles": []}) == ""
     assert factory._default_kb_query({"titles": "不是列表", "genre": "科幻"}) == "科幻"
     assert factory._default_kb_query({"titles": ["", "  "], "premise": "只有梗概"}) == "只有梗概"
+    # 组B minor3：非字符串书名不得被 str() 变成 "None" 混进检索词
+    assert factory._default_kb_query({"titles": [None], "genre": "科幻"}) == "科幻"
+    assert factory._default_kb_query({"titles": [None, "备选"], "genre": "科幻"}) == "科幻"
+    assert not factory._default_kb_query({"titles": [None]}).startswith("None")
 
 
 @pytest.mark.asyncio
@@ -564,6 +675,22 @@ async def test_recall_own_spec_swallows_exceptions(sl, monkeypatch):
         assert await factory._recall_own_spec(p, kc) is None
 
 
+class _CountingSession:
+    """薄代理：统计 execute 次数与 IntegrationConfig 查询次数，其余属性直通真实 session。"""
+
+    def __init__(self, db):
+        self._db = db
+        self.integration_config_queries = 0
+
+    async def execute(self, stmt, *args, **kwargs):
+        if "integration_config" in str(stmt).lower():
+            self.integration_config_queries += 1
+        return await self._db.execute(stmt, *args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._db, name)
+
+
 @pytest.mark.asyncio
 async def test_assemble_context_includes_own_spec(sl, monkeypatch):
     """t5④：集成路径——配置璇玑且标题命中时，组装出的生成上下文含「本书设定集」段，与泛搜并存。"""
@@ -586,8 +713,11 @@ async def test_assemble_context_includes_own_spec(sl, monkeypatch):
         p2 = await db.get(AiProject, p.id)
         novel = await db.get(Novel, novel_id)
         chapter = await db.get(Chapter, job.chapter_id)
-        text = await factory._assemble_context(p2, novel, chapter, job, db)
+        counting = _CountingSession(db)
+        text = await factory._assemble_context(p2, novel, chapter, job, counting)
 
     assert "【本书设定集（璇玑同步，一致性最高优先）】" in text
     assert doc_title in text
     assert ("kb.searchDocuments", {"query": doc_title}) in recorded
+    # 组B minor2：注入段与泛搜段共用同一次 IntegrationConfig 查询（原先各查一次）
+    assert counting.integration_config_queries == 1

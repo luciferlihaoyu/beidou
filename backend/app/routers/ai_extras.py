@@ -214,6 +214,23 @@ def _render_outline_tree(nodes: list) -> str:
     return "\n".join(lines)
 
 
+def _book_title(p: AiProject, spec: dict) -> str:
+    """书名统一口径（kb-sync 上传标题 / 生成时确定性召回共用，防「同步了却召不回」）。
+
+    - spec.titles 取列表中首个非空 strip 串（跳过 None 等非串项与空串/纯空白项）
+    - titles 缺失 / 非列表 / 无可用串 → 兜底 seed_prompt[:20]
+
+    两处口径必须一字不差——上传文档标题与召回检索词都由本函数产出，
+    差一个空格就会退化成「同步成功但一次也召不回」的隐性空转。
+    """
+    titles = spec.get("titles") if isinstance(spec, dict) else None
+    if isinstance(titles, list):
+        for t in titles:
+            if isinstance(t, str) and t.strip():
+                return t.strip()
+    return (p.seed_prompt or "")[:20]
+
+
 async def _do_kb_sync(p: AiProject, kc, db: AsyncSession) -> dict:
     """kb-sync 主体：打包设定集（含大纲）并上传璇玑知识库，返回路由原结构。
 
@@ -229,7 +246,7 @@ async def _do_kb_sync(p: AiProject, kc, db: AsyncSession) -> dict:
     from .integrations import _xuanji_ensure_folder, _xuanji_mcp
 
     spec = json.loads(p.book_spec_json or "{}")
-    title = (spec.get("titles") or [p.seed_prompt[:20]])[0]
+    title = _book_title(p, spec)
 
     parts = [f"# 《{title}》设定集（北斗 AI 工厂同步）\n"]
     if spec:
