@@ -265,6 +265,11 @@ class LibraryItem(Base):
     tags: Mapped[str] = mapped_column(String(300), default="")  # 逗号分隔
     summary: Mapped[str] = mapped_column(String(500), default="")
     source: Mapped[str] = mapped_column(String(20), default="manual")  # manual / agent / import / xuanji
+    # 璇玑双向同步锚点（批D）：xj_doc_id 为关联锚，基线时间戳判璇玑侧是否变更
+    xj_doc_id: Mapped[str] = mapped_column(String(50), default="")  # 璇玑文档 id；空串=非同步条目
+    xj_doc_updated_at: Mapped[str] = mapped_column(String(40), default="")  # 上次同步时的璇玑 updatedAt 基线
+    xj_local_dirty: Mapped[bool] = mapped_column(default=False)  # 本地已改、尚未回写璇玑
+    xj_conflict: Mapped[bool] = mapped_column(default=False)  # 两边都改，待人工裁决（两边暂不动）
     created_at: Mapped[datetime] = mapped_column(default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(default=utcnow, onupdate=utcnow)
 
@@ -284,6 +289,11 @@ class IntegrationConfig(Base):
     xuanji_api_key: Mapped[str] = mapped_column(String(300), default="")
     auto_backup_enabled: Mapped[bool] = mapped_column(default=False)  # 每日自动备份到 AList
     last_backup_at: Mapped[str] = mapped_column(String(20), default="")  # ISO 日期串，判重
+    # 璇玑资料库双向同步（批D 数据面）：开关 / 文件夹白名单 / 间隔 / 上次执行时刻
+    xj_sync_enabled: Mapped[bool] = mapped_column(default=False)  # 是否启用定时同步循环
+    xj_sync_folders: Mapped[str] = mapped_column(String(500), default="")  # 逗号分隔的璇玑文件夹名（白名单）
+    xj_sync_interval_min: Mapped[int] = mapped_column(default=10)  # 同步间隔（分钟），调度判定粒度 1 分钟
+    xj_sync_last_at: Mapped[str] = mapped_column(String(40), default="")  # 上次同步完成时刻（UTC ISO），判间隔
     updated_at: Mapped[datetime] = mapped_column(default=utcnow, onupdate=utcnow)
 
 

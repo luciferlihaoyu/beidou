@@ -59,6 +59,15 @@ async def init_db():
         # FIX-7 未定稿草稿：服务端兜住「正文只在浏览器内存里」的丢稿风险
         await _ensure_column(conn, "ai_chapter_jobs", "draft_text", "TEXT")
         await _ensure_column(conn, "ai_chapter_jobs", "draft_updated_at", "DATETIME")
+        # 批D 资料库双向同步数据面：集成配置四项 + 资料条目四项（默认值与 models.py 一致）
+        await _ensure_column(conn, "integration_configs", "xj_sync_enabled", "BOOLEAN NOT NULL DEFAULT 0")
+        await _ensure_column(conn, "integration_configs", "xj_sync_folders", "VARCHAR(500) NOT NULL DEFAULT ''")
+        await _ensure_column(conn, "integration_configs", "xj_sync_interval_min", "INTEGER NOT NULL DEFAULT 10")
+        await _ensure_column(conn, "integration_configs", "xj_sync_last_at", "VARCHAR(40) NOT NULL DEFAULT ''")
+        await _ensure_column(conn, "library_items", "xj_doc_id", "VARCHAR(50) NOT NULL DEFAULT ''")
+        await _ensure_column(conn, "library_items", "xj_doc_updated_at", "VARCHAR(40) NOT NULL DEFAULT ''")
+        await _ensure_column(conn, "library_items", "xj_local_dirty", "BOOLEAN NOT NULL DEFAULT 0")
+        await _ensure_column(conn, "library_items", "xj_conflict", "BOOLEAN NOT NULL DEFAULT 0")
 
     await _migrate()
 
