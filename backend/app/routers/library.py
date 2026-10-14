@@ -2,11 +2,12 @@
 
 import io
 import json
+import logging
 import re
 import zipfile
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, UploadFile
 from pydantic import BaseModel, Field
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -14,9 +15,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from .. import llm_timeouts
 from ..db import get_db
 from ..deps import get_current_user, get_default_ai_config, get_owned_novel
-from ..models import LibraryFolder, LibraryItem, Novel, User
+from ..models import IntegrationConfig, LibraryFolder, LibraryItem, Novel, User
 
 router = APIRouter(prefix="/api/library", tags=["library"])
+
+logger = logging.getLogger("beidou.library")
 
 UPLOAD_MAX_SIZE = 20 * 1024 * 1024  # 单个文件 20MB
 
@@ -212,16 +215,36 @@ async def create_item(data: ItemIn, user: User = Depends(get_current_user), db: 
 
 @router.put("/items/{item_id}", response_model=ItemOut)
 async def update_item(
-    item_id: int, data: ItemIn, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
+    item_id: int,
+    data: ItemIn,
+    background_tasks: BackgroundTasks,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ):
     item = await db.get(LibraryItem, item_id)
     if item is None:
         raise HTTPException(404, "条目不存在")
     await _check_scope(item.novel_id, user, db)
+
+    # 批E r3 保存即回写：**只有正文真的变了**才算「本地已改」。
+    # 只改标题是给条目起别名（口径 a：标题不回推——璇玑 upsert 以标题为锚，
+    # 推别名会在璇玑造副本），故不置 dirty、也不触发后台回写。
+    content_changed = (item.content or "") != (data.content or "")
+
     for key, value in data.model_dump().items():
         if key == "novel_id":
             continue  # 不允许跨库移动
         setattr(item, key, value)
+
+    if str(item.xj_doc_id or "").strip() and content_changed:
+        item.xj_local_dirty = True
+        config = await _xj_sync_config(user, db)
+        if config is not None and config.xj_sync_enabled:
+            # 后台任务自建 session（仿 t3 定稿钩子），失败静默——绝不拖慢/搞崩这次保存
+            from ..xj_sync import push_after_save
+
+            background_tasks.add_task(push_after_save, item.id, user.id)
+
     await db.commit()
     await db.refresh(item)
     # B2 FTS 同步
@@ -232,6 +255,112 @@ async def update_item(
     except Exception:  # noqa: BLE001
         pass
     return _item_out(item)
+
+
+# ---------- 璇玑同步冲突裁决（批E r4，路由就近条目）----------
+
+
+async def _xj_sync_config(user: User, db: AsyncSession) -> IntegrationConfig | None:
+    """取该用户的集成配置（只读，不新建）。"""
+    return (
+        (await db.execute(select(IntegrationConfig).where(IntegrationConfig.user_id == user.id)))
+        .scalars()
+        .first()
+    )
+
+
+class ResolveIn(BaseModel):
+    #: keep_local = 本地版强写璇玑；take_xuanji = 拉璇玑版覆盖本地
+    action: str = Field(min_length=1, max_length=20)
+
+
+@router.post("/items/{item_id}/resolve")
+async def resolve_item(
+    item_id: int,
+    data: ResolveIn,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """人工裁决一条同步冲突（两边都改过）。
+
+    - ``keep_local``：按 E1 把**本地正文**强推回璇玑（标题仍取璇玑当前标题），清冲突
+    - ``take_xuanji``：拉璇玑全文覆盖本地 content、刷新基线、清冲突；**标题保留本地别名**
+      （口径 a，与入方向覆盖语义一致）
+
+    两种 action 都持 ``_SYNC_LOCK``：它们改的正是全量对账也在改的那几列，不与同步轮次并发。
+    非同步条目（``xj_doc_id`` 空）或非冲突条目一律 400——避免误裁正常条目。
+    """
+    from ..xj_sync import (
+        _SYNC_LOCK,
+        XuanjiReadError,
+        _norm_ts,
+        _resolve_xuanji_doc,
+        push_item_to_xuanji,
+    )
+
+    if data.action not in ("keep_local", "take_xuanji"):
+        logger.warning("璇玑冲突裁决被拒（条目 %s）：非法 action=%r", item_id, data.action)
+        raise HTTPException(400, "action 必须为 keep_local 或 take_xuanji")
+
+    item = await db.get(LibraryItem, item_id)
+    if item is None:
+        raise HTTPException(404, "条目不存在")
+    await _check_scope(item.novel_id, user, db)
+    if not str(item.xj_doc_id or "").strip() or not item.xj_conflict:
+        logger.warning(
+            "璇玑冲突裁决被拒（条目 %s）：xj_doc_id=%r conflict=%s（非冲突条目不许裁）",
+            item_id,
+            item.xj_doc_id,
+            item.xj_conflict,
+        )
+        raise HTTPException(400, "该条目不是「待裁决的同步冲突」条目")
+
+    config = await _xj_sync_config(user, db)
+    if config is None or not config.xuanji_url:
+        logger.warning("璇玑冲突裁决被拒（条目 %s）：未配置璇玑地址", item_id)
+        raise HTTPException(400, "请先在「账号设置 → 集成」里填写璇玑地址")
+
+    async with _SYNC_LOCK:
+        if data.action == "keep_local":
+            # 先认下用户的裁决，再强推：推成功会清 dirty；推失败则 dirty 留着等下一轮
+            # 批量兜底重试（绝不把「本地改动待回写」这个信息丢掉）；断锚则重新置回冲突。
+            item.xj_conflict = False
+            await db.commit()
+            outcome = await push_item_to_xuanji(item, config, db)
+            if outcome == "missing":
+                logger.warning("keep_local 未成（条目 %s）：璇玑侧锚已断", item_id)
+                raise HTTPException(400, "璇玑侧已不存在这篇文档（锚已断），无法回写；请重新导入")
+            if outcome == "failed":
+                # C1：读/写通道故障只是「这次没成」，dirty 已保留，下轮批量兜底会自动重推
+                logger.warning(
+                    "keep_local 未完成（条目 %s）：璇玑读/写通道故障，dirty 已保留待下轮重试",
+                    item_id,
+                )
+            result = {"action": "keep_local", "outcome": outcome, "item_id": item.id}
+        else:
+            try:
+                full = await _resolve_xuanji_doc(config, item.xj_doc_id)
+            except XuanjiReadError as exc:
+                # C1：读不动 ≠ 文档没了——不能说「已不存在」（那是假话），也不改任何本地状态
+                logger.warning("take_xuanji 读取失败（条目 %s）：璇玑读通道故障", item_id, exc_info=True)
+                raise HTTPException(503, "璇玑暂时不可读，请稍后重试") from exc
+            if full is None:
+                logger.warning("take_xuanji 未成（条目 %s）：璇玑侧文档已不存在", item_id)
+                raise HTTPException(400, "璇玑侧已不存在这篇文档，无法取其版本")
+            item.content = full.get("content") or ""
+            item.xj_doc_updated_at = _norm_ts(full.get("updatedAt")) or item.xj_doc_updated_at
+            item.xj_conflict = False
+            item.xj_local_dirty = False
+            await db.commit()
+            result = {"action": "take_xuanji", "outcome": "taken", "item_id": item.id}
+
+    try:
+        from ..search_fts import sync_library_item
+
+        await sync_library_item(db, item.id)
+    except Exception:  # noqa: BLE001  FTS 不可用不影响裁决结果
+        pass
+    return result
 
 
 @router.delete("/items/{item_id}")

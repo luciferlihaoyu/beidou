@@ -43,6 +43,13 @@ class IntegrationIn(BaseModel):
     xuanji_url: str = Field(default="", max_length=300)
     xuanji_api_key: str = Field(default="", max_length=300)  # 留空 = 不修改
     auto_backup_enabled: bool = False
+    # 批E r4：资料库双向同步三字段可写（xj_sync_last_at 是**只读留痕**，只在 GET 回显，
+    # 本模型不收——避免前端回传把调度节奏写歪）。
+    # M1「留空=不改」：三键一律 Optional，**None（= body 里没这个键）→ PUT 不触碰该列**，
+    # 与上面 xuanji_api_key 同款约定；要关掉/清空就**显式**传 False / ""（空串即清空白名单）。
+    xj_sync_enabled: bool | None = None
+    xj_sync_folders: str | None = Field(default=None, max_length=500)  # 逗号分隔的璇玑文件夹白名单
+    xj_sync_interval_min: int | None = Field(default=None, ge=5, le=1440)  # 钳位 5 分钟..24 小时
 
 
 @router.get("")
@@ -57,6 +64,11 @@ async def get_integration(user: User = Depends(get_current_user), db: AsyncSessi
         "has_xuanji_key": bool(config.xuanji_api_key),
         "auto_backup_enabled": config.auto_backup_enabled,
         "last_backup_at": config.last_backup_at,
+        # 批E r4：同步四字段（前三可写、last_at 只读回显）
+        "xj_sync_enabled": config.xj_sync_enabled,
+        "xj_sync_folders": config.xj_sync_folders,
+        "xj_sync_interval_min": config.xj_sync_interval_min,
+        "xj_sync_last_at": config.xj_sync_last_at,
     }
 
 
@@ -68,6 +80,14 @@ async def save_integration(data: IntegrationIn, user: User = Depends(get_current
     config.alist_root = ("/" + data.alist_root.strip().strip("/")) if data.alist_root.strip() else "/"
     config.xuanji_url = data.xuanji_url.strip()
     config.auto_backup_enabled = data.auto_backup_enabled
+    # 批E r4 + M1：同步三字段「留空=不改」——只有显式传了（非 None）才落库。
+    # 白名单按原样存（解析期再做全角逗号/空白归一，见 xj_sync）；显式 "" 即清空。
+    if data.xj_sync_enabled is not None:
+        config.xj_sync_enabled = data.xj_sync_enabled
+    if data.xj_sync_folders is not None:
+        config.xj_sync_folders = data.xj_sync_folders.strip()
+    if data.xj_sync_interval_min is not None:
+        config.xj_sync_interval_min = data.xj_sync_interval_min
     if data.alist_password:
         config.alist_password = data.alist_password
     if data.xuanji_api_key:
@@ -428,6 +448,24 @@ async def _xuanji_ensure_folder(config: IntegrationConfig, name: str):
                 return f.get("id")
     created = await _xuanji_mcp(config, "folder_create", {"name": name.strip()})
     return created.get("id") if isinstance(created, dict) else None
+
+
+@router.post("/xuanji/sync")
+async def xuanji_sync(user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    """手动全对账（批E r4）：入方向（璇玑→北斗）+ dirty 批量兜底回写（北斗→璇玑）。
+
+    持 ``xj_sync._SYNC_LOCK``（在 ``sync_all`` 内），与定时循环、resolve 强回写互斥——
+    锁内完成「读 config → 改库 → commit」，绝不与另一轮对账交错（E2）。
+    返回入方向 7 键 + ``{pushed, missing, push_failed}``。
+    """
+    from ..xj_sync import sync_all
+
+    config = await _get_config(user, db)
+    if not config.xuanji_url.strip():
+        raise HTTPException(400, "请先在「账号设置 → 集成」里填写璇玑地址")
+    if not config.xj_sync_folders.strip():
+        raise HTTPException(400, "请先勾选要同步的璇玑文件夹（白名单）")
+    return await sync_all(config, db)
 
 
 class XuanjiUploadIn(BaseModel):

@@ -27,14 +27,37 @@ async def _auto_backup_loop():
         await asyncio.sleep(30 * 60)
 
 
+async def _xj_sync_loop():
+    """每 60 秒醒一次：给启用同步且已到点的用户跑一轮璇玑 ↔ 资料库对账（批E r5）。
+
+    每轮的查库/到期判定/逐个执行都在 ``xj_sync._xj_sync_tick`` 里（那里对**单个**
+    config 的异常只 ``logging.warning`` 后继续下一个，并自建 SessionLocal）；
+    本循环只负责节拍，且绝不因一轮异常退出——与 ``_auto_backup_loop`` 同款写法。
+    """
+    import asyncio
+    import logging
+
+    from .xj_sync import _xj_sync_tick
+
+    logger = logging.getLogger("beidou.xj_sync")
+    while True:
+        await asyncio.sleep(60)
+        try:
+            await _xj_sync_tick()
+        except Exception:  # noqa: BLE001  后台任务绝不炸掉主进程
+            logger.warning("璇玑定时同步轮次异常", exc_info=True)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     import asyncio
 
     await init_db()
     backup_task = asyncio.create_task(_auto_backup_loop())
+    xj_sync_task = asyncio.create_task(_xj_sync_loop())
     yield
     backup_task.cancel()
+    xj_sync_task.cancel()
 
 
 app = FastAPI(title="北斗 · AI 网文创作平台", lifespan=lifespan)
