@@ -852,6 +852,95 @@ async def test_push_anchors_on_xuanji_title_not_local_alias(sl, monkeypatch):
     assert fresh.title == "我的别名", "本地别名不得被回写流程改写（口径 a）"
 
 
+# ---------- ①b M8：format 原样透传（省略会被璇玑按默认 markdown 改写）----------
+
+
+@pytest.mark.parametrize(
+    "doc_extra,expect_format",
+    [
+        pytest.param({"format": "code"}, "code", id="code-原样透传"),
+        pytest.param({"format": "markdown"}, "markdown", id="markdown-原样透传"),
+        pytest.param({}, None, id="缺-format-键-不传"),
+        pytest.param({"format": None}, None, id="format-为-null-不传"),
+        pytest.param({"format": "  "}, None, id="format-纯空白-不传"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_push_passes_source_format_through(sl, monkeypatch, doc_extra, expect_format):
+    """M8：璇玑文档可能是 code/html 等非 markdown 格式——upsert **不带 format 会被按默认
+    markdown 改写**（真风险：作者只是改了正文，回写却顺手把文档类型改坏）。
+
+    故 format 按 getDocument 读回值原样透传；缺失 / null / 空串一律不传（省略即不改，
+    维持既有语义）。撤掉透传这五档全红。
+    """
+    doc = {
+        "id": 101,
+        "title": "世界观",
+        "content": "璇玑版",
+        "folderId": 7,
+        "updatedAt": _to_iso(3),
+        **doc_extra,
+    }
+    recorded = _patch_xuanji_call(monkeypatch, docs={101: doc})
+    cfg = await _make_config(sl)
+    item = await _make_item(sl, content="本地改过的正文", xj_local_dirty=True)
+
+    async with sl() as db:
+        out = await xj_sync.push_item_to_xuanji(await db.merge(item), await db.merge(cfg), db)
+
+    assert out == "pushed"
+    assert len(recorded["upserts"]) == 1
+    _, args = recorded["upserts"][0]
+    if expect_format is None:
+        assert "format" not in args, "无可用 format 就不传——传 None/空串同样会把文档格式改写掉"
+    else:
+        assert args["format"] == expect_format, "format 必须照读回值透传，改了就不是「只回写正文」"
+    assert args["content"] == "本地改过的正文", "透传 format 不该影响正文回写"
+    assert args["folderId"] == 7, "同一次 upsert 里 folderId 解析照旧"
+
+
+# ---------- ①c M6③：getDocument 缺 folderId 键 → 回退 getTree，且树里没有就不传 ----------
+
+
+@pytest.mark.parametrize(
+    "tree_documents,expect_folder",
+    [
+        pytest.param(
+            [{"id": 101, "title": "世界观", "folderId": 9, "updatedAt": _to_iso(3)}],
+            9,
+            id="树里有该文档-取到-9",
+        ),
+        pytest.param([], None, id="树里也没有-不传-folderId"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_push_folder_id_fallback_to_tree_when_document_lacks_key(
+    sl, monkeypatch, tree_documents, expect_folder
+):
+    """M6③：getDocument 响应体**缺 ``folderId`` 键**（上游形态漂移）才回退 ``getTree`` 找。
+
+    实测正常返回体总带该键（未归档为 null），故正常路径**零额外请求**；回退分支此前只有
+    代码没有盘上护栏，这里钉两档终局：树里命中 → 取到该 folderId；树里也没有 → 不传
+    （upsert 省略 folderId 不会清掉已有目录，传错的才是真风险）。
+    """
+    doc = {"id": 101, "title": "世界观", "content": "璇玑版", "updatedAt": _to_iso(3)}  # 故意无 folderId 键
+    recorded = _patch_xuanji_call(monkeypatch, documents=tree_documents, docs={101: doc})
+    cfg = await _make_config(sl)
+    item = await _make_item(sl, content="本地改过的正文", xj_local_dirty=True)
+
+    async with sl() as db:
+        out = await xj_sync.push_item_to_xuanji(await db.merge(item), await db.merge(cfg), db)
+
+    assert out == "pushed"
+    assert recorded["calls"].count("kb.getTree") == 1, "只在缺键时回退查一次树"
+    _, args = recorded["upserts"][0]
+    if expect_folder is None:
+        assert "folderId" not in args, "树里也没有 → 不传（省略即不动目录，绝不瞎猜）"
+    else:
+        assert args["folderId"] == expect_folder, "回退命中必须带上树里的 folderId"
+    assert args["title"] == "世界观", "回退分支不影响 E1 锚点"
+
+
 # ---------- ② 璇玑侧查无此文档 → missing + conflict ----------
 
 
@@ -1459,10 +1548,28 @@ async def test_push_read_failure_recovers_on_next_round(sl, monkeypatch):
 
 @pytest.mark.parametrize(
     "fail_count,expect_min",
-    [(0, 5), (1, 5), (2, 10), (3, 20), (4, 40), (5, 60), (6, 60), (99, 60)],
+    [
+        (0, 5),
+        (1, 5),
+        (2, 10),
+        (3, 20),
+        (4, 40),
+        (5, 60),
+        (6, 60),
+        (99, 60),
+        # N2 复核：非数字入参退回首档（`int("abc")` 抛 ValueError、`int(None)` 抛 TypeError），
+        # 浮点按截断整数档位走（3.5 → 3 次 → 20 分钟）
+        ("abc", 5),
+        (None, 5),
+        (3.5, 20),
+    ],
 )
 def test_backoff_minutes_table(fail_count, expect_min):
-    """M3 退避档位表：5 → 10 → 20 → 40 → 60（封顶 1h），任何入参都不越界。"""
+    """M3 退避档位表：5 → 10 → 20 → 40 → 60（封顶 1h），**任何入参**都落在 [5, 60]。
+
+    末三档是 N2 复核补的兜底：返回值同时喂给退避时刻与日志，脏计数最多退成 5 分钟，
+    不许把整跳调度抛崩。
+    """
     assert xj_sync._backoff_minutes(fail_count) == expect_min
 
 

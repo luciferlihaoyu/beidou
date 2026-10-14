@@ -172,7 +172,17 @@ def test_book_title_unified_across_boundaries():
 
 @pytest.mark.asyncio
 async def test_whitespace_title_sync_and_recall_agree(sl, monkeypatch):
-    """titles=[" 我欲成魔 "]：上传文档标题与召回检索词都等于「北斗·我欲成魔·设定集」（不再隐性空转）。"""
+    """书名接线跨边界（minor-1）：**异形 titles** 下上传标题与召回检索词一字不差。
+
+    两轮都走真实 ``_do_kb_sync``（上传）与真实 ``_recall_own_spec``（召回）：
+
+    - ① ``titles=[" 我欲成魔 "]``：strip 生效，两侧同为「北斗·我欲成魔·设定集」；
+    - ② ``titles=[None, "备选名"]``：跳过非串首项取备选名——两侧同为「北斗·备选名·设定集」。
+
+    ② 是关键一钉：它只在**上传与召回共用同一个 _book_title** 时成立。若召回侧退回
+    旧的本地口径（``str(titles[0]).strip()``），检索词会变成「北斗·None·设定集」，
+    而上传侧仍写「北斗·备选名·设定集」——同步成功却永远召不回（隐性空转）。
+    """
     recorded = _patch_xuanji(monkeypatch)
     user, p = await _make_project(sl)
     async with sl() as db:
@@ -200,6 +210,31 @@ async def test_whitespace_title_sync_and_recall_agree(sl, monkeypatch):
 
     assert out is not None, "上传用的标题必须能被召回侧精确命中"
     assert calls[0] == ("kb.searchDocuments", {"query": doc_title})
+
+    # ② 异形 titles：[None, "备选名"] → 两个边界都必须是「北斗·备选名·设定集」
+    recorded2 = _patch_xuanji(monkeypatch)  # 重新装假通道，拿到干净的上传记录
+    async with sl() as db:
+        p3 = await db.get(AiProject, p.id)
+        p3.book_spec_json = json.dumps({"titles": [None, "备选名"], "genre": "玄幻"})
+        kc_alt = (await db.execute(select(IntegrationConfig))).scalars().first()
+        await db.commit()
+
+        result2 = await extra._do_kb_sync(p3, kc_alt, db)
+
+    alt_title = "北斗·备选名·设定集"
+    assert result2["title"] == alt_title
+    assert recorded2["args"][0]["title"] == alt_title, "非串首项被抓成「None」就是这里红"
+
+    calls2 = _patch_xuanji_call(
+        monkeypatch, docs=[{"id": 4, "title": alt_title}], document={"title": alt_title, "content": "设定"}
+    )
+    async with sl() as db:
+        p4 = await db.get(AiProject, p.id)
+        kc3 = (await db.execute(select(IntegrationConfig))).scalars().first()
+        out2 = await factory._recall_own_spec(p4, kc3)
+
+    assert out2 is not None, "异形 titles 下上传的文档也必须召得回"
+    assert calls2[0] == ("kb.searchDocuments", {"query": alt_title}), "召回检索词必须与上传标题同源"
 
 
 @pytest.mark.asyncio

@@ -559,10 +559,13 @@ async def init_project(
             v = data.existing_spec.get(k)
             if isinstance(v, str) and v.strip():
                 kept[k] = v.strip()
-        # 书名：用户已定的书名放候选首位
+        # 书名：用户已定的书名放候选首位。只认**真正的字符串**首项——titles=[None]
+        # 经 str() 会写出字面量 "None"（prompt 里就成了「书名已定为「None」」，
+        # 下游 _book_title 虽会跳过非串项兜底 seed_prompt，但脏值不该从这一端进来）；
+        # 与 _default_kb_query 同一口径。
         titles_in = data.existing_spec.get("titles")
-        if isinstance(titles_in, list) and titles_in and str(titles_in[0]).strip():
-            kept["_title"] = str(titles_in[0]).strip()
+        if isinstance(titles_in, list) and titles_in and isinstance(titles_in[0], str) and titles_in[0].strip():
+            kept["_title"] = titles_in[0].strip()
 
     kept_line = ""
     if kept:

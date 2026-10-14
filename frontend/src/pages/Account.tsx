@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { DatabaseBackup, Download, KeyRound, Loader2, MoreHorizontal, PenLine, Plug, Plus, RefreshCw, Sparkles, Star, Trash2 } from "lucide-react";
+import { DatabaseBackup, Download, KeyRound, Loader2, MoreHorizontal, PenLine, Plug, Plus, RefreshCw, Sparkles, Star, Trash2, X } from "lucide-react";
 import { toast } from "sonner";
 import AppShell from "@/components/AppShell";
 import { api, xuanjiApi, type AIConfig, type IntegrationState, type XuanjiTree } from "@/lib/api";
@@ -172,10 +172,29 @@ export default function Account() {
     setIntegForm({ ...integForm, xj_sync_folders: [...ordered, ...orphans].join(",") });
   }
 
-  /** 立即全量同步：阻塞式接口（后端持同步锁跑完一轮），完成才回包——故只做 loading，不设超时。 */
+  /** 从白名单剔除一个名字（孤儿名专用：璇玑侧已改名/删目录，留着只会每轮空跑）。
+   *  与 toggleXjFolder 一样只改本地表单，落库仍由「保存集成配置」负责。 */
+  function removeXjFolder(name: string) {
+    const next = new Set(xjSelected);
+    next.delete(name);
+    setIntegForm({ ...integForm, xj_sync_folders: [...next].join(",") });
+  }
+
+  /** 立即全量同步：阻塞式接口（后端持同步锁跑完一轮），完成才回包——故只做 loading，不设超时。
+   *
+   *  批F #7：与 testAlist 同惯例——**先把手上的表单落库再打接口**。
+   *  否则「刚勾好文件夹/改了间隔就点立即同步」会拿库里的旧白名单跑一轮，
+   *  结果与用户眼前所见对不上（同步完还会把旧树刷新回来）。
+   *  存不下就中止（红 toast），绝不接着按旧配置跑。 */
   async function syncNow() {
     setXjSyncing(true);
     try {
+      try {
+        await api.put("/api/integrations", integForm);
+      } catch (e) {
+        toast.error(`集成配置未保存，已中止同步：${(e as Error).message}`);
+        return; // finally 仍会清 loading
+      }
       const r = await xuanjiApi.syncNow();
       toast.success(
         `新增 ${r.added} · 更新 ${r.updated} · 跳过 ${r.skipped} · 回写 ${r.pushed} · ` +
@@ -760,10 +779,24 @@ export default function Account() {
                       </p>
                     )}
                     {xjOrphanFolders.length > 0 && (
-                      <p className="text-xs text-muted-foreground">
-                        白名单里还有璇玑当前树中查不到的目录：{xjOrphanFolders.join("、")}
-                        （可能已改名或删除，原样保留不动）
-                      </p>
+                      /* 批F #4：孤儿名（白名单里有、当前树里查不到）此前只能靠「先勾一个别的再取消」
+                         绕出去，这里给每个名字一个 ✕ 直接剔除。只在拉过树时出现（没树就没有孤儿判定），
+                         故未拉树的小白名单路径维持原样。 */
+                      <div className="flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
+                        <span>白名单里还有璇玑当前树中查不到的目录（可能已改名或删除）：</span>
+                        {xjOrphanFolders.map((n) => (
+                          <button
+                            key={n}
+                            type="button"
+                            className="inline-flex items-center gap-0.5 rounded border border-border px-1.5 py-0.5 transition-colors hover:bg-muted hover:text-foreground"
+                            title="从白名单移除这个目录"
+                            onClick={() => removeXjFolder(n)}
+                          >
+                            {n}
+                            <X className="h-3 w-3" />
+                          </button>
+                        ))}
+                      </div>
                     )}
                   </div>
 

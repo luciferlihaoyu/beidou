@@ -30,6 +30,10 @@ import {
   type BatchEvent,
   type RetentionDashboard,
 } from "@/lib/api";
+// 批F #2：相对时间口径统一到 lib/utils 共享版（此前本文件自带一份本地实现，
+// 与资料库页的档位/兜底各写各的）。调用点是 `relTime(x) || "未同步"`，
+// 共享版返回 string|null，null 由同一个 `||` 兜住，无需改调用点。
+import { relTime } from "@/lib/utils";
 import { CoverDialog, SynopsisDialog } from "@/components/FactoryM5";
 import { Button } from "@/components/ui/button";
 import {
@@ -41,24 +45,6 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
-
-// 相对时间：刚过 / N 分钟前 / N 小时前 / N 天前，更久直接给日期。
-// 后端 last_kb_sync_at 是 datetime.now(timezone.utc).isoformat()，实际产出带 +00:00 后缀的 UTC 串；
-// 这里两个分支都兼容：已有 Z/偏移直接解析，历史裸串（无后缀）补 Z 按 UTC 解析。
-function relTime(iso: string): string {
-  if (!iso) return "";
-  const normalized = /Z$|[+-]\d{2}:\d{2}$/.test(iso) ? iso : `${iso}Z`;
-  const diff = Date.now() - new Date(normalized).getTime();
-  if (Number.isNaN(diff)) return "";
-  if (diff < 60_000) return "刚刚";
-  const mins = Math.floor(diff / 60_000);
-  if (mins < 60) return `${mins} 分钟前`;
-  const hours = Math.floor(mins / 60);
-  if (hours < 24) return `${hours} 小时前`;
-  const days = Math.floor(hours / 24);
-  if (days < 30) return `${days} 天前`;
-  return new Date(normalized).toLocaleDateString();
-}
 
 // ---------------- 批量连跑弹窗 ----------------
 

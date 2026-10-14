@@ -468,6 +468,9 @@ async def push_item_to_xuanji(item: LibraryItem, config: IntegrationConfig, db: 
     - 成功 → 清 ``xj_local_dirty``，基线刷新为**写入后回读**的 updatedAt
       （实测 upsert 返回体只有 ``{"id": N, "action": ...}``、**没有 updatedAt**，
       不回读的话下一轮会把自家刚推的内容当成「璇玑又变了」再覆盖一遍）
+
+    **M8 形态透传**：``document_upsert`` 省略 ``format`` 会按默认 markdown 改写文档格式，
+    非 markdown 文档（code/html…）被回写一次就毁了。故按读回的 ``format`` 原样透传。
     """
     from .routers.integrations import _xuanji_mcp
 
@@ -497,6 +500,13 @@ async def push_item_to_xuanji(item: LibraryItem, config: IntegrationConfig, db: 
     folder_id = await _resolve_folder_id(config, doc_id, current)
     if folder_id is not None:
         args["folderId"] = folder_id
+    # M8：璇玑 upsert 省略 format 时按默认（markdown）改写——源若是 code/html 等格式，
+    # 回写一次正文就顺手把文档类型改坏，故源带有效 format 时原样透传。口径与
+    # ai_factory._default_kb_query / 立项守卫一致：只认真字符串。源 format 缺失/空时
+    # 文档本处于默认态，省略＝维持改动前既有行为，不会更坏。
+    doc_format = current.get("format")
+    if isinstance(doc_format, str) and doc_format.strip():
+        args["format"] = doc_format
 
     try:
         await _xuanji_mcp(config, "document_upsert", args)
@@ -613,13 +623,19 @@ _BACKOFF_BASE_MIN = 5
 _BACKOFF_MAX_MIN = 60
 
 
-def _backoff_minutes(fail_count: int) -> int:
+def _backoff_minutes(fail_count) -> int:
     """连续失败 ``fail_count`` 次后应退避的分钟数：5 → 10 → 20 → 40 → 60（封顶 1h）。
 
-    纯函数（便于表驱动单测）。``fail_count`` 钳到 ``[1, 10]``：既让 0/负数按首档处理，
-    也避免 ``2 ** 大数`` 溢出。任何入参都落在 ``[5, 60]``。
+    纯函数（便于表驱动单测）。整数钳到 ``[1, 10]``：既让 0/负数按首档处理，
+    也避免 ``2 ** 大数`` 溢出。**非数字入参**（``None`` / 非数字串）也退回首档——
+    本函数的返回值同时喂给退避时刻与日志，宁可按最保守的 5 分钟退，也不能让一个
+    脏计数把整跳调度炸掉（`int("abc")` 会抛 ValueError、`int(None)` 抛 TypeError）。
+    任何入参都落在 ``[5, 60]``。
     """
-    tries = max(1, min(int(fail_count), 10))
+    try:
+        tries = max(1, min(int(fail_count), 10))
+    except (TypeError, ValueError):
+        return _BACKOFF_BASE_MIN
     return min(_BACKOFF_BASE_MIN * (2 ** (tries - 1)), _BACKOFF_MAX_MIN)
 
 

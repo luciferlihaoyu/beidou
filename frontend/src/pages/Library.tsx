@@ -96,8 +96,11 @@ export default function Library({ novelId }: { novelId?: number }) {
   const [xjQ, setXjQ] = useState("");
   const [xjPreview, setXjPreview] = useState<{ id: number; title: string; content: string } | null>(null);
   const [xjImporting, setXjImporting] = useState(false);
-  // 批F：行内冲突裁决的进行中条目 id（只锁这一行的两个按钮）
-  const [resolving, setResolving] = useState<number | null>(null);
+  // 批F：行内冲突裁决的进行中条目 id 集合（只锁对应行的两个按钮）。
+  // 批F #5：用 Set 而非单个 number|null——裁决是异步的，一条还没回来时用户完全可能
+  // 去点另一条；单值会被后一次 setResolving 覆盖，前一条回来时又把后一条的 loading 清掉，
+  // 两个按钮的禁用态与转圈就会互相踩踏（多行并发）。
+  const [resolving, setResolving] = useState<Set<number>>(new Set());
 
   const loadFolders = useCallback(() => {
     api
@@ -174,7 +177,7 @@ export default function Library({ novelId }: { novelId?: number }) {
    *  503（take_xuanji 读通道故障）→ 黄提示，本地零改动、可安全重试。
    */
   async function resolveConflict(item: LibraryItem, action: "keep_local" | "take_xuanji") {
-    setResolving(item.id);
+    setResolving((prev) => new Set(prev).add(item.id));
     try {
       const r = await xuanjiApi.resolveItem(item.id, action);
       if (r.outcome === "failed") {
@@ -190,7 +193,11 @@ export default function Library({ novelId }: { novelId?: number }) {
       if (err.status === 503) toast.warning("璇玑暂时不可读，请稍后重试", { duration: 8000 });
       else toast.error(err.message, { duration: 10000 });
     } finally {
-      setResolving(null);
+      setResolving((prev) => {
+        const next = new Set(prev);
+        next.delete(item.id); // 只摘自己这一条，别把别的行正在跑的裁决一起清掉
+        return next;
+      });
     }
   }
 
@@ -639,6 +646,10 @@ export default function Library({ novelId }: { novelId?: number }) {
                     tabIndex={0}
                     onClick={() => openItem(item)}
                     onKeyDown={(e) => {
+                      // 行内的「保留本地 / 取璇玑版」按钮按 Enter/空格时事件会冒泡到行外壳，
+                      // 不拦就会在裁决之外顺带把条目打开（按钮自己已经 stopPropagation，
+                      // 但键盘这条路径走的是 onKeyDown，故按「事件源必须是本行」放行）。
+                      if (e.target !== e.currentTarget) return;
                       if (e.key === "Enter" || e.key === " ") {
                         e.preventDefault();
                         openItem(item);
@@ -686,9 +697,8 @@ export default function Library({ novelId }: { novelId?: number }) {
                         {item.summary || item.content.slice(0, 40) || "（空）"}
                       </div>
                     )}
-                    {synced && (
-                      <div className="mt-0.5 text-[10px] text-muted-foreground">{sourceTip}</div>
-                    )}
+                    {/* 批F #6：源信息只留上面那行的 hover title，不再常显一份副文本
+                        （同一句话在行里出现两遍纯属噪声；rel 仍供 tooltip 用） */}
                     {item.tags && (
                       <div className="mt-1 flex flex-wrap gap-1">
                         {item.tags.split(",").filter(Boolean).slice(0, 3).map((t) => (
@@ -704,20 +714,20 @@ export default function Library({ novelId }: { novelId?: number }) {
                           size="sm"
                           variant="outline"
                           className="h-6 px-2 text-[11px]"
-                          disabled={resolving === item.id}
+                          disabled={resolving.has(item.id)}
                           onClick={(e) => {
                             e.stopPropagation();
                             void resolveConflict(item, "keep_local");
                           }}
                         >
-                          {resolving === item.id && <Loader2 className="mr-1 h-3 w-3 animate-spin" />}
+                          {resolving.has(item.id) && <Loader2 className="mr-1 h-3 w-3 animate-spin" />}
                           保留本地
                         </Button>
                         <Button
                           size="sm"
                           variant="outline"
                           className="h-6 px-2 text-[11px]"
-                          disabled={resolving === item.id}
+                          disabled={resolving.has(item.id)}
                           onClick={(e) => {
                             e.stopPropagation();
                             void resolveConflict(item, "take_xuanji");
