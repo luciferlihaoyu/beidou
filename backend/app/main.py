@@ -127,6 +127,12 @@ async def unified_health():
 
 # 静态托管前端构建产物（SPA 回退）
 static_dir = Path(settings.static_dir) if settings.static_dir else None
+# 前端入口 HTML 必须每次回源校验，否则浏览器会启发式缓存旧 index.html，
+# 导致部署新版本后用户仍拿到引用旧资源哈希的页面（表现为白屏或资源 404）。
+# 与天宫的 Cache-Control: no-cache 口径保持一致。
+# 注：/assets 下的文件名带内容哈希，可长期缓存，故仅对 SPA 回退响应加此头。
+_SPA_HTML_HEADERS = {"Cache-Control": "no-cache"}
+
 if static_dir and (static_dir / "index.html").exists():
     app.mount("/assets", StaticFiles(directory=static_dir / "assets"), name="assets")
 
@@ -143,5 +149,5 @@ if static_dir and (static_dir / "index.html").exists():
         root = static_dir.resolve()
         target = (static_dir / full_path).resolve()
         if full_path and target.is_relative_to(root) and target.is_file():
-            return FileResponse(target)
-        return FileResponse(static_dir / "index.html")
+            return FileResponse(target, headers=_SPA_HTML_HEADERS)
+        return FileResponse(static_dir / "index.html", headers=_SPA_HTML_HEADERS)
