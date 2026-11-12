@@ -155,75 +155,150 @@ async def _chat_text(
     # 思考型模型 3 分钟很正常，短超时会让用户看到「点了一键生成，过一会儿什么都没有」。
     # （解析器必须内联写在 AsyncClient(...) 实参处：AST 契约测试按调用点表达式钉超时。）
     async with httpx.AsyncClient(timeout=llm_timeouts.openai_timeout(llm_timeouts.json_seconds())) as client:
-        for attempt in range(2):
-            send_stream_options = attempt == 0
-            payload = {
-                "model": config.model,
-                "messages": [
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user_prompt},
-                ],
-                # FIX-6A：让边缘持续看到字节（CF 524 的根治），上游行逐帧累积。
-                "stream": True,
-                "max_tokens": max_tokens,
-            }
-            if send_stream_options:
-                # 精确 usage 随流尾帧回来；不认该字段的网关会回 4xx，下面据此回退。
-                payload["stream_options"] = {"include_usage": True}
-            async with client.stream("POST", url, json=payload, headers=headers) as resp:
-                if resp.status_code != 200:
-                    body = (await resp.aread()).decode(errors="ignore")[:200]
-                    if 400 <= resp.status_code < 500 and send_stream_options:
-                        continue  # 大概率是网关不认 stream_options：去掉重试一次
-                    raise HTTPException(502, f"AI 接口返回 {resp.status_code}: {body}")
-                content_type = (resp.headers.get("content-type") or "").lower()
-                if "text/event-stream" not in content_type:
-                    # 必须的兜底：网关忽略 stream 参数直接回 JSON → 原解析分支。
-                    return _content_from_json_response(await resp.aread(), config, usage_sink)
-                parts: list[str] = []
-                usage: dict = {}
-                try:
-                    async for line in resp.aiter_lines():
-                        if not line.startswith("data:"):
-                            continue
-                        data = line[5:].strip()
-                        if data == "[DONE]":
-                            break
-                        try:
-                            chunk = json.loads(data)
-                        except ValueError:
-                            continue
-                        if isinstance(chunk.get("usage"), dict):
-                            # include_usage 的用量帧（choices 为空），单独记账
-                            usage["prompt"] = usage.get("prompt", 0) + int(chunk["usage"].get("prompt_tokens") or 0)
-                            usage["completion"] = usage.get("completion", 0) + int(
-                                chunk["usage"].get("completion_tokens") or 0
+        first_round_measurements: dict | None = None
+        for budget_round in range(2):
+            request_max_tokens = max_tokens if budget_round == 0 else min(max_tokens * 2, 24000)
+            retry_for_reasoning = False
+            for attempt in range(2):
+                send_stream_options = attempt == 0
+                payload = {
+                    "model": config.model,
+                    "messages": [
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    # FIX-6A：让边缘持续看到字节（CF 524 的根治），上游行逐帧累积。
+                    "stream": True,
+                    "max_tokens": request_max_tokens,
+                }
+                if send_stream_options:
+                    # 精确 usage 随流尾帧回来；不认该字段的网关会回 4xx，下面据此回退。
+                    payload["stream_options"] = {"include_usage": True}
+                async with client.stream("POST", url, json=payload, headers=headers) as resp:
+                    if resp.status_code != 200:
+                        body = (await resp.aread()).decode(errors="ignore")[:200]
+                        if 400 <= resp.status_code < 500 and send_stream_options:
+                            continue  # 大概率是网关不认 stream_options：去掉重试一次
+                        raise HTTPException(502, f"AI 接口返回 {resp.status_code}: {body}")
+                    content_type = (resp.headers.get("content-type") or "").lower()
+                    if "text/event-stream" not in content_type:
+                        # 必须的兜底：网关忽略 stream 参数直接回 JSON → 原解析分支。
+                        return _content_from_json_response(await resp.aread(), config, usage_sink)
+                    parts: list[str] = []
+                    reasoning_parts: list[str] = []
+                    finish_reason: str | None = None
+                    usage: dict = {}
+                    try:
+                        async for line in resp.aiter_lines():
+                            if not line.startswith("data:"):
+                                continue
+                            data = line[5:].strip()
+                            if data == "[DONE]":
+                                break
+                            try:
+                                chunk = json.loads(data)
+                            except ValueError:
+                                continue
+                            if isinstance(chunk.get("usage"), dict):
+                                # include_usage 的用量帧（choices 为空），单独记账
+                                usage["prompt"] = usage.get("prompt", 0) + int(chunk["usage"].get("prompt_tokens") or 0)
+                                usage["completion"] = usage.get("completion", 0) + int(
+                                    chunk["usage"].get("completion_tokens") or 0
+                                )
+                            choices = chunk.get("choices") or []
+                            if not choices:
+                                continue
+                            choice = choices[0]
+                            if choice.get("finish_reason"):
+                                finish_reason = choice["finish_reason"]
+                            delta = choice.get("delta") or {}
+                            if delta.get("reasoning_content"):
+                                reasoning_parts.append(delta["reasoning_content"])
+                                continue  # 思考段丢弃，不计入正文
+                            piece = delta.get("content")
+                            if piece:
+                                parts.append(piece)
+                    except httpx.HTTPError as exc:
+                        # 中途断流：半截正文也整段弃用（半章落库=毒章节），统一按空内容报。
+                        logger.warning("_chat_text 流式中断（%s@%s）：%s", config.model, config.base_url, exc)
+                        parts = []
+                    if usage_sink is not None:
+                        usage_sink["prompt"] = usage_sink.get("prompt", 0) + usage.get("prompt", 0)
+                        usage_sink["completion"] = usage_sink.get("completion", 0) + usage.get("completion", 0)
+                    content = "".join(parts)
+                    if not content.strip():
+                        budget_exhausted = finish_reason == "length" or usage.get("completion", 0) >= request_max_tokens
+                        if budget_round == 0 and budget_exhausted and reasoning_parts:
+                            reasoning_chars = sum(len(part) for part in reasoning_parts)
+                            first_round_measurements = {
+                                "content": 0,
+                                "reasoning": reasoning_chars,
+                                "budget": request_max_tokens,
+                            }
+                            retry_budget = min(max_tokens * 2, 24000)
+                            logger.info(
+                                "_chat_text 推理耗尽，配置「%s」模型 %s：第一轮 content=0/reasoning=%s 字，"
+                                "重试预算=%s tokens",
+                                config.name,
+                                config.model,
+                                reasoning_chars,
+                                retry_budget,
                             )
-                        choices = chunk.get("choices") or []
-                        if not choices:
-                            continue
-                        delta = choices[0].get("delta") or {}
-                        if delta.get("reasoning_content"):
-                            continue  # 思考段丢弃，不计入正文
-                        piece = delta.get("content")
-                        if piece:
-                            parts.append(piece)
-                except httpx.HTTPError as exc:
-                    # 中途断流：半截正文也整段弃用（半章落库=毒章节），统一按空内容报。
-                    logger.warning("_chat_text 流式中断（%s@%s）：%s", config.model, config.base_url, exc)
-                    parts = []
-                if usage_sink is not None:
-                    usage_sink["prompt"] = usage_sink.get("prompt", 0) + usage.get("prompt", 0)
-                    usage_sink["completion"] = usage_sink.get("completion", 0) + usage.get("completion", 0)
-                content = "".join(parts)
-                if not content.strip():
-                    # 空响应以前直接返回 ""，上层解析失败后静默——界面表现就是
-                    # 「点了一键生成，过一会儿什么都没有」。这里必须给出可操作的原因。
-                    raise HTTPException(
-                        502,
-                        empty_output_error(config.name, config.model, config.base_url, stream=True),
-                    )
-                return content
+                            retry_for_reasoning = True
+                            break
+                        # 空响应以前直接返回 ""，上层解析失败后静默——界面表现就是
+                        # 「点了一键生成，过一会儿什么都没有」。这里必须给出可操作的原因。
+                        # FIX-9 复评 minor：只有**第二轮也确实是预算耗尽**时才附实测句；
+                        # 否则会谎报「思考约 0 字…预算已耗尽」（第二轮其实是别的故障）。
+                        measured = (
+                            {
+                                "reasoning_chars": sum(len(part) for part in reasoning_parts),
+                                "max_tokens": request_max_tokens,
+                            }
+                            if budget_round == 1
+                            and first_round_measurements is not None
+                            and budget_exhausted
+                            else {}
+                        )
+                        if budget_round == 1 and first_round_measurements is not None:
+                            logger.warning(
+                                "_chat_text 推理预算重试仍失败：配置「%s」模型 %s；"
+                                "第一轮预算=%s tokens，第一轮 content=%s/reasoning=%s 字；"
+                                "第二轮预算=%s tokens，第二轮 content=0/reasoning=%s 字",
+                                config.name,
+                                config.model,
+                                first_round_measurements.get("budget", max_tokens),
+                                first_round_measurements["content"],
+                                first_round_measurements["reasoning"],
+                                request_max_tokens,
+                                sum(len(part) for part in reasoning_parts),
+                            )
+                        raise HTTPException(
+                            502,
+                            empty_output_error(
+                                config.name,
+                                config.model,
+                                config.base_url,
+                                stream=True,
+                                **measured,
+                            ),
+                        )
+                    if budget_round == 1 and first_round_measurements is not None:
+                        logger.info(
+                            "_chat_text 推理预算重试成功：配置「%s」模型 %s；"
+                            "第一轮 content=%s/reasoning=%s 字，第二轮 content=%s/reasoning=%s 字；"
+                            "重试轮 usage 已另行入账",
+                            config.name,
+                            config.model,
+                            first_round_measurements["content"],
+                            first_round_measurements["reasoning"],
+                            len(content),
+                            sum(len(part) for part in reasoning_parts),
+                        )
+                    return content
+            if retry_for_reasoning:
+                continue
+            break
     # 不可达：两次尝试要么 return 要么 raise（回退仅一次）。
     raise HTTPException(502, "AI 接口调用失败：重试耗尽")
 
@@ -1531,7 +1606,7 @@ async def _ensure_min_words(
     system: str,
     text: str,
     target_words: int,
-    max_tokens: int = 6000,
+    max_tokens: int = 16000,
     usage_sink: dict | None = None,
 ) -> str:
     """FIX-8A（夜跑/批量路径）：生成后字数低于硬下限 → 流式续写一轮并拼接。
@@ -1673,7 +1748,9 @@ async def generate_chapter(
         except Exception:  # noqa: BLE001  善后写库失败不能把 SSE 也带崩
             logger.exception("逐章生成善后写库失败（job=%s）", job_pk)
 
-    resp = await _stream_openai(None, None, prepare=_prepare, on_error=_on_error)
+    # FIX-9：章节生成显式给预算 16000（首轮）→ 推理耗尽时翻倍到 24000。
+    # 不传预算 = 不限长，那会让思维链模型把预算吃光后正文 0 字（根因实测 16000 仍不够）。
+    resp = await _stream_openai(None, None, prepare=_prepare, on_error=_on_error, max_tokens=16000)
     # 包一层登记：生成期间登记、客户端一断开就注销，避免自动解锁误伤正在生成的章节。
     # 必须**先把原迭代器取出来**再换包：把 resp 直接传进去时，包装器过去是在迭代
     # 那一刻才惰性读 inner.body_iterator，而那时它已被换成包装器自己 → 迭代自己 →
@@ -2006,7 +2083,8 @@ async def _topup_stream(iterator, job_id: int, target_words: int, config_box: li
             {"role": "user", "content": _continuation_prompt(written, target_words, have)},
         ]
         # _stream_openai 返回 StreamingResponse，取其 body_iterator（与 generate_chapter 同姿势）
-        cont_stream = (await _stream_openai(config, messages)).body_iterator
+        # FIX-9：补足轮同样要预算（思维链模型会把预算吃光 → 正文 0 字 → 补足失败）。
+        cont_stream = (await _stream_openai(config, messages, max_tokens=16000)).body_iterator
         got_any = False
         aborted = False
         try:

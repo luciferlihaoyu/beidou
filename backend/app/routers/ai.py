@@ -168,8 +168,18 @@ async def _stream_openai(
     on_complete=None,
     prepare=None,
     on_error=None,
+    max_tokens: int | None = None,
 ):
     """以 SSE 形式转发 OpenAI 兼容接口的流式响应。
+
+    max_tokens: **默认 None = 完全沿用旧行为**（payload 不带 max_tokens，也不做
+    FIX-9 的预算翻倍重试）。FIX-9 复评的重大发现：给这个共享函数统一套 8000
+    上限，会把「整章润色」这类长输出静默截断（输入允许 15000 字、要求返回全文），
+    而已有正文时又不触发重试、照样发 done——前端会把截断当完整结果。
+    因此预算只由**明确需要它的调用点**显式传入：
+      - UI 章节生成 / 补足：16000（重试翻倍到 24000）
+      - 整章润色 polish：24000（按允许的最大输入给足）
+    其余调用方（对话、续写、大纲建议、审查、AI-assist、技能卡）保持旧行为。
 
     on_complete: 可选异步回调，流正常结束后收到完整回复文本（用于保存对话历史）。
     prepare:     可选的异步准备函数（「先回包、再干活」的关键）。提供时，本函数
@@ -211,13 +221,22 @@ async def _stream_openai(
                 async with httpx.AsyncClient(
                     timeout=llm_timeouts.openai_timeout(llm_timeouts.stream_read_seconds())
                 ) as client:
-                    async with client.stream("POST", url, json=payload, headers=headers) as resp:
-                        if resp.status_code != 200:
-                            body = (await resp.aread()).decode(errors="ignore")[:300]
-                            await queue.put(("fatal", f"AI 接口返回 {resp.status_code}: {body}"))
+                    request_payload = payload
+                    for _attempt in range(2):
+                        async with client.stream("POST", url, json=request_payload, headers=headers) as resp:
+                            if resp.status_code != 200:
+                                body = (await resp.aread()).decode(errors="ignore")[:300]
+                                if 400 <= resp.status_code < 500 and "stream_options" in request_payload:
+                                    # 与 _chat_text 同口径：老网关不认 include_usage 时去掉字段重发，
+                                    # 这只是协议兼容回退，不是 FIX-9 的预算翻倍，max_tokens 保持不变。
+                                    request_payload = dict(request_payload)
+                                    request_payload.pop("stream_options")
+                                    continue
+                                await queue.put(("fatal", f"AI 接口返回 {resp.status_code}: {body}"))
+                                return
+                            async for line in resp.aiter_lines():
+                                await queue.put(("line", line))
                             return
-                        async for line in resp.aiter_lines():
-                            await queue.put(("line", line))
             except httpx.HTTPError as exc:
                 await queue.put(("fatal", f"无法连接 AI 接口: {exc.__class__.__name__}"))
             except asyncio.CancelledError:
@@ -288,46 +307,143 @@ async def _stream_openai(
             yield f"data: {json.dumps({'stage': 'model', 'model': cfg.model}, ensure_ascii=False)}\n\n"
 
         url = _normalize_base(cfg.base_url) + "/v1/chat/completions"
-        payload = {"model": cfg.model, "messages": msgs, "stream": True}
         headers = {"Authorization": f"Bearer {cfg.api_key}"}
+        first_round_measurements: dict | None = None
 
-        # 3) 上游等待 + 静默心跳：走 app/sse 的公共骨架（batch 复用同一件，别再各写一份）
-        stream = paced_upstream(lambda q: pump(q, url, payload, headers), keepalive=keepalive)
-        try:
-            async for kind, item in stream:
-                if kind == "idle":
-                    yield ": keepalive\n\n"
-                    continue
-                if kind == "eof":
-                    upstream_ok = True
-                    continue
-                if kind == "fatal":
-                    yield await settle(item)
-                    return
-                line = item or ""
-                if not line.startswith("data:"):
-                    continue
-                data = line[5:].strip()
-                if data == "[DONE]":
-                    continue
-                try:
-                    chunk = json.loads(data)
-                    delta = chunk["choices"][0].get("delta", {}).get("content")
-                except (json.JSONDecodeError, KeyError, IndexError, TypeError):
-                    continue
-                if delta:
-                    parts.append(delta)
-                    yield f"data: {json.dumps({'content': delta}, ensure_ascii=False)}\n\n"
-        finally:
-            # 关掉骨架即取消 pump：客户端断开时别留一个正等上游（最长 15 分钟）的任务在跑
-            await stream.aclose()
+        # 3) 上游等待 + 静默心跳：走 app/sse 的公共骨架（batch 复用同一件，别再各写一份）。
+        # FIX-9B：首轮预算被 reasoning 吃光时整请求重试一次；两轮共用这一条 SSE，
+        # 第二轮只透传 content，绝不重发 connected/done，前端无须感知预算切换。
+        for budget_round in range(2 if max_tokens else 1):
+            request_max_tokens = max_tokens if budget_round == 0 else min(max_tokens * 2, 24000)
+            payload = {
+                "model": cfg.model,
+                "messages": msgs,
+                "stream": True,
+                "stream_options": {"include_usage": True},
+            }
+            if request_max_tokens is not None:
+                # 只有显式给了预算才发这个字段（None = 旧行为，不限长）。
+                payload["max_tokens"] = request_max_tokens
+            round_parts: list[str] = []
+            reasoning_parts: list[str] = []
+            finish_reason: str | None = None
+            usage: dict = {}
+            upstream_ok = False
+            stream = paced_upstream(lambda q: pump(q, url, payload, headers), keepalive=keepalive)
+            try:
+                async for kind, item in stream:
+                    if kind == "idle":
+                        yield ": keepalive\n\n"
+                        continue
+                    if kind == "eof":
+                        upstream_ok = True
+                        continue
+                    if kind == "fatal":
+                        yield await settle(item)
+                        return
+                    line = item or ""
+                    if not line.startswith("data:"):
+                        continue
+                    data = line[5:].strip()
+                    if data == "[DONE]":
+                        continue
+                    try:
+                        chunk = json.loads(data)
+                    except json.JSONDecodeError:
+                        continue
+                    if isinstance(chunk.get("usage"), dict):
+                        usage["completion"] = int(chunk["usage"].get("completion_tokens") or 0)
+                    choices = chunk.get("choices") or []
+                    if not choices:
+                        continue
+                    choice = choices[0]
+                    if choice.get("finish_reason"):
+                        finish_reason = choice["finish_reason"]
+                    delta = choice.get("delta") or {}
+                    if delta.get("reasoning_content"):
+                        reasoning_parts.append(delta["reasoning_content"])
+                    content = delta.get("content")
+                    if content:
+                        parts.append(content)
+                        round_parts.append(content)
+                        yield f"data: {json.dumps({'content': content}, ensure_ascii=False)}\n\n"
+            finally:
+                # 关掉骨架即取消 pump：客户端断开时别留一个正等上游（最长 15 分钟）的任务在跑
+                await stream.aclose()
 
-        if not parts:
-            # 上游 200 但零增量：以前这里只发 done，前端「无错也无字」。报出
-            # 「哪个配置/模型/端点」，用户才知道该改哪一样。
-            # 日志由 error_chunk 统一打一条，这里不再重复打（同一次失败两条 warning 是噪音）。
-            yield await settle(empty_output_error(cfg.name, cfg.model, cfg.base_url, stream=True))
-            return
+            if not "".join(round_parts).strip():
+                # 预算耗尽判据：finish_reason=length，或 usage 用量已经打满本轮预算。
+                budget_exhausted = finish_reason == "length" or (
+                    request_max_tokens is not None and usage.get("completion", 0) >= request_max_tokens
+                )
+                # 没有显式预算（None）就没有第二轮可翻倍——此时必须直接报错，
+                # 不能 continue 把空正文当成功 done 发出去。
+                if (
+                    budget_round == 0
+                    and max_tokens is not None
+                    and budget_exhausted
+                    and reasoning_parts
+                ):
+                    reasoning_chars = sum(len(part) for part in reasoning_parts)
+                    first_round_measurements = {
+                        "content": 0,
+                        "reasoning": reasoning_chars,
+                        "budget": request_max_tokens,
+                    }
+                    logger.info(
+                        "_stream_openai 推理耗尽，配置「%s」模型 %s：第一轮 content=0/reasoning=%s 字，"
+                        "重试预算=%s tokens",
+                        cfg.name,
+                        cfg.model,
+                        reasoning_chars,
+                        min(max_tokens * 2, 24000),
+                    )
+                    continue
+                # 上游 200 但零增量：以前这里只发 done，前端「无错也无字」。报出
+                # 「哪个配置/模型/端点」，用户才知道该改哪一样。
+                # 日志由 error_chunk 统一打一条，这里不再重复打（同一次失败两条 warning 是噪音）。
+                # FIX-9 复评 minor：只有**第二轮也确实是预算耗尽**时才附实测句，
+                # 否则会谎报「思考约 0 字…预算已耗尽」（第二轮其实是别的故障）。
+                measured = (
+                    {
+                        "reasoning_chars": sum(len(part) for part in reasoning_parts),
+                        "max_tokens": request_max_tokens,
+                    }
+                    if budget_round == 1
+                    and first_round_measurements is not None
+                    and budget_exhausted
+                    else {}
+                )
+                if budget_round == 1 and first_round_measurements is not None:
+                    logger.warning(
+                        "_stream_openai 推理预算重试仍失败：配置「%s」模型 %s；"
+                        "第一轮预算=%s tokens，第一轮 content=%s/reasoning=%s 字；"
+                        "第二轮预算=%s tokens，第二轮 content=0/reasoning=%s 字",
+                        cfg.name,
+                        cfg.model,
+                        first_round_measurements.get("budget", max_tokens),
+                        first_round_measurements["content"],
+                        first_round_measurements["reasoning"],
+                        request_max_tokens,
+                        sum(len(part) for part in reasoning_parts),
+                    )
+                yield await settle(
+                    empty_output_error(cfg.name, cfg.model, cfg.base_url, stream=True, **measured)
+                )
+                return
+            if budget_round == 1 and first_round_measurements is not None:
+                logger.info(
+                    "_stream_openai 推理预算重试成功：配置「%s」模型 %s；"
+                    "第一轮 content=%s/reasoning=%s 字，第二轮 content=%s/reasoning=%s 字",
+                    cfg.name,
+                    cfg.model,
+                    first_round_measurements["content"],
+                    first_round_measurements["reasoning"],
+                    sum(len(part) for part in round_parts),
+                    sum(len(part) for part in reasoning_parts),
+                )
+            break
+
         yield f"data: {json.dumps({'done': True, 'chars': sum(len(x) for x in parts)})}\n\n"
         if upstream_ok and on_complete is not None:
             try:
@@ -671,4 +787,6 @@ async def quick_action(
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": context + "\n\n" + prompt},
     ]
-    return await _stream_openai(config, messages)
+    # 整章润色要返回**全文**（输入允许 15000 字）：给足预算，绝不能被默认上限静默截断。
+    # 其余动作（续写/大纲建议/审查）沿用旧行为：不传预算 = 不限长。
+    return await _stream_openai(config, messages, max_tokens=24000 if action == "polish" else None)

@@ -117,7 +117,15 @@ def classify_failure(raw: str | None) -> FailureInfo:
     return FailureInfo(code=code, title=title, hint=hint, raw=text)
 
 
-def empty_output_error(config_name: str, model: str, base_url: str, *, stream: bool) -> str:
+def empty_output_error(
+    config_name: str,
+    model: str,
+    base_url: str,
+    *,
+    stream: bool,
+    reasoning_chars: int | None = None,
+    max_tokens: int | None = None,
+) -> str:
     """「模型一个字符都没返回」的统一文案（纯函数，流式/非流式两条路复用）。
 
     为什么要单独造这句话：这两条路以前都是**静默**的——流式只发 done、非流式
@@ -128,10 +136,14 @@ def empty_output_error(config_name: str, model: str, base_url: str, *, stream: b
     措辞含「空内容」以便 classify_failure 归到 empty_output 类，给出配套建议。
     """
     channel = "流式" if stream else "非流式"
+    measured = ""
+    if reasoning_chars is not None and max_tokens is not None:
+        measured = f"本次模型思考约 {reasoning_chars} 字仍未输出正文（预算 {max_tokens} tokens 已耗尽）。"
     return (
         f"模型返回空内容（{channel}）：配置「{config_name}」的模型 {model}"
         f"（端点 {base_url}）一个字符都没回来。常见原因：该端点不提供这个模型名、"
         "该模型只回推理过程不输出正文（推理模型需换非推理模型）、或账号额度已用尽。"
         "请到「设置 → AI 配置」重新拉取模型列表并选一个确实存在的模型，"
         "或在项目设置 →「模型路由」里改掉这个路由后重试。"
+        f"{measured}"
     )

@@ -370,7 +370,7 @@ async def batch_run(
                         # 异常语义不变：仍由下面的 except 兜住「改写失败就用原稿」。
                         rewrite_box: list = []
                         async for _frame in _hb(
-                            _chat_text(summary_llm, _SYSTEM, deflavor_rewrite_prompt(text, report), max_tokens=6000),
+                            _chat_text(summary_llm, _SYSTEM, deflavor_rewrite_prompt(text, report), max_tokens=16000),
                             rewrite_box,
                         ):
                             yield _frame
@@ -589,7 +589,7 @@ async def revise_chapter(project_id: int, job_id: int, user: User = Depends(get_
         f"原文：\n{text[:12000]}"
     )
     usage: dict = {}
-    raw = await _chat_text(config, _SYSTEM, prompt, max_tokens=8000, usage_sink=usage)
+    raw = await _chat_text(config, _SYSTEM, prompt, max_tokens=16000, usage_sink=usage)
     _record_usage(p, usage.get("prompt", 0), usage.get("completion", 0))
     revised = raw.strip()
     if len(revised) < len(text) * 0.3:
@@ -646,7 +646,7 @@ async def deflavor_chapter(project_id: int, job_id: int, user: User = Depends(ge
     from ..anti_llm import deflavor_rewrite_prompt
 
     usage2: dict = {}
-    raw = await _chat_text(config, _SYSTEM, deflavor_rewrite_prompt(text, before), max_tokens=8000, usage_sink=usage2)
+    raw = await _chat_text(config, _SYSTEM, deflavor_rewrite_prompt(text, before), max_tokens=16000, usage_sink=usage2)
     _record_usage(p, usage2.get("prompt", 0), usage2.get("completion", 0))
     rewritten = raw.strip()
     if len(rewritten) < len(text) * 0.3:

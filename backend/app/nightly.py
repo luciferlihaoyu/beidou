@@ -158,7 +158,12 @@ async def _generate_chapter(p: AiProject, novel: Novel, job: AiChapterJob, chapt
     # 整章生成统一走 _chat_text（FIX-6A 后其内部向上游请求流式并累积 delta）：
     # 夜跑虽然没人看流，但边缘（Cloudflare，524=源站 100 秒无响应）只认
     # 「字节是否在动」——整包一次性返回的思考型模型必被 100 秒掐断（job 5/6/7 实证）。
-    text = await _chat_text(chapter_llm, system, context, max_tokens=8000)
+    # FIX-9：章节首轮预算给到 16000（推理耗尽时 _chat_text 内部翻倍到 24000）。
+    # 根因实测：思维链模型写 2000 字章节时 reasoning 可达 ~29k 字符，8000 预算
+    # 会被推理吃光 → content=0 → 报「模型返回空内容（流式）」。
+    # usage_sink：拿到精确用量就不再靠粗估（粗估只作精确值的兜底，二者不叠加）。
+    gen_usage: dict = {}
+    text = await _chat_text(chapter_llm, system, context, max_tokens=16000, usage_sink=gen_usage)
     text = text.strip()
     if len(text) < 100:
         job.status = "failed"
@@ -188,9 +193,19 @@ async def _generate_chapter(p: AiProject, novel: Novel, job: AiChapterJob, chapt
     # AI 味检测 + 自动改写（与 batch_run 同阈值）
     report = detect(text)
     rewritten = False
+    rewrite_usage: dict = {}
     if report["score"] < 70:
         try:
-            new_text = (await _chat_text(summary_llm, _SYSTEM, deflavor_rewrite_prompt(text, report), max_tokens=8000)).strip()
+            # FIX-9：整章改写同样是长输出，给 16000 预算（推理耗尽时自动翻倍 24000）。
+            new_text = (
+                await _chat_text(
+                    summary_llm,
+                    _SYSTEM,
+                    deflavor_rewrite_prompt(text, report),
+                    max_tokens=16000,
+                    usage_sink=rewrite_usage,
+                )
+            ).strip()
             if len(new_text) >= len(text) * 0.5:
                 text = new_text
                 rewritten = True
@@ -226,13 +241,20 @@ async def _generate_chapter(p: AiProject, novel: Novel, job: AiChapterJob, chapt
     except Exception:  # noqa: BLE001
         pass
 
-    # 成本账本（粗估）+ 补足轮精确用量（复评顺手 5：续写轮不再漏计）
-    est_prompt = _estimate_tokens(context) + _estimate_tokens(text[:4000])
-    est_completion = _estimate_tokens(text) + 120
-    if rewritten:
-        est_prompt += _estimate_tokens(text[:8000])
-        est_completion += _estimate_tokens(text)
-    _record_usage(p, est_prompt, est_completion)
+    # 成本账本（FIX-9）：**有精确 usage 用精确、没有才退回粗估**，两者不叠加（不双算）。
+    # 补足轮与改写轮的精确用量同样优先。
+    if gen_usage.get("completion"):
+        _record_usage(p, int(gen_usage.get("prompt", 0)), int(gen_usage.get("completion", 0)))
+    else:
+        est_prompt = _estimate_tokens(context) + _estimate_tokens(text[:4000])
+        est_completion = _estimate_tokens(text) + 120
+        if rewritten:
+            est_prompt += _estimate_tokens(text[:8000])
+            est_completion += _estimate_tokens(text)
+        _record_usage(p, est_prompt, est_completion)
+    if rewritten and not rewrite_usage.get("completion"):
+        # 改写轮没有精确用量（网关不回 usage）时，才补一次估算
+        _record_usage(p, _estimate_tokens(text[:8000]), _estimate_tokens(text))
     if topup_usage:
         _record_usage(p, int(topup_usage.get("prompt", 0)), int(topup_usage.get("completion", 0)))
     await db.commit()

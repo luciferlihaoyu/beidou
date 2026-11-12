@@ -396,7 +396,7 @@ async def inner_stream(pieces, *, error=None, with_done=True):
 def fake_stream_openai(rounds, calls):
     """按调用次序返回预设轮次的 _stream_openai 替身（每轮 connected→content…→done）。"""
 
-    async def fake(config, messages, on_complete=None, prepare=None, on_error=None):
+    async def fake(config, messages, on_complete=None, prepare=None, on_error=None, max_tokens=None):
         calls.append({"config": config, "messages": messages})
         idx = min(len(calls) - 1, len(rounds) - 1)
 
@@ -492,7 +492,7 @@ class TestTopupStream:
         """补足轮上游失败：不算失败——正文已有，error 不透传，最后照发 done。"""
         first = ["开头只有这么一点。"]
 
-        async def failing_fake(config, messages, on_complete=None, prepare=None, on_error=None):
+        async def failing_fake(config, messages, on_complete=None, prepare=None, on_error=None, max_tokens=None):
             async def gen():
                 yield sse_frame(stage="connected")
                 yield sse_frame(error="上游 502")
