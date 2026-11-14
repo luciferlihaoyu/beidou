@@ -551,3 +551,78 @@ async def export_pack(project_id: int, user: User = Depends(get_current_user), d
     filename = f"投稿包_{_safe_name(novel.title)}_{datetime.now().strftime('%Y%m%d')}.zip"
     headers = {"Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}"}
     return StreamingResponse(io.BytesIO(data), media_type="application/zip", headers=headers)
+
+
+@router.get("/projects/{project_id}/deai-report")
+async def deai_report_html(
+    project_id: int,
+    chapter_id: int,
+    with_reviewer: bool = False,
+    probe_logprobs: bool = False,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """t8：单章 AI 味检测报告，返回**自包含单文件 HTML**（双击可开、Ctrl+P 可存 PDF）。
+
+    两个开关默认都**关**，理由不是省事，是诚实与成本：
+    - `with_reviewer` 关 → 审校师那一路不调模型，报告会显示「未启用」而不是空白，
+      用户看到的覆盖率是 1/3，**明说只有规则路参与**；
+    - `probe_logprobs` 关 → 不向端点发探测请求（当前默认模型探测不到 logprobs，
+      发了也是 skipped，白等一次网络往返）。
+    要三路齐就显式打开——打开的是真金白银的 token。
+    """
+    from datetime import datetime as _dt
+    from urllib.parse import quote  # export_pack 里是函数内导入，模块级没有这个名字
+
+    from fastapi.responses import StreamingResponse  # 同上：这个文件的导出范式都在函数内导入
+
+    from ..deai_report import build_report_html
+    from ..deai_signals import collect_signals
+    from ..models import Chapter, Novel
+
+    p = await _get_project(project_id, user, db)
+    chapter = await db.get(Chapter, chapter_id)
+    if chapter is None or (p.novel_id and chapter.novel_id != p.novel_id):
+        raise HTTPException(404, "章节不存在，或不属于本项目")
+
+    # 书名在 Novel 上：AiProject **没有** title 列。先前写 getattr(p, "title", "")
+    # 会永远静默退化成「项目 7」，报告标题全是占位串（碧霄自查发现，非评审提出）。
+    novel = await db.get(Novel, p.novel_id) if p.novel_id else None
+    book_title = (getattr(novel, "title", "") or "").strip()
+
+    text = strip_html(chapter.content or "")
+    if not text.strip():
+        raise HTTPException(400, "本章正文为空，没有可检测的内容")
+
+    issues = None
+    score_result = None
+    from ..anti_llm import detect as _detect
+
+    score_result = _detect(text)
+    issues = score_result.get("issues")
+
+    config = None
+    chat_fn = None
+    if with_reviewer or probe_logprobs:
+        config = await _pick_config(user, db, p.summary_llm)
+    if with_reviewer:
+        async def chat_fn(system: str, prompt: str) -> str:
+            return await _chat_text(config, system, prompt, max_tokens=1500)
+
+    result = await collect_signals(text, config=config if probe_logprobs else None, chat_fn=chat_fn)
+
+    meta = {
+        "project_id": p.id,
+        "book_title": book_title or f"项目 {p.id}",
+        "chapter_no": chapter.sort_order,
+        "chapter_title": chapter.title,
+        "text": text,
+        "issues": issues,
+        # 时钟**由调用方传**，报告生成层不取 now()——这样同一章两次产出可比对
+        # （判据 tests/test_deai_report.py::test_no_clock_or_randomness_imported）
+        "generated_at": _dt.now().strftime("%Y-%m-%d %H:%M"),
+    }
+    html = build_report_html(result, meta)
+    filename = f"AI味检测_{_safe_name(meta['book_title'])}_第{chapter.sort_order}章.html"
+    headers = {"Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}"}
+    return StreamingResponse(iter([html.encode("utf-8")]), media_type="text/html; charset=utf-8", headers=headers)
