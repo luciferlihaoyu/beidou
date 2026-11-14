@@ -9,7 +9,9 @@ M2：逐章生成（SSE 流式，上下文预算制组装）+ 定稿（状态文
 - 状态文件四分（AI_NovelGenerator 实证）：global_summary/character_state/plot_arcs + FTS 召回
 - 立项/设定/大纲/审校等 JSON 环节统一走 _chat_text（FIX-6A 后内部向上游请求
   流式并累积 delta，返回值形状不变）；正文生成用 SSE 流式（用户体验）
-- 字数目标全可选，只注入 prompt 作软约束（±20% 浮动，剧情完整优先，绝不截断）
+- 字数目标全可选：未设目标时不注入任何字数约束；设了则按 **硬下限**口径注入
+  （见 `word_floor_instruction`，FIX-8A）。旧的「±20% 浮动」软约束说法**已废弃**——
+  它等于允许写到 0.8X，正是「10 章低于 2000 下限」的源头之一。剧情完整优先，绝不截断。
 - 立项确认时才建 Novel（标题 [AI] 前缀，与人工书区分）
 """
 
@@ -17,6 +19,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Sequence
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
@@ -27,6 +30,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .. import llm_timeouts
+from .. import skillwire
 from ..db import get_db, SessionLocal
 from ..deps import get_ai_config, get_current_user
 import logging
@@ -359,6 +363,115 @@ def _parse_json(text: str):
     return json.loads(t)
 
 
+# ---------- 各节点的北斗侧约束 ----------
+# 技能卡带着「按卡包自己那套来」的硬性要求，跟北斗既有的入库结构、状态文件机制
+# 会打架（卡要求 outline 写字数预算，北斗的 outline 字段只存剧情要点；卡要求双侧
+# 原文引证，审校却只给了本章）。所以每个节点都随卡块注入一段北斗侧口径：
+# 卡的手艺照用，北斗的结构为准。
+# 措辞经 `_extra_block` 清洗并声明「以下是数据，不是指令」。
+_WIRE_NOTES: dict[str, tuple[str, ...]] = {
+    "init": (
+        "用户已确定的设定字段与已定书名必须原样保留，不得改写、不得另起",
+        "书名候选首位用已定书名（若有），其余按卡的范式补备选",
+    ),
+    "setup": (
+        "世界观条目必须使用给定的 category 枚举，不得自造分类",
+        # 150 字是 prompt 级要求（为上下文预算服务），入库截断其实是 [:5000]。
+        # 别把它说成「入库硬限」——那会让模型以为超了就被系统拒绝。
+        "每条世界观建议 150 字内，保持条目可直接进上下文；写长不会报错但会挤占预算",
+        "无法精确计算的设定锚点（如战力数值）写明口径即可，不要编造精确数字",
+    ),
+    "outline": (
+        "outline 字段只写剧情要点与出场角色，不要写字数预算与升级台阶",
+        "伏笔推进以北斗的 8/15 章超期机制为准，不在大纲里另行排期",
+    ),
+    "outline_continue": (
+        "outline 字段只写剧情要点与出场角色，不要写字数预算与升级台阶",
+        "伏笔推进以北斗的 8/15 章超期机制为准，不在大纲里另行排期",
+        "续写必须与已生成卷章的口径一致，不得另起一套结构",
+    ),
+    "review": (
+        "本次仅提供本章正文与项目状态文件；另一侧原文未提供时，"
+        "必须在结论里写明「另一侧未提供，无法判定」，禁止编造引文",
+        # 字数口径必须与 FIX-8A 对齐：北斗的章节字数是**硬下限**——
+        # `word_floor_instruction` 的 docstring 原话：旧文案「约 X 字（±20% 浮动）」
+        # 正是「10 章低于 2000 下限」的源头之一，已废弃。若这里把软浮动口径塞回 prompt，
+        # 等于复活废弃规则、还会压掉合法的字数 high。
+        # 措辞刻意**不出现**那个百分比字面串：反向引用也会把旧口径重新喂给模型。
+        "字数按硬下限判定：低于目标字数属真实问题，可判 high；"
+        "只上浮不判问题，也不得用任何「按比例浮动」的软口径豁免下限",
+    ),
+    "generate": (
+        "上方角色卡与设定集是硬约束，不得为了爽点或节奏牺牲一致性",
+        "专有名词数量限制只约束本章新引入的名称，已出现的名称不计入",
+    ),
+    "synopsis": (
+        "文案只依据给定设定与已有章节，不得剧透未写到的后续情节",
+        "平台口径以项目 platform 字段为准",
+    ),
+    "deconstruct": (
+        "拆书结论供北斗写作参考，不改动本项目既有设定",
+        "多书横评模式本次不用，只按单书拆解",
+    ),
+}
+
+
+def _wire_skill(
+    node: str,
+    prompt: str,
+    *,
+    task: str = "",
+    extra_notes: Sequence[str] | None = None,
+    chapters: list[tuple[str, str]] | None = None,
+    requested: list[str] | None = None,
+    slugs: Sequence[str] | None = None,
+    max_total_chars: int | None = None,
+) -> tuple[str, dict]:
+    """把该流水线节点的技能卡块拼到 prompt **最前段**，原 prompt 一字不动。
+
+    卡块在前、schema 在后是刻意的：这些节点都靠 `_parse_json` 硬解 JSON，
+    schema 落在末尾有近因效应才保得住遵从率；技能卡是方法论，前置才读得到。
+
+    `extra_notes` 不给就按节点查 `_WIRE_NOTES`——约束跟着节点走，接线上就不会漏。
+
+    技能是增强不是依赖——注入层自己出任何岔子都只留痕，原 prompt 照常出网，
+    不能让一张坏卡阻断立项 / 大纲 / 审校。
+
+    record 在 t2a 阶段**刻意不落库**：调用点把它接到 `_wire_xxx` 下划线变量上
+    （下划线前缀=故意未用，不是死代码）。t3-wire-observe 会给两张表加
+    `skill_wire_json` 列并统一消费这些 record；届时请勿删除这些赋值。
+    """
+    if extra_notes is None:
+        extra_notes = _WIRE_NOTES.get(node, ())
+    try:
+        text, record = skillwire.inject(
+            node,
+            task=task or prompt[:400],
+            extra_notes=extra_notes,
+            chapters=chapters,
+            requested=requested,
+            slugs=slugs,
+            max_total_chars=max_total_chars,
+        )
+    except Exception as exc:  # 兜底：连注入层都炸了也要让主流程继续
+        logger.warning("技能注入异常（node=%s）：%s", node, exc)
+        # 键集必须与正常路径同构，否则 t3 落库读 record["truncated"] 会 KeyError。
+        # 这里**不能**依赖 skillwire.blank_record——万一炸的正是 skillwire 本身
+        # （模块没装上 / 属性被换掉），兜底就会二次抛出，"绝不阻断主流程"当场失效。
+        # 同构性由 tests/test_wire_nodes.py::TestRecordShapeStable 与 blank_record 对齐守住。
+        return prompt, {
+            "node": node,
+            "chars": 0,
+            "tool_chars": 0,
+            "manual_chars": 0,
+            "total_chars": 0,
+            "truncated": False,
+            "cards": [],
+            "notes": [f"注入层异常：{str(exc)[:80]}"],
+        }
+    return ((text + "\n\n" + prompt) if text else prompt), record
+
+
 _SYSTEM = (
     "你是一位资深网文策划与作家，熟悉中文网文市场（起点/番茄/晋江）的题材、节奏与读者期待。"
     "输出务必直接、可用、具体，避免空话。要求 JSON 时只输出 JSON，不要任何解释。"
@@ -674,6 +787,7 @@ async def init_project(
         '  "premise": "核心梗概（150 字内：主角是谁、要什么、最大阻碍）"\n'
         "}"
     )
+    prompt, _wire_init = _wire_skill("init", prompt)
     raw = await _chat_text(config, _SYSTEM, prompt)
     try:
         spec = _parse_json(raw)
@@ -792,6 +906,7 @@ async def setup_project(project_id: int, user: User = Depends(get_current_user),
         "要求：角色 4-8 个（主角必须第一个，含至少 1 个核心对手）；世界观 6-12 条覆盖力量体系与核心规则；"
         "所有设定必须服务于 premise 的核心冲突。"
     )
+    prompt, _wire_setup = _wire_skill("setup", prompt)
     raw = await _chat_text(config, _SYSTEM, prompt, max_tokens=6000)
     try:
         data = _parse_json(raw)
@@ -893,6 +1008,7 @@ async def outline_project(project_id: int, user: User = Depends(get_current_user
         "要求：三章一小高潮、一卷一大高潮；第一卷黄金三章必须亮出核心冲突与金手指；"
         "每章 outline 要具体到事件，不写空话。"
     )
+    prompt, _wire_outline = _wire_skill("outline", prompt)
     raw = await _chat_text(config, _SYSTEM, prompt, max_tokens=8000)
     try:
         data = _parse_json(raw)
@@ -1049,10 +1165,12 @@ async def _outline_continue_core(p: AiProject, user: User, db: AsyncSession) -> 
         "  ]\n"
         "}\n"
     )
+    prompt, _wire_cont = _wire_skill("outline_continue", prompt)
     raw = await _chat_text(config, _SYSTEM, prompt, max_tokens=8000)
     try:
         data = _parse_json(raw)
     except ValueError:
+        # 重试沿用同一个 prompt（卡块已随之前置），不重复注入、不重复计账
         raw = await _chat_text(config, _SYSTEM, prompt + "\n注意：只输出合法 JSON，不要任何解释。", max_tokens=8000)
         try:
             data = _parse_json(raw)
@@ -1448,7 +1566,113 @@ async def _recall_own_spec(p: AiProject, kc) -> str | None:
     return None
 
 
-async def _assemble_context(p: AiProject, novel: Novel, chapter: Chapter, job: AiChapterJob, db: AsyncSession) -> str:
+# 逐章生成节点的手艺预算拆分：NODE_BUDGET["generate"] 是总额，
+# 文风档案（实测数据）单独留一份，方法论卡吃剩下的。
+_STYLE_TOOL_BUDGET = 1500
+
+
+async def _chapter_skill_block(
+    p: AiProject, novel: Novel, chapter: Chapter, db: AsyncSession, number: int
+) -> tuple[str, list[dict]]:
+    """本章的「手艺块」，返回 (文本, 本块各次注入的 record 列表)。
+
+    为什么落在 `_assemble_context`：UI 逐章（`generate_chapter`）、夜跑
+    （`nightly._generate_chapter`）、批量（`batch`）三条路径都调它，
+    改这一处三条路径同步生效、不会出现 SSE 一套夜跑另一套的漂移。
+
+    章号 `number` 由调用方传入（装配时已算好）：**黄金三章的开篇方法论只在
+    第 1-3 章挂**，第 4 章起再注就是纯浪费 token。`number == 0` 表示本章
+    不在有序列表里（新建/异常场景），按「不挂开篇卡」处理并在 record 留痕。
+
+    record 必须回传（评审 M-7）：t3 要把「这一章注了哪张卡、多少字、有没有被截」
+    落进 `AiChapterJob.skill_wire_json`。先前只回 str、两条 record 丢在
+    `_rec1`/`_rec2` 局部变量里，等于可观测性在正文路径上天生缺一个节点。
+    """
+    # 技能是增强、不是依赖（评审 M-6 / 规格 S9）：本函数每章都跑，t2b 还新增了一次
+    # DB 读（novel_texts）。卡包损坏、文件读取失败、DB 抖动都不能让整章生成失败。
+    # 结构化节点那条路径有 `_wire_skill` 的 try/except 兜底，这里必须同构，
+    # 否则两条路径安全等级不一致——反而是正文主链路更脆。
+    try:
+        return await _build_chapter_skill_block(p, novel, chapter, db, number)
+    except Exception as exc:  # noqa: BLE001 - 刻意兜住一切：宁可少注手艺，不可断正文
+        logger.warning("本章手艺块装配失败，跳过注入：%s", str(exc)[:200])
+        return "", [skillwire.blank_record("generate", notes=("装配异常，未注入",))]
+
+
+async def _build_chapter_skill_block(
+    p: AiProject, novel: Novel, chapter: Chapter, db: AsyncSession, number: int
+) -> tuple[str, list[dict]]:
+    from .skills import novel_texts
+
+    slugs: list[str] = ["chapter-hook-crafter"]
+    if 1 <= number <= 3:
+        slugs.append("opening-crafter")
+
+    blocks: list[str] = []
+    records: list[dict] = []
+
+    # 预算按 node 总额**封顶拆分**：文风档案至多占 1/4（且不超过 _STYLE_TOOL_BUDGET），
+    # 方法论卡拿剩下的。此前写成 `max(total - style, 1000)` 这种带下限的减法，
+    # node 预算被调小后会出现「两半之和 > 总额」——封顶就名存实亡（评审变异 V7 全绿暴露的洞）。
+    total_budget = max(int(skillwire.NODE_BUDGET.get("generate", 0)), 400)
+    style_budget = min(_STYLE_TOOL_BUDGET, max(total_budget // 4, 100))
+    card_budget = total_budget - style_budget
+
+    # 字数口径随目标走：没设目标时**绝口不提**下限——
+    # 提了就是凭空造约束（test_fix8_wordcount 的 test_no_target_stays_silent 守这条）。
+    gen_notes: list[str] = list(_WIRE_NOTES.get("generate", ()))
+    if p.target_chapter_words:
+        gen_notes.append(
+            "字数按上面标注的硬下限判定：写不够比写超更严重，"
+            "但剧情完整优先，不在情节中段强行收尾，也不许注水凑字"
+        )
+
+    # ① 方法论卡（带手册正文）
+    text, rec1 = skillwire.inject(
+        "generate",
+        task="写下一章正文",
+        slugs=tuple(slugs),
+        extra_notes=tuple(gen_notes),
+        max_total_chars=card_budget,
+    )
+    records.append(rec1)
+    if text.strip():
+        blocks.append(text)
+
+    # ② 文风档案：**只注实测数据，不注手册**。
+    #    style-fingerprint 的手册教「如何建立文风档案」，那是行为指令；
+    #    逐章生成要的是「这本书现在文风长什么样」这个事实——两者混进同一个
+    #    prompt，模型会转去执行建档流程而不是按档案续写。
+    #    limit=10 而非默认 40：本函数每章都跑一次 × 数百章，DB 读取必须克制。
+    style_text, rec2 = skillwire.inject(
+        "generate",
+        slugs=("style-fingerprint",),
+        mode="tool_only",
+        chapters=await novel_texts(db, novel.id, limit=10),
+        max_total_chars=style_budget,
+    )
+    records.append(rec2)
+    if style_text.strip():
+        blocks.append(style_text)
+
+    if not blocks:
+        return "", records
+    return (
+        "【本章手艺参考（方法论与实测数据，须遵循；与上方设定/角色卡冲突时以设定为准）】\n"
+        + "\n\n".join(blocks),
+        records,
+    )
+
+
+async def _assemble_context(
+    p: AiProject,
+    novel: Novel,
+    chapter: Chapter,
+    job: AiChapterJob,
+    db: AsyncSession,
+    include_skill: bool = True,
+    wire_sink: list | None = None,
+) -> str:
     """上下文预算制组装（§3.1）：立项 + 状态文件三件套 + 角色卡 + 最近 N 章 + 本章任务。"""
     parts = [f"作品：《{novel.title}》"]
     spec = json.loads(p.book_spec_json or "{}")
@@ -1570,6 +1794,18 @@ async def _assemble_context(p: AiProject, novel: Novel, chapter: Chapter, job: A
 
     # 本章任务
     number = next((i + 1 for i, c in enumerate(ordered) if c.id == chapter.id), 0)
+    # 手艺块放在「本章任务」**之前**：任务指令贴近生成点，遵从率最高，
+    # 方法论与实测数据属于背景，前置才读得到、又不抢占指令位置。
+    # include_skill=False 供 diagnose_job 使用——它只为量 ctx_chars，
+    # 注进 6,500 字卡块会让诊断体积虚增、结论被卡内容污染。
+    if include_skill:
+        skill_block, skill_records = await _chapter_skill_block(p, novel, chapter, db, number)
+        if wire_sink is not None:
+            # 可选出参：夜跑/批量按位置调用、不传，行为完全不变（S1 零改动约束）。
+            # t3 落库时由调用方传一个列表进来接走 record。
+            wire_sink.extend(skill_records)
+        if skill_block:
+            parts.append(skill_block)
     task = f"现在请写{chapter_display_title(chapter.title, number)}。"
     if job.outline:
         task += f"\n本章大纲：{job.outline}"
@@ -1822,7 +2058,9 @@ async def diagnose_job(
         novel = await db.get(Novel, p.novel_id)
         if chapter is not None and novel is not None:
             try:
-                ctx = await _assemble_context(p, novel, chapter, job, db)
+                # 诊断只为量上下文体积：关掉手艺注入，否则 6,500 字卡块会
+                # 虚增 ctx_chars（触发误判「上下文过大」）并污染诊断结论。
+                ctx = await _assemble_context(p, novel, chapter, job, db, include_skill=False)
                 ctx_chars = len(ctx)
             except Exception as exc:  # noqa: BLE001  诊断本身不该抛错
                 ctx_error = f"{exc.__class__.__name__}: {exc}"[:200]
@@ -2482,6 +2720,13 @@ async def review_chapter(
         '"severity": "high|low", "issue": "问题描述", "suggestion": "修改建议"}]\n'
         "没有问题就输出空数组 []。"
     )
+    # 审校要在服务端真跑节奏脚本：取本书已有章节正文喂给白名单工具，
+    # 拿到的是实测数据而不是模型对节奏的估计（一致性卡的脚本未接白名单，
+    # 拿不到实测输出——注入层会如实写明，不假装跑过）。
+    from .skills import novel_texts as _novel_texts
+
+    review_chapters = await _novel_texts(db, p.novel_id, limit=40)
+    prompt, _wire_review = _wire_skill("review", prompt, chapters=review_chapters)
     raw = await _chat_text(config, _SYSTEM, prompt, max_tokens=3000)
     try:
         issues = _parse_json(raw)

@@ -246,12 +246,24 @@ def select_docs(slug: str, instruction: str = "", requested: list[str] | None = 
     return sorted(picked)
 
 
-def docs_block(slug: str, rels: list[str]) -> tuple[str, list[dict], list[str]]:
+def docs_block(
+    slug: str,
+    rels: list[str],
+    max_total_chars: int | None = None,
+    max_doc_chars: int | None = None,
+) -> tuple[str, list[dict], list[str]]:
     """把参考文件正文拼成可注入文本块。
 
     返回 (文本, 已加载清单, 加载说明)。超限**显式标注**——静默截断会让模型以为
     自己看到了全文，是最坏的情况。
+
+    max_total_chars / max_doc_chars 是**本次调用**生效的注入上限；传 None = 沿用
+    模块常量 MAX_TOTAL_DOC_CHARS / MAX_DOC_CHARS，既有调用方行为逐字节不变。
+    流水线按节点分预算时由 skillwire 传入（见 app/skillwire.py）。
     """
+    # 读模块全局而非捕获默认值：常量被 monkeypatch/热改时，本次调用要跟得上。
+    total_limit = MAX_TOTAL_DOC_CHARS if max_total_chars is None else max_total_chars
+    doc_limit = MAX_DOC_CHARS if max_doc_chars is None else max_doc_chars
     docs = {d["rel"]: d for d in list_docs(slug)}
     pkg = CARD_DIR / slug
     chunks: list[str] = []
@@ -267,17 +279,20 @@ def docs_block(slug: str, rels: list[str]) -> tuple[str, list[dict], list[str]]:
         try:
             text = (pkg / rel).read_text(encoding="utf-8")
         except (UnicodeDecodeError, OSError):
+            # 读不出来也要留痕：手册点名要加载的清单若静默消失，模型会以为
+            # 「清单里没这一条」，于是照着残缺的要求干活。
+            notes.append(f"{rel} 读取失败，未加载")
             continue
-        if total >= MAX_TOTAL_DOC_CHARS:
-            notes.append(f"{rel} 未加载（已达本次注入上限 {MAX_TOTAL_DOC_CHARS} 字）")
+        if total >= total_limit:
+            notes.append(f"{rel} 未加载（已达本次注入上限 {total_limit} 字）")
             continue
         truncated = False
-        if len(text) > MAX_DOC_CHARS:
-            text = text[:MAX_DOC_CHARS]
+        if len(text) > doc_limit:
+            text = text[:doc_limit]
             truncated = True
-            notes.append(f"{rel} 超长，已截断至 {MAX_DOC_CHARS} 字")
-        if total + len(text) > MAX_TOTAL_DOC_CHARS:
-            allowed = MAX_TOTAL_DOC_CHARS - total
+            notes.append(f"{rel} 超长，已截断至 {doc_limit} 字")
+        if total + len(text) > total_limit:
+            allowed = total_limit - total
             text = text[:allowed]
             truncated = True
             notes.append(f"{rel} 因总量上限截断至 {allowed} 字")
@@ -336,16 +351,23 @@ def card_block(
     requested: list[str] | None = None,
     tool_output: str = "",
     reading: str = "",
+    max_total_chars: int | None = None,
+    max_doc_chars: int | None = None,
 ) -> str:
     """组装「技能卡包」文本块：工作手册 + 参考文件全文 + 加载说明 + 工具输出。
 
     /skills/run 与 /ai/chat 共用——两处各拼一遍是过去易漂移的地方。
+
+    max_total_chars / max_doc_chars 透传给 docs_block：本次调用的参考正文注入
+    上限；传 None = 沿用模块常量（既有调用方行为不变）。
     """
     card = _parse_card(slug)
     if card is None:
         raise HTTPException(404, "技能卡不存在")
     rels = select_docs(slug, instruction=task, requested=requested)
-    block, loaded, notes = docs_block(slug, rels)
+    block, loaded, notes = docs_block(
+        slug, rels, max_total_chars=max_total_chars, max_doc_chars=max_doc_chars
+    )
     loaded_rels = {d["rel"] for d in loaded}
     skipped = [d["rel"] for d in list_docs(slug) if d["rel"] not in loaded_rels and d["rel"] not in rels]
 

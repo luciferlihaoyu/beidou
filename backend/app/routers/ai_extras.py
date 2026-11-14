@@ -25,7 +25,7 @@ from ..db import get_db
 from ..deps import get_current_user
 from ..models import AiProject, User
 from ..utils import chapter_display_title, strip_html
-from .ai_factory import _SYSTEM, _chat_text, _get_project, _parse_json, _pick_config
+from .ai_factory import _SYSTEM, _chat_text, _get_project, _parse_json, _pick_config, _wire_skill
 
 router = APIRouter(prefix="/api/ai-factory", tags=["ai-factory"])
 
@@ -54,6 +54,7 @@ async def gen_synopsis(project_id: int, user: User = Depends(get_current_user), 
         "}\n要求：每版都要有钩子感；不得剧透结局；抖音版要口语化有冲突。"
     )
     config = await _pick_config(user, db, p.setup_llm)
+    prompt, _wire_synopsis = _wire_skill("synopsis", prompt)
     raw = await _chat_text(config, _SYSTEM, prompt, max_tokens=2500)
     data = _parse_json(raw)
     if not isinstance(data, dict) or not any(data.get(k) for k in ("short", "standard", "promotion", "douyin")):

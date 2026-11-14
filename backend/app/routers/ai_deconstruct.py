@@ -24,7 +24,7 @@ from ..db import get_db
 from ..deps import get_current_user
 from ..models import AiProject, User
 from ..utils import strip_html
-from .ai_factory import _SYSTEM, _chat_text, _get_project, _parse_json, _pick_config
+from .ai_factory import _SYSTEM, _chat_text, _get_project, _parse_json, _pick_config, _wire_skill
 
 router = APIRouter(prefix="/api/ai-factory", tags=["ai-factory"])
 
@@ -111,7 +111,16 @@ async def deconstruct_book(data: DeconstructIn, user: User = Depends(get_current
         raise HTTPException(400, "参考书文本太短，至少粘 200 字（建议整本或前几万字）")
     _check_rate_limit(user.id)
     config = await _pick_config(user, db, "")
-    prompt = _DECONSTRUCT_PROMPT.format(title_hint=data.title_hint or "（未提供）", text=_sample(text), schema=_REF_SCHEMA)
+    sample = _sample(text)
+    # 事实索引在服务端真跑：把采样文本当一章喂给白名单脚本（fact_extractor.extract_facts），
+    # 拿到实测的人物/设定/事件索引，而不是模型自己对文本的复述。
+    # 只取推荐清单里的参考文件，已排除 syntopical-mode.md（多书横评，单书拆书用不上）。
+    prompt, _wire_deconstruct = _wire_skill(
+        "deconstruct",
+        _DECONSTRUCT_PROMPT.format(title_hint=data.title_hint or "（未提供）", text=sample, schema=_REF_SCHEMA),
+        task="拆解这本参考书的世界观框架、力量体系、人物系统与情节结构",
+        chapters=[("参考书（采样）", sample)],
+    )
     usage: dict = {}
     try:
         raw = await _chat_text(config, _SYSTEM, prompt, max_tokens=4000, usage_sink=usage)
