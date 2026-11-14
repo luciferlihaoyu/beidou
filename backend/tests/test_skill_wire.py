@@ -619,36 +619,66 @@ class TestCardBlockRegression:
 
 
 class TestHeadVersionByteGuard:
-    """**真字节护栏**：与 HEAD 版 skills.py 的输出逐字节比对。
+    """**真字节护栏**：与**钉死的基线版** skills.py 的输出逐字节比对。
 
     评审用变异实验证明：只断言「限额数值」守不住——把【已加载的参考清单】
     表头改掉，/skills/run、/ai/chat 的响应就逐字节变了，而当时 79 个测试仍
-    全绿。这里把 HEAD 版落到 /tmp 副本跑同一组探针，逐字节比对。
+    全绿。这里把基线版落到 /tmp 副本跑同一组探针，逐字节比对。
+
+    ⚠️ **为什么不能写 HEAD**（这条护栏差点自己变成摆设）：
+    接线层首次入库后，HEAD 里已经包含了 t1 的改动，「现在 vs HEAD」就退化成
+    「新 vs 新」——正是我们在变异测试里反复抓到的同一类错误。
+    基线因此**钉死**在接线层入库前的那个 commit；将来若确实要承认一次新的
+    默认路径变更，必须**显式挪这个常量**并在评审记录里说明，而不是让它跟着 HEAD 漂。
 
     环境没有 git 历史时**跳过**（不是失败）。
     """
 
+    #: 接线层首次入库（24f0eb8）**之前**的 HEAD，即 skills.py 默认路径的上游原样。
+    SKILLS_BASELINE_REF = "d4d9fef"
+
     @staticmethod
-    def _head_module(tmp_path: Path):
+    def _git_show(ref: str) -> str | None:
         try:
-            src = subprocess.run(
-                ["git", "-C", str(REPO_ROOT), "show", "HEAD:backend/app/routers/skills.py"],
+            out = subprocess.run(
+                ["git", "-C", str(REPO_ROOT), "show", f"{ref}:backend/app/routers/skills.py"],
                 capture_output=True,
                 text=True,
                 timeout=60,
             )
         except (OSError, subprocess.SubprocessError) as exc:
             pytest.skip(f"环境无 git 历史：{exc}")
-        if src.returncode != 0 or not src.stdout.strip():
-            pytest.skip("环境无 git 历史（取不到 HEAD 版 skills.py）")
+        if out.returncode != 0 or not out.stdout.strip():
+            pytest.skip(f"取不到 {ref} 版 skills.py")
+        return out.stdout
+
+    @staticmethod
+    def _head_module(tmp_path: Path):
+        src = TestHeadVersionByteGuard._git_show(
+            TestHeadVersionByteGuard.SKILLS_BASELINE_REF
+        )
         f = tmp_path / "skills_head.py"
-        f.write_text(src.stdout, encoding="utf-8")
+        f.write_text(src, encoding="utf-8")
         spec = importlib.util.spec_from_file_location("app.routers._skills_head_snapshot", f)
         assert spec and spec.loader
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
         mod.CARD_DIR = skills.CARD_DIR  # 副本在 /tmp，卡包目录要指回真身
         return mod
+
+    def test_baseline_ref_is_not_the_current_file(self):
+        """反空跑：基线版必须与现版**真的不同**，否则「逐字节相同」是句废话。
+
+        这条存在的理由：接线层入库后如果还拿 HEAD 比，两边就是同一个文件，
+        输出必然逐字节相同——护栏 100% 通过却 0% 保护力。
+        """
+        baseline = self._git_show(self.SKILLS_BASELINE_REF)
+        current = (REPO_ROOT / "backend/app/routers/skills.py").read_text(encoding="utf-8")
+        assert baseline != current, (
+            "基线版与现版逐字相同：这条字节护栏当前是空跑的。"
+            "要么基线钉错了（应钉接线层入库**之前**的 commit），"
+            "要么默认路径确实没改过——那就无需护栏，请删掉本类而不是留着自欺。"
+        )
 
     def test_head_and_current_outputs_are_byte_identical(self, tmp_path):
         head = self._head_module(tmp_path)
