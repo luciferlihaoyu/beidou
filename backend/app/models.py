@@ -399,6 +399,9 @@ class AiProject(Base):
     # 技能卡注入实况（t3-wire-observe，D1）：按节点归并的字典 JSON，同节点重跑覆盖；
     # 只存计数与卡名，绝不存 prompt 正文（防止几百章的 prompt 堆进项目表）
     skill_wire_json: Mapped[str] = mapped_column(Text, default="")
+    # 章节分段流水线档位（t6-chapter-stages）：off（默认，与单段生成行为逐字节一致）/
+    # standard（写作→审校→修订）/ deep（规划→编排→写作→审校→修订→结算）
+    chapter_pipeline: Mapped[str] = mapped_column(Text, default="off")
     created_at: Mapped[datetime] = mapped_column(default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(default=utcnow, onupdate=utcnow)
 
@@ -441,6 +444,10 @@ class AiChapterJob(Base):
     # 技能卡注入实况（t3-wire-observe，D2）：本章各次注入的 record 列表 JSON（键序即注入次序）；
     # 只存计数与卡名，绝不存 prompt/正文
     skill_wire_json: Mapped[str] = mapped_column(Text, default="")
+    # 章节分段流水线的段落产出快照（t6-chapter-stages）：
+    # {"规划": {"text": "...", "at": "..."}, ...}——每段产出**立刻**覆盖写全量 JSON 并 commit，
+    # 中断重入时已有键的段直接跳过（断点续跑），"结算" 键里存最终战报快照
+    stage_json: Mapped[str] = mapped_column(Text, default="{}")
 
 
 class CharacterRelation(Base):

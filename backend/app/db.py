@@ -62,6 +62,9 @@ async def init_db():
         # 技能卡注入实况（t3-wire-observe）：项目级按节点归并 / 章级列表，默认空串
         await _ensure_column(conn, "ai_projects", "skill_wire_json", "TEXT NOT NULL DEFAULT ''")
         await _ensure_column(conn, "ai_chapter_jobs", "skill_wire_json", "TEXT NOT NULL DEFAULT ''")
+        # 章节分段流水线（t6-chapter-stages）：项目档位（默认 off）+ 章任务段落产出快照（默认空对象）
+        await _ensure_column(conn, "ai_projects", "chapter_pipeline", "TEXT NOT NULL DEFAULT 'off'")
+        await _ensure_column(conn, "ai_chapter_jobs", "stage_json", "TEXT NOT NULL DEFAULT '{}'")
         # 批D 资料库双向同步数据面：集成配置四项 + 资料条目四项（默认值与 models.py 一致）
         await _ensure_column(conn, "integration_configs", "xj_sync_enabled", "BOOLEAN NOT NULL DEFAULT 0")
         await _ensure_column(conn, "integration_configs", "xj_sync_folders", "VARCHAR(500) NOT NULL DEFAULT ''")

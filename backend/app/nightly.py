@@ -132,7 +132,17 @@ async def _generate_one(p: AiProject, novel: Novel, job: AiChapterJob, chapter: 
 
 
 async def _generate_chapter(p: AiProject, novel: Novel, job: AiChapterJob, chapter: Chapter, num: int, db) -> dict:
-    """后台生成单章：生成→AI味检测/改写→定稿→状态文件→关系同步。返回战报。"""
+    """后台生成单章：生成→AI味检测/改写→定稿→状态文件→关系同步。返回战报。
+
+    t6-chapter-stages 分流：项目档位 ``p.chapter_pipeline`` 是 standard/deep 时进分段
+    接力执行器（章节内角色接力 + 每段落盘 + 断点续跑）；off（默认）、旧对象缺属性、
+    以及任何未知档位一律保守降级走下方原路（配置值打错不许打断夜跑）——原代码一行未动。
+    """
+    if (getattr(p, "chapter_pipeline", "") or "off") in ("standard", "deep"):
+        from .chapter_stages import run_staged_chapter
+
+        return await run_staged_chapter(p, novel, job, chapter, num, db)
+
     from .routers.ai_factory import _text_to_html  # 延迟导入避免循环
 
     user = await db.get(User, p.user_id)
