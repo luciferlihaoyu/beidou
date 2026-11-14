@@ -80,7 +80,14 @@ _STAGE_MAX_TOKENS = 16000
 
 
 async def _stage_chat(llm, system: str, prompt: str, *, max_tokens: int, usage_sink: dict) -> str:
-    """唯一的模型调用门：分段路径的一切模型交互都从这里走（测试注入点）。"""
+    """**分段产出**的模型调用门（测试注入点）。
+
+    🔴 口径修正（评审 A-7 minor，原话「一切模型交互都从这里走」**不实**）：
+    结算摘要与 `_ensure_min_words` 之外的补写轮，以及 `_update_state_files` /
+    `_sync_relations` 内部，都另有裸 `_chat_text` 调用。那些是 off 路同款的收尾调用，
+    合规但不归这道门管——所以测试必须**另外** patch `_chat_text` 才能钉住它们
+    （tests 里 SettlementSpies 多装一个替身就是因为这个，不是随手加的）。
+    """
     return await _chat_text(llm, system, prompt, max_tokens=max_tokens, usage_sink=usage_sink)
 
 
@@ -92,6 +99,9 @@ def _load_state(job) -> dict:
     try:
         state = json.loads(raw)
     except (ValueError, TypeError):
+        # 🔴 评审 A-3 minor：损坏的 stage_json 当空处理 = 「宁可重跑」，
+        # 但重跑意味着**静默重烧全部段次**（deep 档 5 次真模型调用）。
+        # 用户看不见原因就多花五倍钱，所以必须留痕（下方 job.last_error）。
         return {}
     return state if isinstance(state, dict) else {}
 
@@ -122,8 +132,11 @@ async def run_staged_chapter(p, novel, job, chapter, num: int, db) -> dict:
     job.attempt += 1
     await db.commit()
 
+    _raw_state = job.stage_json or ""
     state = _load_state(job)
-    if state.get(SETTLE_STAGE):
+    if _raw_state.strip() and not state:
+        # 留痕：有内容却读不出任何段 = stage_json 坏了，本轮会从头重跑
+        job.last_error = "stage_json 无法解析，已完成段全部重跑（成本会高于续跑）"
         # 全部完成过的 job 重入：返回存档战报，一个模型调用都不发
         return json.loads(state[SETTLE_STAGE]["text"])
 
@@ -137,54 +150,66 @@ async def run_staged_chapter(p, novel, job, chapter, num: int, db) -> dict:
     sinks: list[dict] = []
     target_words = p.target_chapter_words or 0
 
-    for stage in stages:
-        if state.get(stage):
-            # 断点续跑：已落盘的段跳过，产出从落盘恢复为上一环节产出
-            prev_text = state[stage]["text"]
-            continue
+    try:
+        for stage in stages:
+            if state.get(stage):
+                # 断点续跑：已落盘的段跳过，产出从落盘恢复为上一环节产出
+                prev_text = state[stage]["text"]
+                continue
 
-        if prev_text is None:
-            # 第 1 段（或其上游全部缺失）：唯一拿全量 context 的段
-            context = await _assemble_context(p, novel, chapter, job, db)
-            spec = _STAGE_SPECS[stage]
-            if stage == "写作" and target_words > 0:
-                spec += f"\n本章正文不少于 {target_words} 字（硬下限）。"
-            prompt = f"{spec}\n\n{context}"
-        else:
-            # 段间只传上一段产出：全量历史与原始 context 不重传（成本铁律）
-            spec = _STAGE_SPECS[stage]
-            if stage == "写作" and target_words > 0:
-                spec += f"\n本章正文不少于 {target_words} 字（硬下限）。"
-            prompt = f"{spec}\n\n【上一环节产出】\n{prev_text}"
+            if prev_text is None:
+                # 第 1 段（或其上游全部缺失）：唯一拿全量 context 的段
+                context = await _assemble_context(p, novel, chapter, job, db)
+                spec = _STAGE_SPECS[stage]
+                if stage == "写作" and target_words > 0:
+                    spec += f"\n本章正文不少于 {target_words} 字（硬下限）。"
+                prompt = f"{spec}\n\n{context}"
+            else:
+                # 段间只传上一段产出：全量历史与原始 context 不重传（成本铁律）
+                spec = _STAGE_SPECS[stage]
+                if stage == "写作" and target_words > 0:
+                    spec += f"\n本章正文不少于 {target_words} 字（硬下限）。"
+                prompt = f"{spec}\n\n【上一环节产出】\n{prev_text}"
 
-        sink: dict = {}
-        text = (await _stage_chat(chapter_llm, system, prompt, max_tokens=_STAGE_MAX_TOKENS, usage_sink=sink)).strip()
-        sinks.append(sink)
+            sink: dict = {}
+            text = (await _stage_chat(chapter_llm, system, prompt, max_tokens=_STAGE_MAX_TOKENS, usage_sink=sink)).strip()
+            sinks.append(sink)
 
-        if stage == "写作":
-            # 初稿完整性检查（与 off 路同形状的 failed 战报；已落盘段保留供续跑）
-            if len(text) < 100:
-                job.status = "failed"
-                job.last_error = "分段生成内容过短（<100 字）"
-                job.last_error_code = "empty_output"
-                _save_state(job, state)
-                await db.commit()
-                return {
-                    "title": chapter_display_title(chapter.title, num),
-                    "ok": False,
-                    "error": "生成内容过短",
-                    "reason_code": "empty_output",
-                }
-            if target_words > 0:
-                topup: dict = {}
-                text = (await _ensure_min_words(chapter_llm, system, text, target_words, usage_sink=topup)).strip()
-                sinks.append(topup)
+            if stage == "写作":
+                # 初稿完整性检查（与 off 路同形状的 failed 战报；已落盘段保留供续跑）
+                if len(text) < 100:
+                    job.status = "failed"
+                    job.last_error = "分段生成内容过短（<100 字）"
+                    job.last_error_code = "empty_output"
+                    _save_state(job, state)
+                    await db.commit()
+                    return {
+                        "title": chapter_display_title(chapter.title, num),
+                        "ok": False,
+                        "error": "生成内容过短",
+                        "reason_code": "empty_output",
+                    }
+                if target_words > 0:
+                    topup: dict = {}
+                    text = (await _ensure_min_words(chapter_llm, system, text, target_words, usage_sink=topup)).strip()
+                    sinks.append(topup)
 
-        # 一段完成，立刻落盘（中断安全点）
-        state[stage] = {"text": text, "at": utcnow().isoformat()}
-        prev_text = text
-        _save_state(job, state)
-        await db.commit()
+            # 一段完成，立刻落盘（中断安全点）
+            state[stage] = {"text": text, "at": utcnow().isoformat()}
+            prev_text = text
+            _save_state(job, state)
+            await db.commit()
+
+    except Exception:
+        # 🔴 评审 A-1 major：段产出会落盘，但**成本账（sinks）是局部变量**，
+        # 异常一抛就随栈销毁，而记账只在结算区做——中断的章于是永久少记
+        # 已真花掉的 token（天演实测：1500 只记 1200，漏 300）。
+        # 已花的钱必须先入账再往上抛：章可以失败，账不能丢。
+        _sp = sum(int(s.get("prompt", 0)) for s in sinks)
+        _sc = sum(int(s.get("completion", 0)) for s in sinks)
+        if _sp or _sc:
+            _record_usage(p, _sp, _sc)
+        raise
 
     # ---------------- 结算（本地收尾段，不调模型）：最后一个 LLM 段产出即最终正文 ----------------
     final_text = state[stages[-1]]["text"]

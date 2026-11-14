@@ -11,6 +11,7 @@
 """
 import asyncio
 import json
+import pytest
 import sys
 import types
 from pathlib import Path
@@ -138,10 +139,17 @@ def test_rule_signal_scores_hardcoded():
 
 
 def test_rule_signal_short_text_sentinel_noted():
+    """🔴 契约变更 2026-11-14（评审 B-2 major）：这条**原先给 bug 背书**。
+
+    原断言是 `status == "ok"` 且 `value == 100`——也就是承认「太短哨兵可以披着
+    真实测量的外衣进融合」，只在 detail 里补一句解释。可融合层**不看 detail**，
+    risk = 100 - 100 = 0 于是报出"完美干净"。这与 B-1（困惑度那条反向背书）同族：
+    **判据把实现里那个错误形状钉成了合约**。
+    """
     env = rule_signal("太短了。")
-    assert env["status"] == "ok"
-    assert env["value"] == 100  # detect 的太短哨兵值
-    assert "过短" in env["detail"]
+    assert env["status"] == "degenerate", f"哨兵仍以 {env['status']} 出场"
+    assert env["value"] is None, "哨兵 100 不是测量值，不许当 value 交给融合"
+    assert "过短" in env["detail"] or "太短" in env["detail"]
 
 
 def test_detect_shape_unchanged():
@@ -164,7 +172,11 @@ def test_perplexity_probe_payload_requests_logprobs():
     assert captured["payload"]["top_logprobs"] == 1
     assert captured["payload"]["stream"] is False
     assert captured["payload"]["model"] == "MiniMax-M3"
-    assert captured["payload"]["max_tokens"] <= 16  # 能力探测必须省 token
+    assert captured["payload"].get("temperature") == 0, "复述必须贪心解码，否则复述不出原文"
+    # 🔴 评审 B-1 连带修正：这条原先写的是 `max_tokens <= 16`（"能力探测必须省 token"），
+    # 它和「发固定探测句」是**同一个错误合约的两面**——预算压到 16 就只够回两个字，
+    # 于是实现只能发探针句。现在钉的是「有预算上限但不许小到装不下文本」。
+    assert 16 < captured["payload"]["max_tokens"] <= 4096, captured["payload"]["max_tokens"]
 
 
 def test_perplexity_skipped_when_model_has_no_logprobs():
@@ -184,14 +196,62 @@ def test_perplexity_skipped_when_model_has_no_logprobs():
     )["status"] == "skipped"
 
 
-def test_perplexity_value_comes_only_from_logprobs():
-    """🔴 反启发式判据：两个不同文本、同一个假响应 → 值必须一模一样（只来自 logprobs）。"""
-    a = asyncio.run(perplexity_signal(_AI_TEXT, _FAKE_CONFIG, _raw_with_logprobs))
-    b = asyncio.run(perplexity_signal(_HUMAN_TEXT, _FAKE_CONFIG, _raw_with_logprobs))
+def _capture_raw(logprobs):
+    """假响应同时**抓住请求体**，用于钉「请求里带的是被检文本本身」。"""
+    seen = []
+
+    async def raw(config, payload):
+        seen.append(payload)
+        return _lp_response(logprobs)
+
+    return raw, seen
+
+
+def test_perplexity_request_carries_the_text_under_inspection():
+    """🔴 评审 B-1 critical 的根治判据：**探测与计算合一**。
+
+    原实现把 `text` 只留在签名里，请求体恒为固定探测句「只回复两个字：夜风」，
+    于是 2 字文本和 3000 字文本拿到**同一个困惑度**——换支持 logprobs 的模型后，
+    这一路会把「探针句的困惑度」冒充「整章的困惑度」参与融合。
+    所以这条判据钉的不是数值，是**送出去的内容**：必须是被检文本本身。
+    """
+    raw, seen = _capture_raw([{"token": "他", "logprob": -0.2}, {"token": "紧", "logprob": -2.2}])
+    a = asyncio.run(perplexity_signal(_AI_TEXT, _FAKE_CONFIG, raw))
+    b = asyncio.run(perplexity_signal(_HUMAN_TEXT, _FAKE_CONFIG, raw))
+    assert len(seen) == 2
+    body_a = json.dumps(seen[0], ensure_ascii=False)
+    body_b = json.dumps(seen[1], ensure_ascii=False)
+    assert "他非常紧张" in body_a, "请求体里没有 A 文本的内容——困惑度与文本无关（B-1 形状）"
+    assert "糖纸" in body_b, "请求体里没有 B 文本的内容——困惑度与文本无关（B-1 形状）"
+    assert "只回复两个字：夜风" not in body_a, "仍在发固定探测句冒充打分"
+    assert body_a != body_b, "两份不同文本发出的是同一请求，分数必然张冠李戴"
     assert a["status"] == "ok" and b["status"] == "ok"
-    assert a["value"] == 3.32  # exp(-(-0.2-2.2)/2)
-    assert a["value"] == b["value"]
-    assert "2" in a["detail"]  # detail 交代取了 2 个 token 的 logprobs
+
+
+def test_perplexity_value_follows_logprobs_not_text_stats():
+    """反启发式判据的**正确方向**：同一文本、不同 logprobs → 值必须不同。
+
+    原先这条写反了（两个不同文本 + 同一个假响应 → 值必须一模一样），
+    那等于给「text 参数没用」签担保书。真正的启发式伪造长这样：
+    logprobs 变了值却不动（说明值是从字数/句长度出来的）。
+    """
+    raw1, _ = _capture_raw([{"token": "他", "logprob": -0.2}, {"token": "紧", "logprob": -2.2}])
+    raw2, _ = _capture_raw([{"token": "他", "logprob": -0.1}, {"token": "紧", "logprob": -0.3}])
+    a = asyncio.run(perplexity_signal(_AI_TEXT, _FAKE_CONFIG, raw1))
+    b = asyncio.run(perplexity_signal(_AI_TEXT, _FAKE_CONFIG, raw2))
+    assert a["value"] == 3.32  # exp(-(-0.2-2.2)/2)，手算硬编码
+    assert b["value"] != a["value"], "logprobs 变了值不动 → 值不是从 logprobs 来的"
+    assert "2" in a["detail"]  # detail 交代取了几个 token
+
+
+def test_perplexity_truncates_long_text_and_says_so():
+    """超长正文必须截断（否则一次检测烧掉整本的钱），且**在 detail 里说明截断**。"""
+    long_text = "烟" * 30000
+    raw, seen = _capture_raw([{"token": "烟", "logprob": -1.0}])
+    env = asyncio.run(perplexity_signal(long_text, _FAKE_CONFIG, raw))
+    sent = seen[0]["messages"][-1]["content"]
+    assert len(sent) < len(long_text), "超长文本没截断"
+    assert "截断" in env["detail"], f"截断了却没说明：{env['detail'][:80]}"
 
 
 def test_perplexity_failed_on_transport_error():
@@ -353,8 +413,15 @@ def test_fusion_byte_stable_across_calls():
 
 
 # ================================================================ 7. 状态口径与越界文案
-def test_status_text_covers_exactly_four():
-    assert set(SIGNAL_STATUS_TEXT) == {"ok", "skipped", "failed", "uncalibrated"}
+def test_status_text_covers_exactly_five():
+    """degenerate 于 2026-11-14 入合约（评审 B-2），所以这张表是五键不是四键。"""
+    assert set(SIGNAL_STATUS_TEXT) == {
+        "ok",
+        "skipped",
+        "failed",
+        "uncalibrated",
+        "degenerate",
+    }
     for v in SIGNAL_STATUS_TEXT.values():
         assert isinstance(v, str) and v
 
@@ -403,3 +470,80 @@ def test_collect_signals_without_model_config_skips_those_paths():
     assert out["fusion"]["score"] == 40.0
     assert "perplexity=skipped" in out["fusion"]["detail"]
     assert "reviewer=skipped" in out["fusion"]["detail"]
+
+
+# ------------------------------------------------ 评审 B-2 major：哨兵假干净
+
+
+def test_short_text_sentinel_is_not_reported_as_a_clean_score():
+    """🔴 detect() 对过短文本**短路返回 score=100**（anti_llm.py:96 的「太短」哨兵）。
+
+    旧实现把这个 100 当真实干净度包成 `status="ok"` 交给融合，
+    于是 risk = 100-100 = 0 → **"完美干净"**。
+    而这句话其实根本没有检测过（文本太短没法检测）——
+    「没检测」被渲染成了「没问题」，本项目反复出现的形状。
+    所以状态必须是 degenerate，并且**不参与打分**。
+    """
+    env = rule_signal("太短了。")
+    assert env["status"] == "degenerate", (
+        f"过短哨兵不该披着 ok 出场（实得 status={env['status']!r}、value={env['value']!r}）"
+    )
+    assert env["value"] is None, "哨兵 100 不是测量值，不许冒充 value 进入融合"
+    assert "太短" in env["detail"] or "过短" in env["detail"]
+
+
+def test_fusion_refuses_when_the_only_path_is_the_sentinel():
+    """只有哨兵时融合分必须是 None，**不许产出 0.0 冒充"很干净"**。"""
+    rule = rule_signal("太短了。")
+    ppl = _skipped_envelope("perplexity")
+    rev = _skipped_envelope("reviewer")
+    fused = fuse_signals(rule, ppl, rev)
+    assert fused["participating"] == [], f"哨兵混进了参与路：{fused['participating']}"
+    assert fused["score"] is None, f"无可用路却产出了分数 {fused['score']}（0.0=完美干净假象）"
+    assert fused["detail"], "必须交代为什么没有分"
+
+
+def test_normal_length_text_still_scores_ok():
+    """反向对照：正常长度的干净文本仍应是 ok + 真分数，别把修哨兵修成一律降级。"""
+    env = rule_signal("他把烟按灭在砖墙上。「走吧。」她说。风从巷口灌进来，卷起地上的糖纸。" * 4)
+    assert env["status"] == "ok", f"正常文本被误降级：{env['status']}"
+    assert isinstance(env["value"], (int, float))
+
+
+# ---- 评审 B3：引文逐字校验的字符级攻击用例（行为已对，补上锁）
+
+
+@pytest.mark.parametrize(
+    "quote,expect_verified",
+    [
+        ("风从巷口灌进来", True),      # 真子串
+        ("风 从 巷 口 灌 进 来", False),  # 多空格：不许规范化后放行
+        ("風从巷口灌進來", False),      # 全/简体不同 → 不是逐字
+        ("风从巷口灌进", True),        # 删字后仍是真子串：逐字存在的正确行为
+        ("风从巷口灌进来。", False),     # 补标点：原文没有句号
+    ],
+    ids=["exact", "extra-spaces", "traditional-form", "shorter-substring", "added-punct"],
+)
+def test_quote_verification_is_literal_at_character_level(quote, expect_verified):
+    """🔴 评审 B3：`quote_verified` 用**裸子串**，不许任何规范化。
+
+    这组用例锁住边界：字符级变形（空格/繁简/标点）**全部判未命中**（保守方向正确），
+    而"删字后的真子串"判命中——那是「逐字存在」的定义本身。
+    方法固有边界要写在这里，别让下一个人以为它还能防语义级断章取义：
+    **引文逐字存在 ≠ 引文支持那个论断**，后者不在本函数职责内。
+    """
+    text = "他把烟按灭在砖墙上。风从巷口灌进来，卷起地上的糖纸。" * 3
+    payload = json.dumps(
+        {"ai_features": [{"quote": quote, "why": "开场套路"}], "human_evidence": []},
+        ensure_ascii=False,
+    )
+
+    async def chat(system, prompt):
+        return payload
+
+    got = asyncio.run(reviewer_signal(text, chat))
+    assert got["status"] == "ok"
+    feats = got["value"]["ai_features"]
+    assert feats[0]["quote_verified"] is expect_verified, (
+        f"引文 {quote!r} 应判 verified={expect_verified}，实得 {feats[0]['quote_verified']}"
+    )

@@ -521,3 +521,93 @@ def test_unknown_pipeline_value_is_rejected_by_executor(monkeypatch):
     p, novel, chapter, job, db = make_world(pipeline="bogus")
     with pytest.raises(ValueError):
         asyncio.run(chapter_stages.run_staged_chapter(p, novel, job, chapter, 7, db))
+
+
+# ---------------------------------------------------------------- 8. 中断的成本账（评审 A-1 major）
+
+
+class UsageGate(FakeGate):
+    """假模型门 + 真往 usage_sink 里填数——因为 usage_sink 是**实现与本模块的唯一记账通道**，
+    不填它就没有成本证据（评审书 D1：期望值必须硬编码在测试侧）。"""
+
+    def __init__(self, plan):
+        super().__init__([item[0] if isinstance(item, tuple) else item for item in plan])
+        self.plan = list(plan)
+        self.spent = []
+
+    async def __call__(self, llm, system, prompt, *, max_tokens=4000, usage_sink=None):
+        item = self.plan[len(self.attempted)]  # 本次将执行的那一项
+        stage = re.match(r"【段：(.+?)】", prompt).group(1)
+        if isinstance(item, tuple):
+            text, pr, co = item
+            if usage_sink is not None:
+                usage_sink["prompt"] = pr
+                usage_sink["completion"] = co
+            self.spent.append((stage, pr, co))
+            self.attempted.append(stage)
+            self.completed.append(stage)
+            self.prompts.append(prompt)
+            return text
+        self.attempted.append(stage)
+        self.prompts.append(prompt)
+        raise item  # 炸在这一段
+
+
+def test_interrupted_run_still_books_the_tokens_already_spent(monkeypatch):
+    """🔴 评审 A-1 major：段产出落盘了，**同一段的成本账却随栈销毁**。
+
+    机理：`sinks` 是 run_staged_chapter 的局部 list，异常一抛就没了，而记账只在
+    结算区做——于是"中断后重入"的章，中断前那几段真花掉的钱**永久少记**
+    （天演实测 1500 只记 1200，漏 300）。
+    这条判据钉的是：**已花的钱必须先入账，再往上抛**。
+    """
+    import app.chapter_stages as cs
+
+    world = make_world("deep")
+    gate = UsageGate(
+        [
+            (S_PLAN, 100, 10),
+            (S_OUTLINE, 200, 20),
+            RuntimeError("第 3 段上游炸了"),
+        ]
+    )
+    recorded: list[tuple[int, int]] = []
+    monkeypatch.setattr(cs, "_record_usage", lambda p, pr, co: recorded.append((pr, co)))
+    install_stage_context(monkeypatch, gate)
+
+    with pytest.raises(RuntimeError, match="第 3 段上游炸了"):
+        run_staged(world, gate=gate)
+
+    assert recorded == [(300, 30)], (
+        f"中断前两段的成本必须入账（期望 300/30），实得 {recorded}"
+        "——漏记即『章失败了但钱追不到』"
+    )
+
+
+def test_resume_after_interrupt_does_not_double_book(monkeypatch):
+    """重入时已落盘的段跳过（不发调用、不记账），只记续跑的那几段——
+    两次相加正好等于全程成本，**不许重复记账**。"""
+    import app.chapter_stages as cs
+
+    world = make_world("deep")
+    spied = SettlementSpies()
+    spied.install(monkeypatch)
+    recorded: list[tuple[int, int]] = []
+    monkeypatch.setattr(cs, "_record_usage", lambda p, pr, co: recorded.append((pr, co)))
+
+    gate1 = UsageGate([(S_PLAN, 100, 10), (S_OUTLINE, 200, 20), RuntimeError("炸")])
+    install_stage_context(monkeypatch, gate1)
+    p, novel, chapter, job, db = world
+    with pytest.raises(RuntimeError):
+        asyncio.run(cs.run_staged_chapter(p, novel, job, chapter, 7, db))
+    first = list(recorded)
+
+    gate2 = UsageGate([(S_WRITE, 300, 30), (S_REVIEW, 400, 40), (S_REVISE, 500, 50)])
+    install_stage_context(monkeypatch, gate2)
+    result, _ = run_staged(world, gate=gate2)
+    second = recorded[len(first) :]
+
+    assert first == [(300, 30)], f"第一次应只记已花的 300/30，实得 {first}"
+    assert sum(v[0] for v in second) > 0, "续跑段也没记账 → 重入完全免费，假免费"
+    assert gate2.attempted == ["写作", "审校", "修订"], f"重入必须从第 3 段续，实得 {gate2.attempted}"
+    assert result is not None

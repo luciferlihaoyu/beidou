@@ -12,6 +12,7 @@
 
 import json
 import re
+from types import SimpleNamespace
 
 import pytest
 
@@ -213,7 +214,7 @@ class TestDeterminism:
 class TestLayout:
     def test_section_order(self):
         out = _html()
-        order = ["覆盖率", "三路信号", "审校", "文体指标", "规则命中", "检测原文"]
+        order = ["覆盖率", "信号表", "审校", "文体指标", "规则命中", "检测原文"]
         pos = [out.index(k) for k in order]
         assert pos == sorted(pos), f"版式顺序错了：{list(zip(order, pos))}"
 
@@ -221,12 +222,12 @@ class TestLayout:
         """页首必须写明这句话（防止用户把风险分读成"有 82% 概率是 AI"）。"""
         out = _html()
         assert CAVEAT in out, "缺少「实验风险分不是 AI 生成概率」这句声明"
-        assert out.index(CAVEAT) < out.index("三路信号"), "这句话应出现在页首，不是埋在表格里"
+        assert out.index(CAVEAT) < out.index("信号表"), "这句话应出现在页首，不是埋在表格里"
 
     def test_signal_table_has_four_columns(self):
         """三路信号表四列齐备：状态 / 值 / 权重 / 说明。"""
         out = _html()
-        seg = out[out.index("三路信号") : out.index("审校")]
+        seg = out[out.index("信号表") : out.index("审校")]
         for col in ("状态", "值", "权重", "说明"):
             assert col in seg, f"三路信号表缺「{col}」列"
 
@@ -330,34 +331,72 @@ class TestEndpoint:
         )
         assert "chat" in calls, f"显式打开审校师却没调模型（开关是假的）：{calls}"
 
-    def test_foreign_chapter_is_404(self, monkeypatch):
+    @pytest.mark.parametrize(
+        "own_novel, ch_novel, expect_ok",
+        [
+            (1, 1, True),    # 同项目：放行
+            (1, 2, False),   # 绑了小说、拿别人的章：404
+            (None, 2, False),  # 🔴 缺失档位（天演评审 C-1 critical）：项目没绑定小说
+            (None, None, False),  # 两边都空也不许放行
+        ],
+        ids=["same-novel", "other-novel", "project-novel-is-None", "both-None"],
+    )
+    def test_chapter_ownership_checked_on_every_tier(self, monkeypatch, own_novel, ch_novel, expect_ok):
+        """章节归属校验必须在**每个档位**都拦住，不许有短路分支。
+
+        🔴 评审实锤（真库探针）：`if chapter is None or (p.novel_id and ...)` 里那个
+        `p.novel_id and` 是**短路**——`AiProject.novel_id` 是可空列
+        （ORM `Mapped[int | None]`、SQLite notnull=0，删掉绑定的小说时 FK 置空），
+        于是 novel_id=None 的项目 + 任何别人的 chapter_id → **HTTP 200，
+        报告里带着别人的整章正文**。我原先那条 404 测试只测了 novel_id=1 档位，
+        None 档位**零覆盖**——判据在、档位落在退化区（批次一 C-1 同族）。
+
+        语义定死：项目没绑定小说 = 它没有章节，**一律 404**，不是"跳过校验"。
+        """
         import asyncio
 
-        import pytest
         from fastapi import HTTPException
 
+        from app.models import Chapter
         from app.routers import ai_extras as ex
+
+        ch = Chapter(id=99, novel_id=ch_novel, title="别人的章", sort_order=12)
+        ch.content = "<p>绝密正文：林昭的第二次开盒。</p>" * 8
 
         async def fake_get_project(project_id, user, db):
             from app.models import AiProject
 
-            return AiProject(id=7, novel_id=1)
+            return AiProject(id=7, novel_id=own_novel, summary_llm=None)
 
-        ch = self._mk_chapter()
-        ch.novel_id = 42  # 别人的书
+        async def fake_chat_text(config, system, prompt, **kw):
+            raise AssertionError("越权路径不该走到模型调用")
 
         class FakeDB:
             async def get(self, model, pk):
-                return ch
+                if model.__name__ == "Chapter":
+                    return ch
+                return SimpleNamespace(id=1, username="u") if model.__name__ == "User" else None
 
         monkeypatch.setattr(ex, "_get_project", fake_get_project)
+        monkeypatch.setattr(ex, "_chat_text", fake_chat_text)
 
         class U:
             id = 1
 
-        with pytest.raises(HTTPException) as ei:
-            asyncio.run(ex.deai_report_html(7, 99, with_reviewer=False, probe_logprobs=False, user=U(), db=FakeDB()))
-        assert ei.value.status_code == 404, f"跨项目章节应 404，实得 {ei.value.status_code}"
+        async def _go():
+            resp = await ex.deai_report_html(7, 99, user=U(), db=FakeDB())
+            return b"".join([c async for c in resp.body_iterator]).decode("utf-8")
+
+        if expect_ok:
+            text = asyncio.run(_go())
+            assert "绝密正文" in text, "自己的章节应当出报告"
+        else:
+            with pytest.raises(HTTPException) as ei:
+                asyncio.run(_go())
+            assert ei.value.status_code == 404, (
+                f"档位 own={own_novel!r} ch={ch_novel!r} 应 404，实得 {ei.value.status_code}"
+                "——跨用户章文泄露"
+            )
 
     def test_empty_content_is_400_not_blank_report(self, monkeypatch):
         import asyncio
@@ -376,3 +415,75 @@ class TestEndpoint:
         assert resp.media_type == "text/html; charset=utf-8", f"媒体类型错：{resp.media_type}"
         cd = resp.headers.get("content-disposition", "")
         assert "attachment" in cd and ".html" in cd, f"缺下载文件名：{cd}"
+
+
+# ============================ 评审 FIX 轮新增判据（critical/major/minor）
+
+
+class TestReviewFixes:
+    """天演评审 B-2 / C-1 / C-3 / C1 四项的回归判据。"""
+
+    def test_degenerate_status_is_shown_as_not_detected(self):
+        """B-2 第三处：哨兵路必须在报告里显示"未真正检测"，
+        否则前端只看三路表会以为规则路给了个真分。"""
+        deg = {"signal": "rule", "status": "degenerate", "value": None,
+               "detail": "文本过短，规则检测提前短路，此路未参与打分"}
+        fused = {"score": None, "participating": [], "weights": {},
+                 "detail": "无任何一路可用，无融合分", "caveat": CAVEAT}
+        out = build_report_html(
+            _result(rule=deg, perplexity=ds._skipped("perplexity") if hasattr(ds, "_skipped") else _result()["perplexity"], fusion=fused),
+            {k: v for k, v in META.items() if k != "issues"},
+        )
+        assert "未真正检测" in out or "哨兵" in out, "degenerate 状态在报告里没有对应说法"
+        assert "0/3" in out, f"无路参与时覆盖率应显示 0/3，实得片段：{out[out.index('覆盖率'):out.index('覆盖率')+80]}"
+
+    def test_malformed_sections_degrade_to_labels_not_500(self):
+        """C1 minor：`style` 是 list、`fusion` 是字符串、`reviewer.value` 是字符串时，
+        报告**不该整页崩**（崩=打不开=等于没有报告），要降级成形态异常标注。"""
+        bad = {
+            "rule": {"signal": "rule", "status": "ok", "value": 50, "detail": "d"},
+            "perplexity": {"signal": "perplexity", "status": "ok", "value": 1.0, "detail": "d"},
+            "reviewer": {"signal": "reviewer", "status": "ok", "value": "字符串不是字典", "detail": "d"},
+            "style": ["不是", "字典"],
+            "fusion": "也不是字典",
+        }
+        out = build_report_html(bad, dict(META))
+        assert "形态异常" in out, "畸形输入既没崩也没标注——静默吞掉是最坏的第三种"
+
+    def test_rows_derive_from_signal_paths_not_hardcoded_three(self):
+        """C3 minor：三路表与覆盖率必须**跟着实际信号路走**。
+        结果里出现第四路时，报告不许把它**静默丢掉**（丢=谎报覆盖率）。"""
+        four = _result()
+        four["llm_judge"] = {"signal": "llm_judge", "status": "skipped", "value": None, "detail": "未接入"}
+        out = build_report_html(four, dict(META))
+        low = out.lower()
+        assert "llm_judge" in low or "未识别" in out or "第四" in out, (
+            "结果里在场的一路被报告静默省略了——表行是硬编码三行，将来加路必谎报"
+        )
+
+    def test_missing_quote_verified_defaults_to_unverified(self):
+        """C1 附带：条目**缺 quote_verified 键**时不许当作"已验证"。
+        默认值的方向必须是保守（未验证），不是乐观。"""
+        rev = {"signal": "reviewer", "status": "ok",
+               "value": {"ai_features": [{"quote": "一句没有核验标记的引文"}], "human_evidence": []},
+               "detail": "d"}
+        out = build_report_html(_result(reviewer=rev), dict(META))
+        assert "未逐字命中" in out or "未核验" in out, "缺 quote_verified 被默认成了已验证（乐观默认）"
+
+    def test_page_top_warning_bar_is_populated_after_render(self):
+        """🔴 碧霄自查抓到自己刚写进去的顺序 bug：`warn_html` 曾被放在 sections
+        字面量里、排在各表**之前**求值——而 notes 是渲染各表时才填的，
+        于是警告条**永远是空的**，"形态异常"只散落在各节里，页首看着一片干净。
+        这条钉的是：**页首警告条必须在各段渲染完之后才组装**。
+        """
+        bad = _result()
+        bad["style"] = ["不是字典"]
+        bad["llm_judge"] = {"signal": "llm_judge", "status": "skipped", "value": None, "detail": "未接入"}
+        out = build_report_html(bad, dict(META))
+        bars = re.findall(r'<div class="caveat">(.*?)</div>', out, re.S)
+        assert len(bars) >= 2, f"页首只有免责句、没有形态警告条（实得 {len(bars)} 条）"
+        joined = "".join(bars)
+        assert "形态异常" in bars[1], f"第二条警告条内容不对：{bars[1][:120]}"
+        assert "未登记" in joined, "未登记信号路没进页首警告条"
+        # 警告条必须**在各节之前**（页首可见，不是埋在文体表里）
+        assert out.index(bars[1]) < out.index("文体指标对照"), "形态警告条位置太靠后"

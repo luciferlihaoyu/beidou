@@ -570,6 +570,10 @@ async def deai_report_html(
     - `probe_logprobs` 关 → 不向端点发探测请求（当前默认模型探测不到 logprobs，
       发了也是 skipped，白等一次网络往返）。
     要三路齐就显式打开——打开的是真金白银的 token。
+    两个开关**共用 `p.summary_llm` 这个路由**（当前实现口径，评审 C4 要求写明）：
+    审校师是"请另一个模型读一遍"，摘要路由够用；而困惑度严格来说应对
+    **生成本章的那个模型**（chapter_llm）打分才最有意义，此处为简化共用摘要路由，
+    换 logprobs 可用模型后若要精确，需改 `_pick_config(user, db, p.chapter_llm)`。
     """
     from datetime import datetime as _dt
     from urllib.parse import quote  # export_pack 里是函数内导入，模块级没有这个名字
@@ -582,7 +586,14 @@ async def deai_report_html(
 
     p = await _get_project(project_id, user, db)
     chapter = await db.get(Chapter, chapter_id)
-    if chapter is None or (p.novel_id and chapter.novel_id != p.novel_id):
+    # 归属校验**不许有短路分支**：AiProject.novel_id 是可空列（删掉绑定的小说时
+    # FK 置空），旧写法 `p.novel_id and chapter.novel_id != p.novel_id` 在 novel_id=None
+    # 时整条件短路成 False → 任何人的 chapter_id 都能出报告，等于跨用户泄露整章正文
+    # （天演评审 C-1 critical，真库探针实锤 HTTP 200）。
+    # 语义定死：项目没绑定小说 = 它没有章节 → 一律 404。
+    # （`not p.novel_id` 必须写在前面：两边都空时 `None != None` 是 False，
+    #   只靠等值比较会放行——测试档位 both-None 就是钉这个的。）
+    if not p.novel_id or chapter is None or chapter.novel_id != p.novel_id:
         raise HTTPException(404, "章节不存在，或不属于本项目")
 
     # 书名在 Novel 上：AiProject **没有** title 列。先前写 getattr(p, "title", "")

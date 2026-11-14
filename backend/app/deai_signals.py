@@ -45,6 +45,7 @@ SIGNAL_STATUS_TEXT: dict[str, str] = {
     "skipped": "当前模型/配置不支持，此路未参与打分",
     "failed": "调用失败，结果不可用（不得当作未发现问题）",
     "uncalibrated": "缺少标定样本，区间未建立",
+    "degenerate": "哨兵值，未真正检测（不得当作干净证据）",
 }
 
 #: 三路固定顺序（融合分参与路径的输出顺序由此决定，与传入字典的键序无关）。
@@ -74,7 +75,16 @@ def rule_signal(text: str) -> dict:
     r = detect(text)
     detail = "本地确定性规则检测（9 维，无模型参与）"
     if any(i.get("type") == "太短" for i in r["issues"]):
-        detail += "；文本过短触发提前短路，100 是哨兵值、不具区分力"
+        # 🔴 评审 B-2 major：detect() 对过短文本短路返回 score=100（anti_llm.py:96）。
+        # 那个 100 是**哨兵**不是测量值；旧写法把它包成 status="ok" 交给融合，
+        # risk=100-100=0 → 报告上显示"完美干净"，而事实是"短到没法检测"。
+        # 「没检测」渲染成「没问题」是本项目反复出现的形状，这里从状态层掐断。
+        return _envelope(
+            "rule",
+            "degenerate",
+            None,
+            "文本过短，规则检测提前短路（score=100 是哨兵值、不具区分力），此路未参与打分",
+        )
     return _envelope("rule", "ok", r["score"], detail)
 
 
@@ -102,16 +112,39 @@ async def _raw_completion(config: Any, payload: dict) -> dict:
         return resp.json()
 
 
-def _probe_payload(config: Any) -> dict:
-    """能力探测请求体：极小预算 + 显式索要 logprobs。"""
-    return {
-        "model": config.model,
-        "messages": [{"role": "user", "content": "只回复两个字：夜风"}],
-        "max_tokens": 8,
-        "stream": False,
-        "logprobs": True,
-        "top_logprobs": 1,
-    }
+_PPL_MAX_CHARS = 6000  # 送入上限：再长就只打前 6000 字（一次检测不该烧掉整本的钱）
+_PPL_MAX_TOKENS = 4000
+
+
+def _score_payload(config: Any, text: str) -> tuple[dict, int, bool]:
+    """困惑度请求体：**探测与计算合为一发**。
+
+    让模型**逐字复述**被检文本（贪心解码），logprobs 就正好是"模型看这段字时
+    每个 token 有多意外"——这才是被检文本的困惑度。旧写法发固定探测句「只回复
+    两个字：夜风」，拿到的是探针句的 logprobs，与被检文本**毫无关系**
+    （天演评审 B-1 critical：2 字与 3000 字文本得到同一个值）。
+
+    返回 (payload, 实际送入字数, 是否截断)。
+    """
+    sent = text[:_PPL_MAX_CHARS]
+    truncated = len(text) > len(sent)
+    return (
+        {
+            "model": config.model,
+            "messages": [
+                {"role": "system", "content": "逐字复述用户给出的文本。不加任何说明、"
+                                              "不翻译、不总结、不补全，输出与输入完全一致。"},
+                {"role": "user", "content": sent},
+            ],
+            "max_tokens": min(_PPL_MAX_TOKENS, max(64, len(sent) * 2)),
+            "temperature": 0,
+            "stream": False,
+            "logprobs": True,
+            "top_logprobs": 1,
+        },
+        len(sent),
+        truncated,
+    )
 
 
 def _logprobs_usable(choice: Any) -> bool:
@@ -140,7 +173,8 @@ async def perplexity_signal(
     if config is None:
         return _envelope("perplexity", "skipped", None, "未提供模型配置，此路未调用")
     try:
-        data = await raw_completion(config, _probe_payload(config))
+        payload, sent_chars, truncated = _score_payload(config, text)
+        data = await raw_completion(config, payload)
         choice = (data.get("choices") or [{}])[0]
     except Exception as exc:  # 网络/HTTP/解析失败：如实报 failed
         return _envelope(
@@ -164,8 +198,10 @@ async def perplexity_signal(
         "perplexity",
         "ok",
         round(ppl, 2),
-        f"困惑度 = exp(-平均 logprob)，取自响应 {len(lps)} 个 token 的 logprobs"
-        "（值与文本长度无关，只来自真实响应）",
+        f"困惑度 = exp(-平均 logprob)，取自模型**逐字复述被检文本**的响应 logprobs"
+        f"（{len(lps)} 个 token；送入 {sent_chars} 字"
+        + ("，超长已截断，此分只代表被截断的部分）" if truncated else "）")
+        + "；值来自真实响应，未使用任何字数/句长启发式",
     )
 
 

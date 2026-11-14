@@ -18,8 +18,18 @@ from __future__ import annotations
 
 import html as _html
 
+from .deai_signals import _PATH_ORDER  # 表行与覆盖率分母的唯一来源（评审 C3）
+
 # 展示文案。口径与 deai_signals.SIGNAL_STATUS_TEXT 一致，但这里是**报告层的显示名**。
-_STATUS_LABEL = {"ok": "参与", "skipped": "未启用", "failed": "失败", "uncalibrated": "未标定"}
+_STATUS_LABEL = {
+    "ok": "参与",
+    "skipped": "未启用",
+    "failed": "失败",
+    "uncalibrated": "未标定",
+    # 评审 B-2：太短哨兵那一路**没有真正检测过**，必须在报告里有自己的说法，
+    # 不许混进"未启用"（未启用是配置问题，哨兵是数据不够）。
+    "degenerate": "哨兵值·未真正检测",
+}
 _SEVERITY_LABEL = {"high": "高", "medium": "中", "low": "低"}
 _PATH_NAME = {"rule": "规则", "perplexity": "困惑度", "reviewer": "审校师"}
 
@@ -60,7 +70,10 @@ def _row(cells: list) -> str:
     return "<tr>" + "".join(cells) + "</tr>"
 
 
-def _coverage_block(fusion: dict, n_signals: int) -> str:
+def _coverage_block(fusion: dict, n_signals: int, notes: list) -> str:
+    if not isinstance(fusion, dict):
+        notes.append(f"融合结果形态异常（收到 {type(fusion).__name__}），无风险分")
+        return '<p style="font-size:1.3rem;font-weight:700">—/—</p><p class="st-failed">融合数据形态异常，本报告不构成判断依据。</p>'
     participating = fusion.get("participating") or []
     weights = fusion.get("weights") or {}
     got = len(participating)
@@ -75,15 +88,39 @@ def _coverage_block(fusion: dict, n_signals: int) -> str:
     return head + f'<p class="muted">{detail}</p>'
 
 
-def _signals_table(result: dict) -> str:
-    weights = (result.get("fusion") or {}).get("weights") or {}
+def _signal_paths(result: dict) -> tuple[list, list]:
+    """表行与覆盖率分母都从这里来——**不写死三行**。
+
+    评审 C3：旧实现写死 `("rule","perplexity","reviewer")` 与 `n_signals = 3`，
+    将来 t7 加第四路时，那一路的**数据在场而报告不显示**，覆盖率还说 1/3 ——
+    那是**静默谎报**，比报错更难发现。未知路现在显式列成「未识别的信号路」。
+    """
+    known = list(_PATH_ORDER)
+    extras = [
+        k
+        for k, v in result.items()
+        if k not in known
+        and k not in ("style", "fusion")
+        and isinstance(v, dict)
+        and "status" in v
+    ]
+    return known, extras
+
+
+def _signals_table(result: dict, notes: list) -> str:
+    weights = (result.get("fusion") or {}).get("weights") or {} if isinstance(result.get("fusion"), dict) else {}
     rows = [_row([f"<th>{h}</th>" for h in ("信号", "状态", "值", "权重", "说明")])]
-    for key in ("rule", "perplexity", "reviewer"):
+    known, extras = _signal_paths(result)
+    if extras:
+        notes.append(f"结果里出现未登记在 _PATH_ORDER 的信号路：{'、'.join(extras)}（已列出，但权重与融合不参与）")
+    for key in known + extras:
         env = result.get(key) or {}
         rows.append(
             _row(
                 [
-                    f"<td>{_e(_PATH_NAME.get(key, key))}</td>",
+                    f"<td>{_e(_PATH_NAME.get(key, key))}"
+                    + (f'<span class="muted">（未识别的信号路）</span>' if key in extras else "")
+                    + "</td>",
                     f"<td>{_status_chip(str(env.get('status', '')))}</td>",
                     f'<td class="num">{_num(env.get("value"))}</td>',
                     f'<td class="num">{_num(weights.get(key))}</td>',
@@ -94,7 +131,7 @@ def _signals_table(result: dict) -> str:
     return "".join(rows)
 
 
-def _reviewer_block(result: dict) -> str:
+def _reviewer_block(result: dict, notes: list) -> str:
     """审校师证据：AI 特征 / 人味证据分组，每条带引文。
 
     🔴 失败与未启用**不许渲染成空白**——空白会被读成"审校师没发现问题"，
@@ -107,7 +144,11 @@ def _reviewer_block(result: dict) -> str:
             f'<p>状态：{_status_chip(status)}　{_e(env.get("detail"))}</p>'
             '<p class="muted">本路未产出证据，下方两组为空是「没有证据」而不是「没有问题」。</p>'
         )
-    value = env.get("value") or {}
+    value = env.get("value")
+    if value is not None and not isinstance(value, dict):
+        notes.append(f"审校师证据形态异常（收到 {type(value).__name__}），本路结果不可用")
+        return '<p class="st-failed">数据形态异常，本路结果不可用（不是「没有发现问题」）。</p>'
+    value = value or {}
 
     def _items(lst):
         if not lst:
@@ -116,11 +157,15 @@ def _reviewer_block(result: dict) -> str:
         for it in lst:
             it = it or {}
             label = it.get("label") or it.get("feature") or it.get("name") or ""
-            flag = (
-                ""
-                if it.get("quote_verified", True)
-                else '　<span class="st-failed">引文未逐字命中原文</span>'
-            )
+            # 🔴 缺键的默认方向必须是**保守**（评审 C1 附带）：原先 `get(..., True)`
+            # 等于"没标记就算核验过"，把旗标静默摘掉；现在没标记就是没核验。
+            verified = it.get("quote_verified")
+            if verified is True:
+                flag = ""
+            elif verified is False:
+                flag = '　<span class="st-failed">引文未逐字命中原文</span>'
+            else:
+                flag = '　<span class="st-failed">引文未核验（结果缺少核验标记）</span>' 
             out.append(f"<li>{_e(label)}｜引文 {_e(it.get('quote'))}{flag}</li>")
         return "".join(out)
 
@@ -133,7 +178,10 @@ def _reviewer_block(result: dict) -> str:
     )
 
 
-def _style_table(style: dict) -> str:
+def _style_table(style, notes: list) -> str:
+    if not isinstance(style, dict):
+        notes.append(f"文体指标形态异常（收到 {type(style).__name__}），本节无数据")
+        return _row(['<td colspan="5" class="st-failed">数据形态异常，未能解析</td>'])
     rows = [_row([f"<th>{h}</th>" for h in ("维度", "实测值", "人类区间", "偏离", "标定状态")])]
     for name, d in (style or {}).items():
         d = d or {}
@@ -189,23 +237,38 @@ def build_report_html(result: dict, meta: dict) -> str:
     """
     result = result or {}
     meta = meta or {}
-    fusion = result.get("fusion") or {}
-    n_signals = 3
+    fusion = result.get("fusion") if isinstance(result.get("fusion"), dict) else {}
+    notes: list[str] = []  # 形态异常/未登记路，汇总成页首警告条
+    _known, _extras = _signal_paths(result)
+    n_signals = len(_known) + len(_extras)
 
     title = _e(meta.get("book_title")) or "（未命名作品）"
     where = f"项目 {_num(meta.get('project_id'))}｜第 {_num(meta.get('chapter_no'))} 章"
     stamp = _e(meta.get("generated_at")) if meta.get("generated_at") else ""
     caveat = _e(fusion.get("caveat")) or "实验风险分不是 AI 生成概率"
 
+    # 🔴 顺序要紧：notes 是**渲染各表时**才填的，所以警告条必须先算完各段、
+    # 再插到页首。原先把 warn_html 写在 sections 字面量里、排在各表之前，
+    # Python 按字面量顺序求值 → 那时 notes 还是空的 → 警告条永远不出现（假修复）。
+    coverage_html = _coverage_block(fusion, n_signals, notes)
+    signals_html = _signals_table(result, notes)
+    reviewer_html = _reviewer_block(result, notes)
+    style_html = _style_table(result.get("style"), notes)
+    rules_html = _rules_block(meta.get("issues"))
+    text_html = _text_block(meta.get("text"))
+    warn_html = (
+        '<div class="caveat">' + "；".join(_e(n) for n in notes) + "</div>" if notes else ""
+    )
     sections = [
         f'<h1>{title}</h1><p class="muted">{where}{("｜" + stamp) if stamp else ""}</p>',
         f'<div class="caveat">{caveat}</div>',
-        f'<h2>覆盖率证据</h2>{_coverage_block(fusion, n_signals)}',
-        f'<h2>三路信号表</h2><table>{_signals_table(result)}</table>',
-        f'<h2>审校师证据</h2>{_reviewer_block(result)}',
-        f'<h2>文体指标对照</h2><table>{_style_table(result.get("style") or {})}</table>',
-        f'<h2>规则命中（按严重度分组）</h2>{_rules_block(meta.get("issues"))}',
-        f'<h2>检测原文</h2>{_text_block(meta.get("text"))}',
+        warn_html,
+        f'<h2>覆盖率证据</h2>{coverage_html}',
+        f'<h2>信号表（共 {n_signals} 路）</h2><table>{signals_html}</table>',
+        f'<h2>审校师证据</h2>{reviewer_html}',
+        f'<h2>文体指标对照</h2><table>{style_html}</table>',
+        f'<h2>规则命中（按严重度分组）</h2>{rules_html}',
+        f'<h2>检测原文</h2>{text_html}',
     ]
     body = "\n".join(sections)
     return (
