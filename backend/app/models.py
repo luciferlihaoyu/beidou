@@ -396,6 +396,9 @@ class AiProject(Base):
     # 璇玑知识库同步（KB 写方向自动化）
     last_kb_sync_at: Mapped[str] = mapped_column(String(40), default="")  # 最近一次成功同步的 UTC ISO 串
     auto_kb_sync: Mapped[bool] = mapped_column(default=True)  # 定稿后自动同步璇玑（默认开）
+    # 技能卡注入实况（t3-wire-observe，D1）：按节点归并的字典 JSON，同节点重跑覆盖；
+    # 只存计数与卡名，绝不存 prompt 正文（防止几百章的 prompt 堆进项目表）
+    skill_wire_json: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(default=utcnow, onupdate=utcnow)
 
@@ -435,6 +438,9 @@ class AiChapterJob(Base):
     # 客户端中断/报错退出）只要累积非空就覆盖写这里；finalize 成功后清空。
     draft_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     draft_updated_at: Mapped[datetime | None] = mapped_column(nullable=True)  # 草稿最近一次落库时刻
+    # 技能卡注入实况（t3-wire-observe，D2）：本章各次注入的 record 列表 JSON（键序即注入次序）；
+    # 只存计数与卡名，绝不存 prompt/正文
+    skill_wire_json: Mapped[str] = mapped_column(Text, default="")
 
 
 class CharacterRelation(Base):

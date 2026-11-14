@@ -30,7 +30,9 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .. import llm_timeouts
+from .. import schemas  # t4：产物契约校验 + 快照合并（纯校验层，无 HTTP）
 from .. import skillwire
+from ..anti_llm import ANTI_LLM_RULES  # t5①：界面正文写作与夜跑/批量共用同一套反 AI 腔规则（只导入，不重抄副本）
 from ..db import get_db, SessionLocal
 from ..deps import get_ai_config, get_current_user
 import logging
@@ -472,6 +474,157 @@ def _wire_skill(
     return ((text + "\n\n" + prompt) if text else prompt), record
 
 
+# ---------- t3-wire-observe：注入实况落库（D1 项目级归并 / D2 章级列表） ----------
+#
+# record 从 t2a 起就攒在各调用点上，但从未落地——「每章注了哪几张卡、多少字、
+# 有没有被截」只有程序自己知道。这两个辅助是 record 的唯一去向，三条铁律：
+#   1. **绝不抛**：观测是增强不是依赖——存观测这件事炸了，写书主流程必须照常出稿；
+#   2. 旧值解不开就用空值重建，并把原因写进本次 record 的 notes 留痕（不静默吞）；
+#   3. 只改内存对象、**不新增 commit**——沿用所在函数已有的提交路径。
+# 护栏：这里只存计数与卡名（record 形状已由 skillwire 冻结），绝不能把 prompt
+# 正文塞进来——一本书几百章的 prompt 全堆进项目表就是事故（tests 有护栏守卫）。
+
+#: 整份观测序列化后的体积上限。可观测主体是「哪张卡、多少字、有没有截」，
+#: 超限时的牺牲顺序：notes（解释性文字）→ 列表最旧的轮次；cards 计数主体绝不裁。
+#:
+#: 【体积口径实测（碧霄裁决 D-4：判据要量出来，不许「大概不会超吧」）】
+#: - 章级一轮 generate record ≈ 330 字（2 卡 + loaded 2-4 条）；轮闸 8 轮 → 常态 ≤ ~2.7K；
+#: - 单条 record 的**不可裁主体** = cards 元数据：loaded 条目受注入预算约束
+#:   （实测每卡 ≤ 4 条 × rel/title/chars ≈ 150 字 → 每卡 ~0.6K、两卡 ~1.2K），
+#:   病态外推 20 条/卡也只有 ~3K < 8000——所以「削 notes + 截列表到 1 条」
+#:   数学上必然装得下；这个口径由 tests/test_wire_observe.py 的
+#:   test_project_level_measured_ceiling_is_docked 钉住，主体膨胀即红；
+#: - 项目级（D1）：六键各存**一条** record 且同键覆盖不叠加（键数有界），
+#:   六节点实测总量 ~2-3K，同一条测试钉 < 6000。
+_WIRE_SIZE_LIMIT = 8000
+#: 章级滚动窗口：只保留最近 N 轮（D-4 硬闸）。**无条件生效**——不是载荷超限才触发，
+#: 小 record 的高频重跑同样要封顶（40 轮 × 150 字也会堆到 6K）。
+_WIRE_MAX_ROUNDS = 8
+_WIRE_NOTES_TRIM_MARK = "…（观测记录过长，notes 已截断）"
+_WIRE_ROLL_DROP_MARK = "（更早 {} 轮观测已滚动丢弃）"
+_WIRE_HARD_DROP_MARK = "（载荷超限，更早 {} 条观测已丢弃）"
+_WIRE_REBUILD_NOTE = "旧观测数据解析失败，已重建"
+
+
+def _shrink_wire(obj):
+    """观测载荷超限时的降体积，**必须证明返回载荷 ≤ 上限**（绝不返回超限载荷）。
+
+    牺牲顺序（D-4 裁决）：
+      ① 逐轮削 notes（record 层 + card 层，每轮各削最旧一条）——解释性文字先走；
+      ② notes 削光仍超限且载荷是列表：**截列表本身**（丢最旧的轮次）并留痕——
+        单条 record 的不可裁主体（cards 元数据）实测口径远小于上限
+        （量法见 _WIRE_SIZE_LIMIT 注释），所以截到 1 条必然装得下。
+    预算给留痕留余量（mark + 两条丢弃痕迹 ~80 字）；深拷贝操作、绝不抛；
+    若极端到两条手段用尽仍超限（= 主体口径被打破），warning 报警不静默，
+    由测试钉住主体口径让它提前红。
+    """
+    try:
+        payload = json.dumps(obj, ensure_ascii=False)
+        if len(payload) <= _WIRE_SIZE_LIMIT:
+            return obj
+        trimmed = json.loads(payload)
+        records = list(trimmed.values()) if isinstance(trimmed, dict) else trimmed
+        n_recs = sum(1 for r in records if isinstance(r, dict))
+        #: 预算 = 上限 − 丢弃留痕余量 − 每条 record 一个 notes 截断 mark
+        budget = _WIRE_SIZE_LIMIT - 80 - len(_WIRE_NOTES_TRIM_MARK) * n_recs
+        # ① 削 notes
+        changed = False
+        while len(json.dumps(trimmed, ensure_ascii=False)) > budget:
+            progressed = False
+            for record in records:
+                if not isinstance(record, dict):
+                    continue
+                holders = [record] + [c for c in (record.get("cards") or []) if isinstance(c, dict)]
+                for holder in holders:
+                    notes = holder.get("notes")
+                    if notes:
+                        notes.pop(0)
+                        progressed = True
+                        changed = True
+            if not progressed:
+                break
+        if changed:
+            for record in records:
+                if isinstance(record, dict) and isinstance(record.get("notes"), list):
+                    record["notes"].append(_WIRE_NOTES_TRIM_MARK)
+        # ② 列表硬截兜底：丢最旧的轮次（键序即时间序，头部最旧），留痕写进最新一条
+        if isinstance(trimmed, list):
+            hard_dropped = 0
+            while len(trimmed) > 1 and len(json.dumps(trimmed, ensure_ascii=False)) > _WIRE_SIZE_LIMIT - 80:
+                trimmed.pop(0)
+                hard_dropped += 1
+            if hard_dropped and isinstance(trimmed[-1], dict):
+                notes = trimmed[-1].get("notes")
+                if isinstance(notes, list):
+                    notes.append(_WIRE_HARD_DROP_MARK.format(hard_dropped))
+        final = len(json.dumps(trimmed, ensure_ascii=False))
+        if final > _WIRE_SIZE_LIMIT:  # 主体口径被打破：报警不静默（测试钉口径，正常到不了）
+            logger.warning("观测载荷降体积后仍 %d 字（> %d）——record 主体超出实测口径，查 loaded 数量", final, _WIRE_SIZE_LIMIT)
+        return trimmed
+    except Exception:  # noqa: BLE001  截断是省体积，不能变成新故障源
+        return obj
+
+
+def _save_project_wire(p: AiProject, node: str, record: dict) -> None:
+    """项目级注入实况落库（D1）：`{"init": {record}, "setup": {...}, ...}` 按节点归并。
+
+    同节点重跑 → **覆盖**该键：可观测的是「这次实际注入了什么」，不是审计流水
+    （要查历史按节点重跑的过程，去看日志；表里只留最新一次）。
+    """
+    if not isinstance(record, dict) or not record:
+        return  # 空记录没有观测价值，也不许把已有观测洗掉
+    try:
+        try:
+            merged = json.loads(p.skill_wire_json or "{}")
+            if not isinstance(merged, dict):
+                raise ValueError("旧观测数据不是 JSON 对象")
+        except (ValueError, TypeError) as exc:
+            merged = {}
+            record = dict(record)
+            record["notes"] = [f"{_WIRE_REBUILD_NOTE}（{exc}）", *list(record.get("notes") or [])]
+        merged[node] = record
+        p.skill_wire_json = json.dumps(_shrink_wire(merged), ensure_ascii=False)
+    except Exception as exc:  # noqa: BLE001  观测是增强不是依赖：落库失败不许拖垮主流程
+        logger.warning("项目级观测落库失败（project=%s, node=%s）：%s", getattr(p, "id", "?"), node, exc)
+
+
+def _save_job_wire(job: AiChapterJob, records: list[dict]) -> None:
+    """章级注入实况落库（D2）：列表原样存，键序即注入次序；同章重跑**追加**。
+
+    一章一次 generate 产生 1-2 条 record（方法论卡 / 文风实测），没有
+    「重跑覆盖」的语义需求（与 D1 相反），追加即可看到每一轮注了什么。
+    但**追加必须有界**（D-4 硬闸）：滚动窗口只保留最近 ``_WIRE_MAX_ROUNDS`` 轮
+    （无条件生效，不随载荷大小漂移），丢弃的旧轮在最新一条 notes 留痕——
+    滚动丢弃必须可见，不许静默。
+    """
+    if not records:
+        return  # 空列表没有观测价值，也不许把已有观测洗掉（如 include_skill=False 的诊断路径）
+    try:
+        try:
+            existing = json.loads(job.skill_wire_json or "[]")
+            if not isinstance(existing, list):
+                raise ValueError("旧观测数据不是 JSON 数组")
+        except (ValueError, TypeError) as exc:
+            existing = []
+            first = dict(records[0])
+            first["notes"] = [f"{_WIRE_REBUILD_NOTE}（{exc}）", *list(first.get("notes") or [])]
+            records = [first, *records[1:]]
+        merged = [*existing, *records]
+        # 轮数硬闸：无条件封顶（在 shrink 之前裁， shrink 的 notes 削减不承担轮数职责）
+        roll_dropped = max(0, len(merged) - _WIRE_MAX_ROUNDS)
+        if roll_dropped:
+            merged = merged[-_WIRE_MAX_ROUNDS:]
+        shrinked = _shrink_wire(merged)
+        # 滚动留痕**最后**加：shrink 可能削 notes，留痕放在它之后才保证必在场
+        if roll_dropped and isinstance(shrinked, list) and shrinked and isinstance(shrinked[-1], dict):
+            notes = shrinked[-1].get("notes")
+            if isinstance(notes, list):
+                notes.append(_WIRE_ROLL_DROP_MARK.format(roll_dropped))
+        job.skill_wire_json = json.dumps(shrinked, ensure_ascii=False)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("章级观测落库失败（job=%s）：%s", getattr(job, "id", "?"), exc)
+
+
 _SYSTEM = (
     "你是一位资深网文策划与作家，熟悉中文网文市场（起点/番茄/晋江）的题材、节奏与读者期待。"
     "输出务必直接、可用、具体，避免空话。要求 JSON 时只输出 JSON，不要任何解释。"
@@ -644,6 +797,94 @@ async def get_project(project_id: int, user: User = Depends(get_current_user), d
     return _project_out(p, novel, cc)
 
 
+@router.get("/projects/{project_id}/skill-wire")
+async def get_skill_wire(
+    project_id: int,
+    limit: int = 50,
+    chapter_id: int | None = None,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """技能卡注入实况查询（t3-wire-observe）：让人和用户脚本查「到底注了什么」。
+
+    返回 ``{project_id, nodes, chapters, total_chapters, truncated}``：
+    - nodes：项目级按节点归并的注入记录（D1 字典原样，键序不保证、按键取值）；
+    - chapters：章级列表，**章号升序**、``limit`` 取**尾部窗口**（最近 N 章）——
+      与 ``_WIRE_MAX_ROUNDS`` 保留最近几轮同一取向（写作进度在书尾，默认给头部
+      等于默认展示最不可能有人关心的部分）；
+    - ``?chapter_id=``：单章精确查（写哪章查哪章，最常用姿势）；
+    - ``total_chapters`` + ``truncated``：**截断必须可见**——查观测的人若不知道
+      "还有 250 章没给我"，就会基于残缺数据下结论，比体积大更危险。
+      返回条数恒为 ``min(total_chapters, 钳后 limit)``；
+    - 数据脏（JSON 解不开）时对应字段降级 ``{"_raw_error": "..."}`` 而不是 500——
+      观测查询坏了不该把项目页一起拖死。
+    - ``limit`` 默认 50、钳上限 200（形状照抄 ``/api/ai/chat`` 的 ``/history``）。
+
+    节点覆盖口径（为什么是 6 个、不是全量 9 个——**想补节点之前先读这两条**）：
+    - ``deconstruct`` 不在 nodes 里，且**结构性不可能在**：``/deconstruct`` 端点发生在
+      立项之前、没有 project 上下文可挂观测。不许为了让它出现而发明存储位或改 API。
+    - ``generate`` 不在 nodes 里：逐章产物按 D2 记在下方 ``chapters``（每章一份），
+      不在项目级归并里重复记账。
+    当前 6 键 = init / setup / outline / outline_continue / review / synopsis。
+
+    性能口径（评审实测 1000 章）：瓶颈在 jobs 全量拉回（28.6ms）+ chapters 千行
+    （15.8ms）+ 逐章 ``json.loads``（48.1ms），**不在排序**——``order_chapters``
+    内存排序仅 0.9ms，别在排序上白费劲。加 limit 后窗口内才做 ``json.loads``，
+    响应体积与序列化自然回落 ~50ms 级。
+    """
+    p = await _get_project(project_id, user, db)
+    limit = max(1, min(limit, 200))  # 钳上限，形状同 /history 的 min(limit, 200)
+    try:
+        nodes = json.loads(p.skill_wire_json or "{}")
+        if not isinstance(nodes, dict):
+            raise ValueError("项目级观测数据不是 JSON 对象")
+    except (ValueError, TypeError) as e:
+        nodes = {"_raw_error": f"项目级观测数据解析失败：{e}"}
+
+    chapters_out: list[dict] = []
+    total = 0
+    truncated = False
+    if p.novel_id is not None:
+        conds = [AiChapterJob.project_id == p.id, AiChapterJob.skill_wire_json != ""]
+        if chapter_id is not None:
+            conds.append(AiChapterJob.chapter_id == chapter_id)  # 精确查：DB 层先过滤
+        else:
+            conds.append(AiChapterJob.chapter_id.is_not(None))
+        jobs = ((await db.execute(select(AiChapterJob).where(*conds))).scalars().all())
+        if jobs:
+            chapters = (
+                (await db.execute(select(Chapter).where(Chapter.novel_id == p.novel_id))).scalars().all()
+            )
+            volumes = (
+                (await db.execute(select(Volume).where(Volume.novel_id == p.novel_id))).scalars().all()
+            )
+            ordered = order_chapters(list(chapters), list(volumes))
+            by_id = {c.id: (i + 1, c.title) for i, c in enumerate(ordered)}
+            entries = []  # (章号, 章题, job)——先组装排序，窗口内才做 json.loads
+            for job in jobs:
+                loc = by_id.get(job.chapter_id)
+                if loc is None:
+                    continue  # 章已不在书里（被删/游离任务）——没有章号就不给空壳
+                entries.append((loc[0], loc[1], job))
+            entries.sort(key=lambda e: e[0])  # 章号升序
+            total = len(entries)
+            truncated = total > limit
+            window = entries[-limit:] if truncated else entries  # 尾部窗口 = 最近 N 章
+            for number, title, job in window:
+                try:
+                    wire = json.loads(job.skill_wire_json or "[]")
+                    if not isinstance(wire, list):
+                        raise ValueError("章级观测数据不是 JSON 数组")
+                except (ValueError, TypeError) as e:
+                    wire = [{"_raw_error": f"章级观测数据解析失败：{e}"}]
+                if not wire:
+                    continue
+                chapters_out.append(
+                    {"chapter_id": job.chapter_id, "number": number, "title": title, "wire": wire}
+                )
+    return {"project_id": p.id, "nodes": nodes, "chapters": chapters_out, "total_chapters": total, "truncated": truncated}
+
+
 @router.delete("/projects/{project_id}")
 async def delete_project(
     project_id: int,
@@ -788,13 +1029,19 @@ async def init_project(
         "}"
     )
     prompt, _wire_init = _wire_skill("init", prompt)
+    _save_project_wire(p, "init", _wire_init)  # t3：注入实况落库（沿用下方已有的 commit）
     raw = await _chat_text(config, _SYSTEM, prompt)
     try:
         spec = _parse_json(raw)
     except ValueError as e:
         raise HTTPException(502, f"AI 输出解析失败：{e}；原始输出前 200 字：{raw[:200]}") from e
-    if not isinstance(spec, dict) or not spec.get("premise"):
-        raise HTTPException(502, "AI 输出缺少核心字段（premise）")
+    obj, errors = schemas.validate("init", spec)  # t4：产物契约（失败 502，旧句做前缀）
+    if errors:
+        raise HTTPException(502, "AI 输出缺少核心字段（premise）：" + "；".join(errors))
+    # t4 裁决三：落库快照走 merge_snapshot（公式 B+C）——原始保真（characters/
+    # 自造键）+ 规整覆盖同名标量 + 滤新增 None；下方取值继续用 spec（合并 dict，
+    # 与旧代码读法一致），规整对象 obj 只参与合并。
+    spec = schemas.merge_snapshot(spec, obj)
     # 双保险：作者已填字段强制覆盖 AI 输出（防模型不听话）
     if kept:
         for k in SCALAR_FIELDS:
@@ -907,16 +1154,18 @@ async def setup_project(project_id: int, user: User = Depends(get_current_user),
         "所有设定必须服务于 premise 的核心冲突。"
     )
     prompt, _wire_setup = _wire_skill("setup", prompt)
+    _save_project_wire(p, "setup", _wire_setup)  # t3：注入实况落库
     raw = await _chat_text(config, _SYSTEM, prompt, max_tokens=6000)
     try:
         data = _parse_json(raw)
     except ValueError as e:
         raise HTTPException(502, f"AI 输出解析失败：{e}") from e
 
-    chars = data.get("characters") or []
-    world = data.get("worldview") or []
-    if not chars:
-        raise HTTPException(502, "AI 未生成角色")
+    obj, errors = schemas.validate("setup", data)  # t4：角色空壳闸 + 每角色必须有 name
+    if errors:
+        raise HTTPException(502, "AI 未生成角色：" + "；".join(errors))
+    chars = obj.characters  # 规整对象取值；worldview 可选（None → []，旧 or [] 口径）
+    world = obj.worldview or []
 
     # 清掉旧的 AI 生成设定（重新生成场景），保留人工加过的？v1：setup 阶段整体重建
     old_chars = (
@@ -934,19 +1183,19 @@ async def setup_project(project_id: int, user: User = Depends(get_current_user),
         db.add(
             Character(
                 novel_id=p.novel_id,
-                name=str(c.get("name", ""))[:100],
-                role=str(c.get("role", "配角"))[:50],
-                description=str(c.get("description", ""))[:2000]
-                + (f"\n弧光：{c.get('arc')}" if c.get("arc") else ""),
+                name=(c.name or "")[:100],  # schema 保证非空；or "" 仅类型兜底
+                role=(c.role or "配角")[:50],  # 旧 .get 默认语义等价迁移（None 脏值不再落 "None"）
+                description=(c.description or "")[:2000]
+                + (f"\n弧光：{c.arc}" if c.arc else ""),
             )
         )
     for w in world[:20]:
         db.add(
             WorldviewEntry(
                 novel_id=p.novel_id,
-                category=str(w.get("category", "其他"))[:50],
-                title=str(w.get("title", ""))[:200],
-                content=str(w.get("content", ""))[:5000],
+                category=(w.category or "其他")[:50],  # 旧默认语义；枚举默认不属于"造数据"，不留痕
+                title=(w.title or "")[:200],
+                content=(w.content or "")[:5000],
             )
         )
     # 停 setup 状态：让用户在向导里预览/编辑设定，点「确认并生成大纲」才推进
@@ -1009,14 +1258,15 @@ async def outline_project(project_id: int, user: User = Depends(get_current_user
         "每章 outline 要具体到事件，不写空话。"
     )
     prompt, _wire_outline = _wire_skill("outline", prompt)
+    _save_project_wire(p, "outline", _wire_outline)  # t3：注入实况落库
     raw = await _chat_text(config, _SYSTEM, prompt, max_tokens=8000)
     try:
         data = _parse_json(raw)
     except ValueError as e:
         raise HTTPException(502, f"AI 输出解析失败：{e}") from e
-    volumes_data = data.get("volumes") or []
-    if not volumes_data:
-        raise HTTPException(502, "AI 未生成大纲")
+    obj, errors = schemas.validate("outline", data)  # t4：至少 1 卷且全局至少 1 章
+    if errors:
+        raise HTTPException(502, "AI 未生成大纲：" + "；".join(errors))
 
     # 重建卷章骨架（outline 阶段允许重新生成）
     old_chapters = (
@@ -1036,16 +1286,39 @@ async def outline_project(project_id: int, user: User = Depends(get_current_user
         await db.delete(j)
     await db.flush()
 
+    # t4b 同款判据贯彻到主路径（天演 C-1）：落库循环是**截断口径**
+    # （volumes[:20]、每卷 chapters[:100]），schema 是全局口径；超出部分丢弃
+    # 必须留 warning，不许静默吞用户数据。
+    stored_vols = min(len(obj.volumes), 20)
+    total_input_chapters = sum(len(v.chapters) for v in obj.volumes)
+    dropped_vols = len(obj.volumes) - stored_vols
+    dropped_chaps = sum(len(v.chapters) for v in obj.volumes[stored_vols:]) + sum(
+        max(0, len(v.chapters) - 100) for v in obj.volumes[:stored_vols]
+    )
+    if dropped_vols or dropped_chaps:
+        logger.warning(
+            "大纲返回 %d 卷 %d 章，仅前 %d 卷入库、每卷至多 100 章（project=%s，丢弃 %d 卷 %d 章）",
+            len(obj.volumes),
+            total_input_chapters,
+            stored_vols,
+            p.id,
+            dropped_vols,
+            dropped_chaps,
+        )
+
     total_chapters = 0
-    for vi, v in enumerate(volumes_data[:20]):
-        volume = Volume(novel_id=p.novel_id, title=str(v.get("title", f"第{vi+1}卷"))[:200], sort_order=vi)
+    for vi, v in enumerate(obj.volumes[:stored_vols]):
+        vol_title = v.title or f"第{vi+1}卷"  # 旧 f-string 默认语义迁移
+        if not v.title:  # t4 裁决四：兜底必须留痕——"第N卷"看起来像真数据，不许静默造
+            logger.info("大纲第 %d 卷标题缺失，已兜底「%s」（project=%s）", vi + 1, vol_title, p.id)
+        volume = Volume(novel_id=p.novel_id, title=vol_title[:200], sort_order=vi)
         db.add(volume)
         await db.flush()
-        for ci, ch in enumerate((v.get("chapters") or [])[:100]):
+        for ci, ch in enumerate(v.chapters[:100]):
             chapter = Chapter(
                 novel_id=p.novel_id,
                 volume_id=volume.id,
-                title=str(ch.get("title", ""))[:200],
+                title=(ch.title or "")[:200],  # 空串不是"像真数据"，无需逐条留痕
                 content="",
                 sort_order=ci,
                 status="draft",
@@ -1057,12 +1330,23 @@ async def outline_project(project_id: int, user: User = Depends(get_current_user
                     project_id=p.id,
                     chapter_id=chapter.id,
                     status="pending",
-                    outline=str(ch.get("outline", ""))[:2000],
+                    outline=(ch.outline or "")[:2000],
                 )
             )
             total_chapters += 1
 
-    p.outline_json = json.dumps(data, ensure_ascii=False)
+    # t4 裁决三：快照走合并公式（公式 B+C）——卷章自造键保真、滤新增 None
+    merged = schemas.merge_snapshot(data, obj)
+    # t4b 同款：快照只写**实际入库**的卷章（卷 ≤20、每卷章 ≤100，与上面库循环
+    # 同一截断口径）。照原样写全量进 outline_json 就是**持久化的假数据**——
+    # 前端大纲卡从它渲染，会显示库里根本不存在的卷/章（天演 C-1）。
+    merged["volumes"] = [
+        {**mv, "chapters": mv["chapters"][:100]}
+        if isinstance(mv, dict) and isinstance(mv.get("chapters"), list)
+        else mv
+        for mv in (merged.get("volumes") or [])[:stored_vols]
+    ]
+    p.outline_json = json.dumps(merged, ensure_ascii=False)
     p.status = "writing"
     await db.commit()
     novel = await db.get(Novel, p.novel_id)
@@ -1142,10 +1426,15 @@ async def _outline_continue_core(p: AiProject, user: User, db: AsyncSession) -> 
     for label, val in (
         ("角色当前状态", p.character_state),
         ("伏笔台账", p.plot_arcs),
+        # t5③：`subplot_board` 全仓**零写入者**（models.py:395 建列、:709 吐前端、这里读，
+        # 但没有任何一处给它赋值）→ 恒空。判据是「空数据不许占位喂模型」：
+        # 给模型一行标着"支线板"的空位，等于邀请它编造支线进度。
+        # 故必须保持 if val:（现状本就正确；守卫 tests/test_smallfixes.py::TestSubplotBoardHonestSlot）。
+        # 支线板**功能本身**不在本轮范围，另列待办。
         ("支线板", p.subplot_board),
         ("资源账本", p.particle_ledger),
     ):
-        if val:
+        if val:  # 不许改成 else 填"（未启用）"之类占位串
             context_parts.append(f"{label}：{str(val)[:800]}")
 
     prompt = (
@@ -1166,6 +1455,7 @@ async def _outline_continue_core(p: AiProject, user: User, db: AsyncSession) -> 
         "}\n"
     )
     prompt, _wire_cont = _wire_skill("outline_continue", prompt)
+    _save_project_wire(p, "outline_continue", _wire_cont)  # t3：注入实况落库
     raw = await _chat_text(config, _SYSTEM, prompt, max_tokens=8000)
     try:
         data = _parse_json(raw)
@@ -1176,30 +1466,41 @@ async def _outline_continue_core(p: AiProject, user: User, db: AsyncSession) -> 
             data = _parse_json(raw)
         except ValueError as e:
             raise HTTPException(502, f"AI 输出解析失败（已重试一次）：{e}") from e
-    volumes_data = [v for v in ((data or {}).get("volumes") or []) if isinstance(v, dict)][:10]
-    planned = sum(len(v.get("chapters") or []) for v in volumes_data)
-    if not volumes_data or planned <= 0:
-        raise HTTPException(502, "AI 未产出任何续写章节")
+    obj, errors = schemas.validate("outline_continue", data)  # t4：与 outline 同契约
+    if errors:
+        raise HTTPException(502, "AI 未产出任何续写章节：" + "；".join(errors))
+    volumes_data = obj.volumes  # 规整对象：元素个型已由契约保证（落库与快照共用）
 
     # 追加式落库：新卷（sort_order 接现有末尾）+ 新章（卷内从 0 顺排）+ pending 任务
     base_vol_sort = (max(v.sort_order for v in volumes) + 1) if volumes else 0
     added = 0
-    for vi, v in enumerate(volumes_data):
-        chs = [c for c in (v.get("chapters") or []) if isinstance(c, dict)][:40]
-        if not chs:
-            continue
+    stored_vols = min(len(volumes_data), 10)  # t4b：本循环是**截断口径**，对外报数必须用它，不能用 len(volumes_data)
+    for vi, v in enumerate(volumes_data[:stored_vols]):
+        if len(v.chapters) > 40:  # t4b：每卷超 40 章的丢弃必须可见，不许静默丢用户数据
+            logger.warning(
+                "续写第 %d 卷返回 %d 章，仅前 40 章入库（project=%s，丢弃 %d 章）",
+                base_vol_sort + vi + 1,
+                len(v.chapters),
+                p.id,
+                len(v.chapters) - 40,
+            )
+        vol_title = v.title or f"第{base_vol_sort + vi + 1}卷"  # 旧 f-string 默认语义迁移
+        if not v.title:  # t4 裁决四：兜底必须留痕，不许静默造"看起来像真数据"的标题
+            logger.info(
+                "续写第 %d 卷标题缺失，已兜底「%s」（project=%s）", base_vol_sort + vi + 1, vol_title, p.id
+            )
         volume = Volume(
             novel_id=p.novel_id,
-            title=str(v.get("title", f"第{base_vol_sort + vi + 1}卷"))[:200],
+            title=vol_title[:200],
             sort_order=base_vol_sort + vi,
         )
         db.add(volume)
         await db.flush()
-        for ci, c in enumerate(chs):
+        for ci, c in enumerate(v.chapters[:40]):
             chapter = Chapter(
                 novel_id=p.novel_id,
                 volume_id=volume.id,
-                title=str(c.get("title", ""))[:200],
+                title=(c.title or "")[:200],
                 content="",
                 sort_order=ci,
                 status="draft",
@@ -1211,29 +1512,60 @@ async def _outline_continue_core(p: AiProject, user: User, db: AsyncSession) -> 
                     project_id=p.id,
                     chapter_id=chapter.id,
                     status="pending",
-                    outline=str(c.get("outline", ""))[:2000],
+                    outline=(c.outline or "")[:2000],
                 )
             )
             added += 1
+    if len(volumes_data) > stored_vols:  # t4b：只入前 10 卷，被丢的卷/章必须报出来
+        lost_chaps = sum(len(vv.chapters) for vv in volumes_data[stored_vols:])
+        logger.warning(
+            "续写返回 %d 卷，仅前 %d 卷入库（project=%s，丢弃 %d 卷 %d 章）",
+            len(volumes_data),
+            stored_vols,
+            p.id,
+            len(volumes_data) - stored_vols,
+            lost_chaps,
+        )
     if added == 0:
+        # t4b 更正（原判"不可达"是错的，碧霄实测证伪）：schema 的「全局 ≥1 章」与
+        # 本循环的 volumes[:10] 是**两个口径**——12 卷、唯一的章在第 12 卷时，
+        # validate 放行而循环看不到任何章，added 仍为 0。
+        # 所以这条不是死代码：**不要因为「schema 已经保证过了」就删这个闸**，
+        # schema 是全局口径，这里是截断口径，它是空入库的唯一防线。
+        # 守卫：tests/test_t4_wiring.py::test_chapter_beyond_tenth_volume_still_hits_the_502_gate
         # 未 commit，挂起的 add 由请求栈回滚；不必显式 rollback（测试替身也没有该接口）
         raise HTTPException(502, "AI 返回的大纲没有可用章节")
 
     # 大纲 JSON 快照追加新卷（前端大纲预览卡从 project.outline 渲染；已有卷条目不动）
+    merged = schemas.merge_snapshot(data, obj)  # t4 裁决三：新卷自造键保真、滤新增 None
+    # t4b：快照只追加**实际入库**的那几卷。merged 里可能含第 11 卷以后的卷
+    # （schema 是全局口径），照原样写进 outline_json 就是**持久化的假数据**——
+    # 前端大纲卡从它渲染，会显示库里不存在的卷，比消息报错数更严重。
+    #
+    # 碧霄自查补完（织女在 FIX-1 回报里点出、我实测坐实）：上一轮这里**只裁了卷、没裁卷内的章**。
+    # 落库循环走的是 chapters[:40]，快照却写全量 → 单卷 45 章时库里 40 条、快照 45 条，
+    # 与上面那段注释批评的是**同一个洞**，只是换了一个维度。修了半个比没修更该打。
+    merged_vols = []
+    for _mv in (merged.get("volumes") or [])[:stored_vols]:
+        if isinstance(_mv, dict) and isinstance(_mv.get("chapters"), list) and len(_mv["chapters"]) > 40:
+            _mv = {**_mv, "chapters": _mv["chapters"][:40]}  # 浅拷贝：只切章，卷级自造键原样保留
+        merged_vols.append(_mv)
     try:
         snapshot = json.loads(p.outline_json or "{}")
         vol_list = snapshot.setdefault("volumes", [])
-        vol_list.extend(volumes_data)
+        vol_list.extend(merged_vols)
         p.outline_json = json.dumps(snapshot, ensure_ascii=False)
     except (ValueError, TypeError):
-        p.outline_json = json.dumps({"volumes": volumes_data}, ensure_ascii=False)
+        p.outline_json = json.dumps({"volumes": merged_vols}, ensure_ascii=False)
 
     await db.commit()
-    message = f"已续写第 {start}～{start + added - 1} 章大纲（{len(volumes_data)} 卷 {added} 章）"
+    # t4b：卷数用**实际入库**的 stored_vols（旧写法用 len(volumes_data)，
+    # 12 卷输入时用户看到「12 卷」而库里只建了 10 卷——报的是 LLM 的数，不是落库的数）
+    message = f"已续写第 {start}～{start + added - 1} 章大纲（{stored_vols} 卷 {added} 章）"
     logger.info("大纲续写（project=%s）：%s", p.id, message)
     return {
         "ok": True,
-        "added_volumes": len(volumes_data),
+        "added_volumes": stored_vols,
         "added_chapters": added,
         "chapter_range": [start, start + added - 1],
         "message": message,
@@ -1806,6 +2138,11 @@ async def _assemble_context(
             wire_sink.extend(skill_records)
         if skill_block:
             parts.append(skill_block)
+        # t3：章级观测落库（D2/D3）。UI（generate_chapter._prepare）/ 夜跑 / 批量
+        # 三条正文路径都经本函数拿手艺块，在唯一共用点落库 = 结构性防漂移——
+        # 未来第四条路径不可能漏接。_save_job_wire 绝不抛、不 commit，
+        # 沿用调用方函数里已有的提交路径。
+        _save_job_wire(job, skill_records)
     task = f"现在请写{chapter_display_title(chapter.title, number)}。"
     if job.outline:
         task += f"\n本章大纲：{job.outline}"
@@ -1917,6 +2254,10 @@ async def generate_chapter(
         _SYSTEM
         + "你正在执行整章正文写作任务。要求：中文网文风格，段落短小（手机阅读友好），"
         "对话生动，章末留钩子。严格遵守角色卡与状态文件的一致性。"
+        # t5①：界面正文写作此前**独缺**反 AI 腔规则（nightly.py:151 / batch.py:587 都有），
+        # 于是界面写出来的章 AI 味更重——「同一功能三处实现、行为不同」第 13 条老账。
+        # 规则**只导入不重抄**：抄一份就成了第三份会各自漂移的副本（守卫见 test_smallfixes.py）。
+        + ANTI_LLM_RULES
     )
     instruction = data.instruction.strip() if data and data.instruction.strip() else ""
     # FIX-3：闭包只捕主键。响应体阶段（流已开跑）不许再碰请求级会话。
@@ -2609,7 +2950,11 @@ async def finalize_chapter(
     # 拆分时 chapter.content 只剩第一段——状态文件必须吃整章全文（与夜跑同语义）。
     config = await _pick_config(user, db, p.summary_llm)
     state_input = data.content_text if split_into > 1 else strip_html(chapter.content)
-    state_updated = await _update_state_files(p, chapter, state_input, config, db)
+    state_updated = await _update_state_files(p, chapter, state_input, config, db, include_particle=True)
+    # t5②：界面定稿此前**独缺** include_particle=True（夜跑 nightly.py:235、
+    # 批量 batch.py:418 都传了）→ 从这里定稿的章，资源账本（金钱/物品/等级）永不滚动，
+    # 越写越漂。git 史实：nightly 那行注释原话是「与 finalize 一致，含资源账本」——
+    # 作者当时**以为** finalize 已经带账本，所以这不是有意关闭，是疏漏，故应补齐。
 
     # 2.5 人物关系自动同步（失败不阻塞）
     if p.novel_id:
@@ -2727,6 +3072,7 @@ async def review_chapter(
 
     review_chapters = await _novel_texts(db, p.novel_id, limit=40)
     prompt, _wire_review = _wire_skill("review", prompt, chapters=review_chapters)
+    _save_project_wire(p, "review", _wire_review)  # t3：注入实况落库
     raw = await _chat_text(config, _SYSTEM, prompt, max_tokens=3000)
     try:
         issues = _parse_json(raw)

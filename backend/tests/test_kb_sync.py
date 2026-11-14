@@ -396,7 +396,12 @@ def _patch_finalize_llm(monkeypatch):
     async def fake_pick_config(user, db, route_field):
         return SimpleNamespace(id=1, base_url="https://llm.example", api_key="k", model="m")
 
-    async def fake_update_state(p, chapter, text, config, db):
+    # 评审修复轮（天演 MN-1）：收回上一轮的 *a/**k 放宽。旧替身写死 5 个位置
+    # 参数，客观上构成"调用面恰好 5 个位置参数"的**隐式形状护栏**——放宽成
+    # *a/**k 后实现少传 2 个位置参数也全绿（双向实验证实）。现按 t5② 新契约
+    # **显式签名**重建替身：既接住 include_particle 关键字，又恢复形状护栏
+    # （实现少传/多传位置参数 → TypeError 立刻红）。
+    async def fake_update_state(p, chapter, text, config, db, *, include_particle=False):
         return True
 
     async def fake_sync_relations(p, novel, text, config, db):
