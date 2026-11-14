@@ -1,0 +1,405 @@
+"""t7-deai-signals 三路信号测试（全部假模型函数，不真调外部端点；真实冒烟由碧霄另跑）。
+
+诚实纪律（计划 §7）：
+- 期望值全部**硬编码**（手工推演：_AI_TEXT 疲劳词 42 处/190 字 → 密度 221.05，
+  detect 60 分；_HUMAN_TEXT detect 78 分——注意「她说」的「说」会命中 说道? 的可选道）；
+- 本文件导入 app.deai_signals 与 anti_llm 新增面（DIMENSION_NAMES/HUMAN_RANGES/dimension_values），
+  实现缺席时整个文件收集失败——这是结构红；实现落地后，两个关键判据（不许伪造困惑度、
+  不许拍脑袋填区间）靠**变异自证**证明能咬（见任务回报的变异清单）；
+- 天生结构性判据在此声明：test_dimension_names_are_the_nine / test_status_text_covers_exactly_four
+  是常量形状钉（防漂移），不承担"抓伪造"职责；抓伪造由 5/6/10/12/24 号判据承担。
+"""
+import asyncio
+import json
+import sys
+import types
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from app.anti_llm import DIMENSION_NAMES, HUMAN_RANGES, detect, dimension_values  # noqa: E402
+from app.deai_signals import (  # noqa: E402
+    FUSION_WEIGHTS,
+    SIGNAL_STATUS_TEXT,
+    collect_signals,
+    fuse_signals,
+    perplexity_signal,
+    reviewer_signal,
+    rule_signal,
+    style_dimensions,
+)
+
+# ---------------------------------------------------------------- 手工推演的固定文本
+# 每段 13 字：他非常紧张，然后突然明白。 疲劳词命中 非常/然后/突然 各 1（共 3/段）
+_AI_TEXT = "他非常紧张，然后突然明白。" * 14 + "殊不知其中缘由。"
+# 190 字、15 句（14×12 字 + 7 字）、疲劳词 42 处 → 密度 221.05；句长 std 1.25；上帝视角 1
+# detect：-20（疲劳>8）-12（句长单调）-8（上帝视角×1）= 60
+
+_HUMAN_TEXT = "他把烟按灭在砖墙上。「走吧。」她说。风从巷口灌进来，卷起地上的糖纸。" * 10
+# 340 字、40 句 std=4.60<5 → -12；对话 10 句、said_tags=10（说 命中 说道?）ratio 1.0 → -10
+# detect = 78
+
+_REVIEW_TEXT = (
+    "夜风掠过屋檐，铜铃轻响。他把刀横在膝上，眯眼看着巷口。「谁？」\n"
+    "她没有回答，只是把灯芯捻暗了半分。影子在墙上晃了一下。"
+)
+
+_FAKE_CONFIG = types.SimpleNamespace(
+    base_url="https://tianshu.example.com", api_key="test-key", model="MiniMax-M3"
+)
+
+# 2026-11-13 实测形状：HTTP 200 但 choices[0] 只有 finish_reason/index/message，无 logprobs
+def _no_lp_response():
+    return {
+        "id": "chatcmpl-probe",
+        "choices": [
+            {"finish_reason": "stop", "index": 0,
+             "message": {"role": "assistant", "content": "夜风"}},
+        ],
+    }
+
+
+def _lp_response(logprobs):
+    return {
+        "id": "chatcmpl-probe",
+        "choices": [
+            {"finish_reason": "stop", "index": 0,
+             "message": {"role": "assistant", "content": "夜风"},
+             "logprobs": {"content": logprobs}},
+        ],
+    }
+
+
+async def _raw_no_logprobs(config, payload):
+    return _no_lp_response()
+
+
+async def _raw_with_logprobs(config, payload):
+    return _lp_response([{"token": "夜", "logprob": -0.2}, {"token": "风", "logprob": -2.2}])
+# mean(-0.2, -2.2) = -1.2 → ppl = exp(1.2) = 3.3201… → round 3.32
+
+
+async def _raw_boom(config, payload):
+    raise ConnectionError("探针连接被拒")
+
+
+_REVIEWER_JSON = json.dumps(
+    {
+        "ai_features": [
+            {"quote": "夜风掠过屋檐，铜铃轻响", "why": "环境音开场"},
+            {"quote": "原文里不存在的一句引文", "why": "幻觉引文"},
+        ],
+        "human_evidence": [
+            {"quote": "把灯芯捻暗了半分", "why": "动作具体"},
+        ],
+    },
+    ensure_ascii=False,
+)
+
+
+async def _chat_reviewer_ok(system, prompt):
+    return _REVIEWER_JSON
+
+
+async def _chat_boom(system, prompt):
+    raise RuntimeError("审校端点超时")
+
+
+async def _chat_garbage(system, prompt):
+    return "抱歉，我无法输出结构化结果。"
+
+
+def _skipped_envelope(signal):
+    return {"signal": signal, "status": "skipped", "value": None, "detail": "夹具"}
+
+
+# ================================================================ 1. 统一信封形状
+def test_envelopes_have_exact_unified_shape():
+    rule = rule_signal(_AI_TEXT)
+    assert set(rule.keys()) == {"signal", "status", "value", "detail"}
+    assert rule["signal"] == "rule"
+    ppl = asyncio.run(perplexity_signal(_AI_TEXT, _FAKE_CONFIG, _raw_no_logprobs))
+    assert set(ppl.keys()) == {"signal", "status", "value", "detail"}
+    assert ppl["signal"] == "perplexity"
+    rev = asyncio.run(reviewer_signal(_REVIEW_TEXT, _chat_reviewer_ok))
+    assert set(rev.keys()) == {"signal", "status", "value", "detail"}
+    assert rev["signal"] == "reviewer"
+    style = style_dimensions(_AI_TEXT)
+    for cell in style.values():
+        assert set(cell.keys()) == {"value", "human_low", "human_high", "deviation", "status", "detail"}
+
+
+# ================================================================ 2. 第①路 规则
+def test_rule_signal_scores_hardcoded():
+    assert rule_signal(_AI_TEXT)["value"] == 60
+    assert rule_signal(_HUMAN_TEXT)["value"] == 78
+    # 与 detect() 既有输出一致（detect 由 306 条基线另行盯防，此处是 t7 本地钉）
+    assert detect(_AI_TEXT)["score"] == 60
+
+
+def test_rule_signal_short_text_sentinel_noted():
+    env = rule_signal("太短了。")
+    assert env["status"] == "ok"
+    assert env["value"] == 100  # detect 的太短哨兵值
+    assert "过短" in env["detail"]
+
+
+def test_detect_shape_unchanged():
+    r = detect(_AI_TEXT)
+    assert set(r.keys()) == {"score", "issues"}
+    assert detect(_HUMAN_TEXT)["score"] == 78
+    assert detect("短")["score"] == 100
+
+
+# ================================================================ 3. 第②路 困惑度（能力探测）
+def test_perplexity_probe_payload_requests_logprobs():
+    captured = {}
+
+    async def fake_raw(config, payload):
+        captured["payload"] = payload
+        return _no_lp_response()
+
+    asyncio.run(perplexity_signal(_AI_TEXT, _FAKE_CONFIG, fake_raw))
+    assert captured["payload"]["logprobs"] is True
+    assert captured["payload"]["top_logprobs"] == 1
+    assert captured["payload"]["stream"] is False
+    assert captured["payload"]["model"] == "MiniMax-M3"
+    assert captured["payload"]["max_tokens"] <= 16  # 能力探测必须省 token
+
+
+def test_perplexity_skipped_when_model_has_no_logprobs():
+    env = asyncio.run(perplexity_signal(_AI_TEXT, _FAKE_CONFIG, _raw_no_logprobs))
+    assert env["status"] == "skipped"
+    assert env["value"] is None
+    assert "logprobs" in env["detail"]
+    # logprobs 字段在场但不可用（null / 空 content / 无 logprob 数值）同样 skipped
+    assert asyncio.run(
+        perplexity_signal(_AI_TEXT, _FAKE_CONFIG,
+                          lambda c, p: _async_of(_lp_response([])))
+    )["status"] == "skipped"
+    assert asyncio.run(
+        perplexity_signal(_AI_TEXT, _FAKE_CONFIG,
+                          lambda c, p: _async_of({"choices": [{"finish_reason": "stop", "index": 0,
+                                                               "message": {}, "logprobs": None}]}))
+    )["status"] == "skipped"
+
+
+def test_perplexity_value_comes_only_from_logprobs():
+    """🔴 反启发式判据：两个不同文本、同一个假响应 → 值必须一模一样（只来自 logprobs）。"""
+    a = asyncio.run(perplexity_signal(_AI_TEXT, _FAKE_CONFIG, _raw_with_logprobs))
+    b = asyncio.run(perplexity_signal(_HUMAN_TEXT, _FAKE_CONFIG, _raw_with_logprobs))
+    assert a["status"] == "ok" and b["status"] == "ok"
+    assert a["value"] == 3.32  # exp(-(-0.2-2.2)/2)
+    assert a["value"] == b["value"]
+    assert "2" in a["detail"]  # detail 交代取了 2 个 token 的 logprobs
+
+
+def test_perplexity_failed_on_transport_error():
+    env = asyncio.run(perplexity_signal(_AI_TEXT, _FAKE_CONFIG, _raw_boom))
+    assert env["status"] == "failed"
+    assert env["value"] is None
+    assert "探针连接被拒" in env["detail"]
+
+
+def test_perplexity_skipped_when_no_config_without_calling():
+    calls = []
+
+    async def never(config, payload):
+        calls.append(payload)
+        raise AssertionError("未提供配置时不许发请求")
+
+    env = asyncio.run(perplexity_signal(_AI_TEXT, None, never))
+    assert env["status"] == "skipped"
+    assert calls == []
+
+
+async def _async_of(value):
+    return value
+
+
+# ================================================================ 4. 第③路 审校师
+def test_reviewer_ok_with_quote_verification():
+    env = asyncio.run(reviewer_signal(_REVIEW_TEXT, _chat_reviewer_ok))
+    assert env["status"] == "ok"
+    ai = env["value"]["ai_features"]
+    human = env["value"]["human_evidence"]
+    assert len(ai) == 2 and len(human) == 1
+    assert ai[0]["quote_verified"] is True
+    assert ai[1]["quote_verified"] is False  # 幻觉引文必须被标出
+    assert human[0]["quote_verified"] is True
+    assert "1 条引文未能" in env["detail"]
+
+
+def test_reviewer_failure_is_not_silence():
+    """🔴 调用失败绝不许伪装成「没发现问题」：value 必须是 None 而不是空清单。"""
+    env = asyncio.run(reviewer_signal(_REVIEW_TEXT, _chat_boom))
+    assert env["status"] == "failed"
+    assert env["value"] is None
+    assert env["value"] != {"ai_features": [], "human_evidence": []}
+    assert "审校端点超时" in env["detail"]
+    env2 = asyncio.run(reviewer_signal(_REVIEW_TEXT, _chat_garbage))
+    assert env2["status"] == "failed"
+    assert env2["value"] is None
+
+
+def test_reviewer_skipped_without_chat_fn():
+    env = asyncio.run(reviewer_signal(_REVIEW_TEXT, None))
+    assert env["status"] == "skipped"
+    assert env["value"] is None
+
+
+# ================================================================ 5. 文体区间（9 维）
+def test_dimension_names_are_the_nine():
+    assert DIMENSION_NAMES == [
+        "疲劳词密度", "禁用句式", "句长标准差", "对话标签比", "段落均匀度",
+        "上帝视角", "章末总结体", "三连排比", "套词密度",
+    ]
+
+
+def test_style_all_nine_uncalibrated():
+    """🔴 未标定就老实说未标定：区间不许有任何编造数字。"""
+    style = style_dimensions(_AI_TEXT)
+    assert list(style.keys()) == DIMENSION_NAMES
+    assert len(style) == 9
+    for cell in style.values():
+        assert cell["status"] == "uncalibrated"
+        assert cell["human_low"] is None
+        assert cell["human_high"] is None
+        assert cell["deviation"] is None
+        assert "缺少标定样本" in cell["detail"]
+    # 手工推演的维度值（值可以算，区间不可以编）
+    assert style["疲劳词密度"]["value"] == 221.05
+    assert style["句长标准差"]["value"] == 1.25
+    assert style["对话标签比"]["value"] is None
+    assert style["段落均匀度"]["value"] is None
+    assert style["上帝视角"]["value"] == 1
+    assert style["套词密度"]["value"] == 0.0
+    # 仓库当前没有任何标定样本 → 区间表必须为空
+    assert HUMAN_RANGES == {}
+
+
+def test_style_calibrated_branch_mechanics_with_fixture_range(monkeypatch):
+    """夹具区间只验证机制（deviation/来源），非真实标定——真标定必须走样本统计。"""
+    from app import deai_signals
+    monkeypatch.setitem(
+        HUMAN_RANGES, "疲劳词密度",
+        {"low": 0.0, "high": 8.0, "source": "测试夹具，非真实标定"},
+    )
+    style = deai_signals.style_dimensions(_AI_TEXT)
+    cell = style["疲劳词密度"]
+    assert cell["status"] == "ok"
+    assert cell["human_low"] == 0.0 and cell["human_high"] == 8.0
+    assert cell["deviation"] == 213.05  # 221.05 - 8.0
+    assert "测试夹具" in cell["detail"]
+    # 未命中的维度仍是 uncalibrated
+    assert style["句长标准差"]["status"] == "uncalibrated"
+
+
+def test_dimension_values_refuse_short_text():
+    vals = dimension_values("太短了。")
+    assert set(vals.keys()) == set(DIMENSION_NAMES)
+    assert all(v is None for v in vals.values())
+
+
+# ================================================================ 6. 融合分数
+def test_fusion_single_participant_declares_it_and_pins_weights():
+    assert FUSION_WEIGHTS == {"rule": 0.5, "perplexity": 0.2, "reviewer": 0.3}
+    rule = rule_signal(_HUMAN_TEXT)  # 78 → 风险 22.0
+    f = fuse_signals(rule, _skipped_envelope("perplexity"), _skipped_envelope("reviewer"))
+    assert f["score"] == 22.0
+    assert f["participating"] == ["rule"]
+    assert f["weights"] == {"rule": 0.5}
+    assert "仅 1 路参与" in f["detail"]
+    assert f["caveat"] == "实验风险分不是 AI 生成概率"
+
+
+def test_fusion_rule_and_reviewer_weighted():
+    """rule 60(风险40,权重0.5) + reviewer 2AI/1人味(风险66.67,权重0.3) → (20+20.001)/0.8 = 50.0"""
+    rule = rule_signal(_AI_TEXT)
+    rev = asyncio.run(reviewer_signal(_REVIEW_TEXT, _chat_reviewer_ok))
+    f = fuse_signals(rule, _skipped_envelope("perplexity"), rev)
+    assert f["score"] == 50.0
+    assert f["participating"] == ["rule", "reviewer"]  # 固定路径顺序，不随输入次序
+    assert "perplexity=skipped" in f["detail"]
+
+
+def test_fusion_rule_and_perplexity_weighted():
+    """rule 78(风险=100-78=22.0,权重0.5) + ppl 3.32(风险93.77,权重0.2)
+    → (0.5×22 + 0.2×93.77)/0.7 = 29.754/0.7 = 42.5057 → 42.5"""
+    rule = rule_signal(_HUMAN_TEXT)
+    ppl = asyncio.run(perplexity_signal(_AI_TEXT, _FAKE_CONFIG, _raw_with_logprobs))
+    f = fuse_signals(rule, ppl, _skipped_envelope("reviewer"))
+    assert ppl["value"] == 3.32
+    assert f["score"] == 42.5
+
+
+def test_fusion_failed_path_never_contributes():
+    rule = rule_signal(_HUMAN_TEXT)  # 风险 22.0
+    failed = {"signal": "reviewer", "status": "failed", "value": None, "detail": "x"}
+    f = fuse_signals(rule, _skipped_envelope("perplexity"), failed)
+    assert f["score"] == 22.0
+    assert f["participating"] == ["rule"]
+    assert "reviewer=failed" in f["detail"]
+
+
+def test_fusion_byte_stable_across_calls():
+    rule = rule_signal(_AI_TEXT)
+    rev = asyncio.run(reviewer_signal(_REVIEW_TEXT, _chat_reviewer_ok))
+    a = fuse_signals(rule, _skipped_envelope("perplexity"), rev)
+    b = fuse_signals(rule, _skipped_envelope("perplexity"), rev)
+    da = json.dumps(a, sort_keys=True, ensure_ascii=False)
+    db = json.dumps(b, sort_keys=True, ensure_ascii=False)
+    assert da == db  # 同输入两次逐字节一致
+
+
+# ================================================================ 7. 状态口径与越界文案
+def test_status_text_covers_exactly_four():
+    assert set(SIGNAL_STATUS_TEXT) == {"ok", "skipped", "failed", "uncalibrated"}
+    for v in SIGNAL_STATUS_TEXT.values():
+        assert isinstance(v, str) and v
+
+
+def test_no_overstepping_wording_anywhere():
+    """🔴 文案红线：期望串硬编码，扫实现源码 + 全部产出文本。"""
+    forbidden = ("AI 概率", "是 AI 生成的可能性")
+    app_dir = Path(__file__).resolve().parent.parent / "app"
+    blobs = [
+        (app_dir / "deai_signals.py").read_text(encoding="utf-8"),
+        (app_dir / "anti_llm.py").read_text(encoding="utf-8"),
+        json.dumps(SIGNAL_STATUS_TEXT, ensure_ascii=False),
+    ]
+    out = asyncio.run(collect_signals(_AI_TEXT, config=_FAKE_CONFIG,
+                                      chat_fn=_chat_boom, raw_completion=_raw_no_logprobs))
+    blobs.append(json.dumps(out, ensure_ascii=False))
+    for blob in blobs:
+        for w in forbidden:
+            assert w not in blob, f"越界表述「{w}」泄漏"
+    assert out["fusion"]["caveat"] == "实验风险分不是 AI 生成概率"
+
+
+# ================================================================ 8. 一站式收集
+def test_collect_signals_end_to_end_deterministic_and_honest():
+    out1 = asyncio.run(collect_signals(_AI_TEXT, config=_FAKE_CONFIG,
+                                       chat_fn=_chat_boom, raw_completion=_raw_no_logprobs))
+    out2 = asyncio.run(collect_signals(_AI_TEXT, config=_FAKE_CONFIG,
+                                       chat_fn=_chat_boom, raw_completion=_raw_no_logprobs))
+    assert json.dumps(out1, sort_keys=True, ensure_ascii=False) == json.dumps(
+        out2, sort_keys=True, ensure_ascii=False)
+    assert out1["rule"]["status"] == "ok"
+    assert out1["perplexity"]["status"] == "skipped"
+    assert out1["reviewer"]["status"] == "failed"
+    assert "审校端点超时" in out1["reviewer"]["detail"]
+    assert out1["fusion"]["participating"] == ["rule"]
+    assert out1["fusion"]["score"] == 40.0  # 仅规则路：100 - 60
+    assert "仅 1 路参与" in out1["fusion"]["detail"]
+    assert len(out1["style"]) == 9
+
+
+def test_collect_signals_without_model_config_skips_those_paths():
+    out = asyncio.run(collect_signals(_AI_TEXT))
+    assert out["perplexity"]["status"] == "skipped"
+    assert "未提供模型配置" in out["perplexity"]["detail"]
+    assert out["reviewer"]["status"] == "skipped"
+    assert out["fusion"]["score"] == 40.0
+    assert "perplexity=skipped" in out["fusion"]["detail"]
+    assert "reviewer=skipped" in out["fusion"]["detail"]

@@ -244,3 +244,87 @@ def deflavor_rewrite_prompt(text: str, report: dict) -> str:
         "- 直接输出改写后的正文纯文本，不要任何解释\n\n"
         f"【原文】\n{text[:8000]}"
     )
+
+
+# ==================================================================
+# t7 新增（纯加法）：文体维度值与人类区间表。detect() 上面的部分一行未动。
+# ==================================================================
+
+#: 9 个检测维度的固定名字与顺序（「太短」是提前短路哨兵，不在此列）。
+DIMENSION_NAMES: list[str] = [
+    "疲劳词密度", "禁用句式", "句长标准差", "对话标签比", "段落均匀度",
+    "上帝视角", "章末总结体", "三连排比", "套词密度",
+]
+
+#: 人类文体区间表。🔴 诚实纪律：这里**只能**由真实标定流程填入——
+#: 样本文件 + 统计脚本产出，且 source 字段必须写明样本出处与数量。
+#: 本仓库当前没有任何标定样本 → 表必须保持为空；查不到区间的维度一律按
+#: 「未标定」上报（见 app/deai_signals.py）。**绝不许拍脑袋填数字冒充标定**——
+#: 批次一已有「上限是心理安慰」的前车之鉴。
+HUMAN_RANGES: dict[str, dict] = {}
+
+#: 未标定维度的固定说明文案（t8 报告直接引用）。
+UNCALIBRATED_DETAIL = "缺少标定样本，区间未建立"
+
+
+def dimension_values(text: str) -> dict:
+    """计算 9 个维度的原始值（与 detect() 同源同口径，只算值、不判分、不扣分）。
+
+    这是**加法**：detect() 的既有行为与返回值完全不变（306 条基线在盯）。
+
+    无效形态的维度如实返回 None（「此值不可得」），不用 0 冒充：
+    - 文本 <50 字：与 detect() 的太短短路对齐，9 个值全部 None；
+    - 句子 <10：句长标准差不可得；对话 0 句：对话标签比不可得；段落 <6：段落均匀度不可得。
+    其余值为 round(x, 2)。这些值的「人类区间」见 HUMAN_RANGES——没标定就是没有。
+    """
+    if len(text) < 50:
+        return {name: None for name in DIMENSION_NAMES}
+    values: dict = {}
+
+    # 1 疲劳词密度（每千字出现次数；口径同 detect() 第 1 维）
+    fatigue_count = sum(text.count(w) for w in FATIGUE_WORDS)
+    values["疲劳词密度"] = round(fatigue_count / len(text) * 1000, 2)
+
+    # 2 禁用句式（命中条数；口径同 detect() 第 2 维）
+    values["禁用句式"] = sum(1 for pat, _name in BANNED_PATTERNS if re.search(pat, text))
+
+    # 3 句长标准差（口径同 detect() 第 3 维：<10 句不可得）
+    sentences = [s for s in re.split(r"[。！？!?…]+", text) if s.strip()]
+    if len(sentences) >= 10:
+        lens = [len(s.strip()) for s in sentences]
+        mean = sum(lens) / len(lens)
+        values["句长标准差"] = round((sum((x - mean) ** 2 for x in lens) / len(lens)) ** 0.5, 2)
+    else:
+        values["句长标准差"] = None
+
+    # 4 对话标签比（"说道"类标签 / 对话句数；无对话不可得）
+    dialogue = re.findall(r"[「“][^」”]{1,50}[」”]", text)
+    said_tags = len(re.findall(r"(说道?|问道?|答道?|喊道?|笑道?|冷冷道)", text))
+    values["对话标签比"] = round(said_tags / len(dialogue), 2) if dialogue else None
+
+    # 5 段落均匀度（口径同 detect() 第 5 维：<6 段不可得）
+    paras = [p.strip() for p in text.split("\n") if p.strip()]
+    if len(paras) >= 6:
+        plens = [len(p) for p in paras]
+        pmean = sum(plens) / len(plens)
+        values["段落均匀度"] = round((sum((x - pmean) ** 2 for x in plens) / len(plens)) ** 0.5, 2)
+    else:
+        values["段落均匀度"] = None
+
+    # 6 上帝视角/解释腔（命中次数；口径同 detect() 第 6 维）
+    values["上帝视角"] = (
+        sum(1 for w in GOD_VIEW_WORDS if w in text) + sum(1 for w in EXPLAIN_WORDS if w in text)
+    )
+
+    # 7 章末总结体（末尾 300 字命中次数；口径同 detect() 第 7 维）
+    tail = text[-300:]
+    values["章末总结体"] = sum(1 for w in CHAPTER_END_CLICHES if w in tail)
+
+    # 8 三连排比（命中次数；口径同 detect() 第 8 维）
+    values["三连排比"] = len(_RE_TRIPLE_PARALLEL.findall(text))
+
+    # 9 套词密度（每千字；口径同 detect() 第 9 维）
+    cliche_count = sum(text.count(w) for w in CLICHE_WORDS)
+    values["套词密度"] = round(cliche_count / len(text) * 1000, 2)
+
+    return values
