@@ -538,7 +538,7 @@ class UsageGate(FakeGate):
     async def __call__(self, llm, system, prompt, *, max_tokens=4000, usage_sink=None):
         item = self.plan[len(self.attempted)]  # 本次将执行的那一项
         stage = re.match(r"【段：(.+?)】", prompt).group(1)
-        if isinstance(item, tuple):
+        if isinstance(item, tuple) and not isinstance(item[0], Exception):
             text, pr, co = item
             if usage_sink is not None:
                 usage_sink["prompt"] = pr
@@ -548,8 +548,17 @@ class UsageGate(FakeGate):
             self.completed.append(stage)
             self.prompts.append(prompt)
             return text
+        # 🔴 天演复审指出：原替身"异常时根本不填 sink"**比真实现仁慈**。
+        # 真 `_chat_text` 是 usage 帧先回填、随后空内容才抛（ai_factory.py:231-233）。
+        # 不把这个形状搬进来，"先挂账后调用"的修复就永远测不到（14 passed 零覆盖）。
         self.attempted.append(stage)
         self.prompts.append(prompt)
+        if isinstance(item, tuple):  # (exc, pr, co)：炸之前已知花掉了多少
+            exc, pr, co = item
+            if usage_sink is not None:
+                usage_sink["prompt"] = pr
+                usage_sink["completion"] = co
+            raise exc
         raise item  # 炸在这一段
 
 
@@ -578,10 +587,12 @@ def test_interrupted_run_still_books_the_tokens_already_spent(monkeypatch):
     with pytest.raises(RuntimeError, match="第 3 段上游炸了"):
         run_staged(world, gate=gate)
 
-    assert recorded == [(300, 30)], (
-        f"中断前两段的成本必须入账（期望 300/30），实得 {recorded}"
-        "——漏记即『章失败了但钱追不到』"
-    )
+    # 🔴 契约变更 2026-11-14（天演 FIX 轮复审 ①②）：记账从"结算时一次合计"改为
+    # **每段增量入账并与该段的 commit 配对**，所以这里是一笔一笔，不是一笔 300/30。
+    # 判据也跟着升级：既验总额，也验**逐笔配对**（少一笔就红，混成一笔也红）。
+    assert sum(x[0] for x in recorded) == 300, f"中断前两段的 prompt 成本没记全：{recorded}"
+    assert sum(x[1] for x in recorded) == 30, f"completion 没记全：{recorded}"
+    assert len(recorded) == 2, f"应按段增量记账（两段两笔），实得 {recorded}"
 
 
 def test_resume_after_interrupt_does_not_double_book(monkeypatch):
@@ -607,7 +618,125 @@ def test_resume_after_interrupt_does_not_double_book(monkeypatch):
     result, _ = run_staged(world, gate=gate2)
     second = recorded[len(first) :]
 
-    assert first == [(300, 30)], f"第一次应只记已花的 300/30，实得 {first}"
+    assert sum(x[0] for x in first) == 300, f"第一次应只记已花的 300/30，实得 {first}"
     assert sum(v[0] for v in second) > 0, "续跑段也没记账 → 重入完全免费，假免费"
     assert gate2.attempted == ["写作", "审校", "修订"], f"重入必须从第 3 段续，实得 {gate2.attempted}"
     assert result is not None
+
+
+# ------------------------------------------------ 天演 FIX 轮复审 ①② 补漏判据
+
+
+def test_corrupt_stage_json_restarts_from_scratch_without_crashing(monkeypatch):
+    """🔴 天演复审实锤：碧霄写 A-3 留痕时把 `if state.get(SETTLE_STAGE):` **整行吞掉**，
+    于是损坏的 stage_json 不再"从头重跑"，而是当场 KeyError 崩。
+    真库形状：stage_json = '[]'（能解析成 list，不是 dict）。"""
+    import app.chapter_stages as cs
+
+    world = make_world("deep")
+    p, novel, chapter, job, db = world
+    job.stage_json = "[]"  # 合法 JSON，但读不出任何段
+    gate = FakeGate(DEEP_SCRIPT)
+    spies = SettlementSpies()
+    spies.install(monkeypatch)
+    install_stage_context(monkeypatch, gate)
+
+    result = asyncio.run(cs.run_staged_chapter(p, novel, job, chapter, 7, db))
+
+    assert gate.completed == DEEP_STAGE_NAMES, f"损坏存档应从头重跑五段，实得 {gate.completed}"
+    assert "stage_json" in (job.last_error or ""), "损坏重入没留痕：用户看不见原因就多烧五倍钱"
+    assert result and result["ok"], "损坏存档不该把整章生成搞成失败"
+
+
+def test_completed_job_reentry_still_returns_zero_call_report(monkeypatch):
+    """同一刀的另一面：早退分支被我吞掉后，"全部完成过的 job 重入零调用"这条
+    只剩段跳过循环在撑。这里直接钉早退本身（stage_json 里有 SETTLE 即立刻返回）。"""
+    import app.chapter_stages as cs
+
+    world = make_world("deep")
+    p, novel, chapter, job, db = world
+    done = {name: {"text": t, "at": "x"} for name, t in zip(DEEP_STAGE_NAMES, DEEP_SCRIPT)}
+    settle_key = cs.SETTLE_STAGE
+    done[settle_key] = {"text": json.dumps({"title": "第七章", "ok": True, "archived": True}), "at": "x"}
+    job.stage_json = json.dumps(done, ensure_ascii=False)
+    gate = FakeGate(DEEP_SCRIPT)
+    install_stage_context(monkeypatch, gate)
+
+    result, _ = run_staged(world, gate=gate)
+    assert gate.attempted == [], f"完成过的 job 重入一个调用都不该发，实得 {gate.attempted}"
+    assert result.get("archived") is True, f"应返回存档战报，实得 {result}"
+
+
+def test_tokens_spent_before_a_mid_stage_crash_are_booked(monkeypatch):
+    """🔴 天演复审新发现 1（major）：真 `_chat_text` 会**先回填 usage 再抛异常**，
+    而旧代码在调用成功后才 `sinks.append(sink)` → 断流那一段真花的钱永远不进账。
+    这里替身按真实形状「炸之前已花 100/10」，期望总账 **200/20**（不是 100/10）。"""
+    import app.chapter_stages as cs
+
+    world = make_world("deep")
+    recorded: list[tuple[int, int]] = []
+    monkeypatch.setattr(cs, "_record_usage", lambda p, pr, co: recorded.append((pr, co)))
+    gate = UsageGate([(S_PLAN, 100, 10), (RuntimeError("编排段断流"), 100, 10)])
+    install_stage_context(monkeypatch, gate)
+    p, novel, chapter, job, db = world
+
+    # 🔴 碧霄自查（变异 R2 打空后补的牙）：上一版这里用 make_world 的 StubDB，
+    # 于是「记账之后不 commit」的合法错实现 **18 passed 零覆盖**——
+    # 天演批评的 spy 家族在我自己新写的测试里复发了一次。
+    # 现在换成事件流 DB：既验金额，也验**最后一笔记账后面必须跟着一次 commit**。
+    events: list[str] = []
+    recorded.clear()
+
+    class PairedDB:
+        async def get(self, model, pk):
+            return SimpleNamespace(id=1, username="u")
+
+        async def commit(self):
+            events.append("commit")
+
+    monkeypatch.setattr(cs, "_record_usage", lambda pp, pr, co: (events.append("book"), recorded.append((pr, co))))
+
+    with pytest.raises(RuntimeError, match="断流"):
+        asyncio.run(cs.run_staged_chapter(p, novel, job, chapter, 7, PairedDB()))
+
+    assert sum(x[0] for x in recorded) == 200, f"断流段的钱没入账：{recorded}"
+    assert sum(x[1] for x in recorded) == 20, f"completion 同样漏记：{recorded}"
+    assert events[-1] == "commit", f"最后一笔记账没被 commit 落地（进程一死账就没了）：{events}"
+
+
+def test_every_booking_is_paired_with_a_commit(monkeypatch):
+    """🔴 天演复审新发现 2（major）：`_record_usage` **自己不 commit**，
+    旧修法靠 nightly 失败路径上恰好有一次 commit 才碰巧落盘。
+    这里把 commit 顺序记进事件流，钉住**每次记账后面必须跟着一次 commit**，
+    并且段循环之外（结算收尾区）抛异常时，前面的钱已经全部落盘。"""
+    import app.chapter_stages as cs
+
+    world = make_world("deep")
+    p, novel, chapter, job, db = world
+    events: list[str] = []
+    recorded: list[tuple[int, int]] = []
+
+    class PairedDB:
+        async def get(self, model, pk):
+            return SimpleNamespace(id=1, username="u")
+
+        async def commit(self):
+            events.append("commit")
+
+    async def boom_state_files(*a, **k):
+        events.append("settle-boom")
+        raise RuntimeError("收尾管线炸了（段已全部成功）")
+
+    monkeypatch.setattr(cs, "_record_usage", lambda pp, pr, co: (events.append("book"), recorded.append((pr, co))))
+    monkeypatch.setattr(cs, "_update_state_files", boom_state_files)
+    gate = UsageGate([(x, 100, 10) for x in DEEP_SCRIPT])
+    install_stage_context(monkeypatch, gate)
+
+    with pytest.raises(RuntimeError, match="收尾管线炸了"):
+        asyncio.run(cs.run_staged_chapter(p, novel, job, chapter, 7, PairedDB()))  # 签名是 (p,novel,job,chapter,num,db)
+
+    assert sum(x[0] for x in recorded) == 500, f"收尾区抛异常导致五段的钱没记全：{recorded}"
+    # 每次 book 之后必须紧跟一次 commit（允许中间还有别的 commit，不许 book 完就抛）
+    for i, e in enumerate(events):
+        if e == "book":
+            assert "commit" in events[i + 1 :], f"第 {i} 处记账后面没有 commit 落地：{events}"

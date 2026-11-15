@@ -110,6 +110,24 @@ def _save_state(job, state: dict) -> None:
     job.stage_json = json.dumps(state, ensure_ascii=False)
 
 
+def _book_sinks(p, sinks: list, cursor: list) -> tuple[int, int]:
+    """把**尚未入账**的 sink 合计记进成本账本，并把水位推到末尾。
+
+    为什么是增量而不是"结算时一次性合计"（天演复审 A-1 的两个新漏账窗口）：
+    1. 段循环之外（结算收尾区）抛异常时，一次性合计根本轮不到执行；
+    2. `_record_usage` 只改内存对象，**自己不 commit**（docstring 明写"调用方负责"），
+       所以每次记账必须与紧随的一次 `db.commit()` **配对**，否则靠上层恰好有 commit
+       才碰巧落盘。这里就是与段落盘那次 commit 配对。
+    """
+    start = cursor[0]
+    pr = sum(int(s.get("prompt", 0) or 0) for s in sinks[start:])
+    co = sum(int(s.get("completion", 0) or 0) for s in sinks[start:])
+    cursor[0] = len(sinks)
+    if pr or co:
+        _record_usage(p, pr, co)
+    return pr, co
+
+
 async def run_staged_chapter(p, novel, job, chapter, num: int, db) -> dict:
     """分段接力生成单章。签名与 nightly._generate_chapter 完全一致（分流层无感替换）。
 
@@ -135,8 +153,12 @@ async def run_staged_chapter(p, novel, job, chapter, num: int, db) -> dict:
     _raw_state = job.stage_json or ""
     state = _load_state(job)
     if _raw_state.strip() and not state:
-        # 留痕：有内容却读不出任何段 = stage_json 坏了，本轮会从头重跑
+        # 留痕：有内容却读不出任何段 = stage_json 坏了，本轮会从头重跑（成本高于续跑）。
+        # 🔴 碧霄自查：上一版我把下面那行 `if state.get(SETTLE_STAGE):` **整行吞掉了**，
+        # 于是 return 嵌进本 if 里——损坏的 state 不再"从头重跑"，而是当场 KeyError 崩
+        # （天演真库实锤 stage_json='[]'），同时完成过的 job 也丢了零调用早退。
         job.last_error = "stage_json 无法解析，已完成段全部重跑（成本会高于续跑）"
+    if state.get(SETTLE_STAGE):
         # 全部完成过的 job 重入：返回存档战报，一个模型调用都不发
         return json.loads(state[SETTLE_STAGE]["text"])
 
@@ -148,6 +170,7 @@ async def run_staged_chapter(p, novel, job, chapter, num: int, db) -> dict:
 
     prev_text: str | None = None
     sinks: list[dict] = []
+    booked: list = [0]  # 已入账水位（增量记账）
     target_words = p.target_chapter_words or 0
 
     try:
@@ -172,8 +195,12 @@ async def run_staged_chapter(p, novel, job, chapter, num: int, db) -> dict:
                 prompt = f"{spec}\n\n【上一环节产出】\n{prev_text}"
 
             sink: dict = {}
-            text = (await _stage_chat(chapter_llm, system, prompt, max_tokens=_STAGE_MAX_TOKENS, usage_sink=sink)).strip()
+            # 🔴 先挂账、后调用：真 `_chat_text` 的形状是「usage 帧先回填 sink，
+            # 随后正文为空才抛 HTTPException」（ai_factory.py:231-233 回填在空内容检查之前）。
+            # 原先是调用成功之后才 append，于是**断流那一段真花掉的 prompt token 永远不进账**
+            # （天演复审新发现 1，真库实锤：应记 200/20，只记了 100/10）。
             sinks.append(sink)
+            text = (await _stage_chat(chapter_llm, system, prompt, max_tokens=_STAGE_MAX_TOKENS, usage_sink=sink)).strip()
 
             if stage == "写作":
                 # 初稿完整性检查（与 off 路同形状的 failed 战报；已落盘段保留供续跑）
@@ -191,13 +218,14 @@ async def run_staged_chapter(p, novel, job, chapter, num: int, db) -> dict:
                     }
                 if target_words > 0:
                     topup: dict = {}
+                    sinks.append(topup)  # 同上：先挂账再调用，补写断流也不漏
                     text = (await _ensure_min_words(chapter_llm, system, text, target_words, usage_sink=topup)).strip()
-                    sinks.append(topup)
 
             # 一段完成，立刻落盘（中断安全点）
             state[stage] = {"text": text, "at": utcnow().isoformat()}
             prev_text = text
             _save_state(job, state)
+            _book_sinks(p, sinks, booked)  # 与下面这次 commit 配对：段产出与其成本同批落盘
             await db.commit()
 
     except Exception:
@@ -205,10 +233,14 @@ async def run_staged_chapter(p, novel, job, chapter, num: int, db) -> dict:
         # 异常一抛就随栈销毁，而记账只在结算区做——中断的章于是永久少记
         # 已真花掉的 token（天演实测：1500 只记 1200，漏 300）。
         # 已花的钱必须先入账再往上抛：章可以失败，账不能丢。
-        _sp = sum(int(s.get("prompt", 0)) for s in sinks)
-        _sc = sum(int(s.get("completion", 0)) for s in sinks)
-        if _sp or _sc:
-            _record_usage(p, _sp, _sc)
+        _book_sinks(p, sinks, booked)
+        # 记账只改内存，所以这里**必须自己 commit**：原先靠 nightly 失败路径上
+        # 恰好有一次 `job.status="pending"; await db.commit()` 顺带带下去（天演实测：
+        # 换成"新 session 善后"的入口就账面 0/0 全丢）。配对原则不能指望别人手松。
+        try:
+            await db.commit()
+        except Exception:  # noqa: BLE001  # 账落不下也不能把真异常换成假异常
+            pass
         raise
 
     # ---------------- 结算（本地收尾段，不调模型）：最后一个 LLM 段产出即最终正文 ----------------
@@ -251,11 +283,10 @@ async def run_staged_chapter(p, novel, job, chapter, num: int, db) -> dict:
         pass
 
     # 成本账本：段级精确 usage 合计优先，全空才按 off 同款粗估兜底
-    prompt_total = sum(int(s.get("prompt", 0)) for s in sinks)
-    completion_total = sum(int(s.get("completion", 0)) for s in sinks)
-    if prompt_total or completion_total:
-        _record_usage(p, prompt_total, completion_total)
-    else:
+    # 粗估兜底的判据必须是「全部 sink 都没有精确数字」，不是「本次补记额」——
+    # 否则假模型/端点不回 usage 帧时（sinks 存在但全 0）会**静默什么都不记**。
+    _book_sinks(p, sinks, booked)
+    if not any(int(x.get("prompt", 0) or 0) or int(x.get("completion", 0) or 0) for x in sinks):
         _record_usage(
             p,
             _estimate_tokens(final_text[:4000]) + _estimate_tokens(final_text) + 120,
