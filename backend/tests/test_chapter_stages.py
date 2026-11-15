@@ -620,6 +620,19 @@ def test_resume_after_interrupt_does_not_double_book(monkeypatch):
 
     assert sum(x[0] for x in first) == 300, f"第一次应只记已花的 300/30，实得 {first}"
     assert sum(v[0] for v in second) > 0, "续跑段也没记账 → 重入完全免费，假免费"
+    # 🔴 天演补审 S4b 实锤：这条测试**名字叫"不许重复记账"，却从没断言过金额守恒**——
+    # 它只验"第一次的 spy 计数 + 续跑段号 + 第二次和 > 0"，三样都管不住"多记"。
+    # 她真库造了个合法错实现：重入时按估算给**已落盘段伪造历史 sink**（注释会写
+    # "补齐前段账目更完整"）→ 总账虚增 +60%，而 18 条测试全绿。
+    # feb880f 的增量水位修好了"少记"，同时给"多记"开了新窗口。
+    # 元教训 2 第四次复发：判据钉住了"当前实现的形状"（不重发调用=不记账），
+    # 没钉住"意图"（**总账必须等于实际花费**）。期望值取自本测试自设的每段用量，不从实现读。
+    total_p = sum(x[0] for x in first) + sum(x[0] for x in second)
+    total_c = sum(x[1] for x in first) + sum(x[1] for x in second)
+    assert (total_p, total_c) == (1500, 150), (
+        f"成本账必须等于实际花费：中断轮 {first} + 续跑轮 {second} = {total_p}/{total_c}，"
+        f"应为 1500/150。多了=重复记账或伪造补齐，少了=漏账"
+    )
     assert gate2.attempted == ["写作", "审校", "修订"], f"重入必须从第 3 段续，实得 {gate2.attempted}"
     assert result is not None
 
