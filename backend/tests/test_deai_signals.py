@@ -585,17 +585,18 @@ def test_u0c_risk_of_reviewer_both_groups_empty_is_exactly_zero():
         assert isinstance(got, float), f"0.0 必须是 float，实得 {type(got).__name__}"
 
 
-def test_u0c_risk_of_malformed_value_raises_loudly_not_silently():
-    """🔴 实测到的当前行为（如实钉住，不美化）：`value` 是字符串/列表时 `_risk_of`
-    **抛 AttributeError**。这不是我们希望的形状，但它**现在是事实**，所以钉住它——
-    一旦有人把它改成静默返回某个默认分（比如 0.5），这条立刻红。
-    （融合层 fuse_signals 收到的是 rule_signal/perplexity_signal/reviewer_signal 的信封，
-    这三家产出的 value 只会是数字或两组字典，所以线上不会走到这里；但契约面必须有锁。）"""
+def test_u0c_risk_of_malformed_value_degrades_to_none_not_crash():
+    """✅ 裁决 B（u0c-fix）：`value` 畸形（字符串/列表等预期外类型）时 `_risk_of`
+    **降级返回 None**，不再抛 AttributeError。理由：本模块整体契约是"数据形态异常
+    一律降级成标签/警告，绝不 500"（见 test_malformed_sections_degrade_to_labels_not_500），
+    `_risk_of` 单独抛异常与该契约不一致。None = 「这条没有」（该路不参与融合），
+    **不是 0.0**（0.0 = 「这条说没风险」）——语义之别由下方"两组皆空 → 恰好 0.0"用例分守。
+    （上一单钉的是当时的实测行为 AttributeError；畸形输入本身一字未换。）"""
     from app.deai_signals import _risk_of
 
     for bad in ("oops", [1, 2], 3):
-        with pytest.raises(AttributeError):
-            _risk_of("reviewer", {"status": "ok", "value": bad})
+        got = _risk_of("reviewer", {"status": "ok", "value": bad})
+        assert got is None, f"畸形 value {bad!r} 应降级为 None，实得 {got!r}"
 
 
 # ---------------- 契约 E：logprobs 统计口径的降级形状 ----------------

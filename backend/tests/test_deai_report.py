@@ -502,14 +502,13 @@ class TestU0cWarningBarIntegrity:
     既有判据只说"警告条里有字"，本组钉的是"该有的每条都在"。
     🔴 实测事实（2026-11-16，逐行打开生产代码核过，非推测）：`build_report_html` 里
     `notes.append` 共 4 个点（deai_report.py:75 融合形态异常 / :115 未登记信号路 /
-    :149 审校师证据形态异常 / :183 文体指标形态异常），但**同一份输入最多只能触发 2 条**——
-    ①融合那条**永远进不了警告条**：调用点是 `deai_report.py:249`
-    `fusion = result.get("fusion") if isinstance(result.get("fusion"), dict) else {}`，
-    传给 `_coverage_block(fusion, ...)` 的 fusion **已被过滤成字典或 {}**，函数内
-    `if not isinstance(fusion, dict)` 恒 False → deai_report.py:75 是死代码（真 bug，已单独回报待裁决）。
+    :149 审校师证据形态异常 / :183 文体指标形态异常）。上一单实测时①是**死代码**
+    （调用点 :249 把非字典 fusion 先过滤成 {} 再传下去 → :75 恒 False），同一份输入
+    最多只能触发 2 条。**u0c-fix 已按裁决 A 修好 :249（原始值传给 _coverage_block）**，
+    四条警告全部可达；本组判据随之从"缺陷形状快照"翻为正向完整性闸（4 条各恰一次 + 顺序）。
     ④审校师那条要求 reviewer.status=="ok"，与 ②③ 无冲突但和"三路都不理想"的夹具互斥。
-    所以本组按**实际可得的形状**钉：三类异常同时喂进去时，页面上必须出现
-    「应出现的每一条」且「不该出现的死条目不许假装出现过」。
+    所以本组按**实际可得的形状**钉：多类异常同时喂进去时，页面上必须出现
+    「应出现的每一条」且「每条恰出现一次」。
     """
 
     def test_every_kind_of_anomaly_has_its_own_label_not_one_generic_word(self):
@@ -519,27 +518,33 @@ class TestU0cWarningBarIntegrity:
         所以这里钉的是**每条警告必须自带身份**：光有"形态异常"这个笼统词不算数。"""
         warn = re.findall(r'<div class="caveat">(.*?)</div>',
                           build_report_html(self._multi(), dict(META)), re.S)[1]
-        assert warn.count("形态异常") == 2, f"应有且只有 2 处「形态异常」（审校师 + 文体），实得 {warn.count('形态异常')}：{warn}"
+        assert warn.count("形态异常") == 3, f"应有且只有 3 处「形态异常」（融合 + 审校师 + 文体；未登记路那条不含此词），实得 {warn.count('形态异常')}：{warn}"
         for marker in self.WANT:
             assert marker in warn, f"缺少点名到路的警告「{marker}」：{warn[:220]}"
 
-    def test_dead_fusion_note_is_never_emitted_documents_the_real_bug(self):
-        """🔴 如实钉住当前实现的**缺陷形状**（不是为绿而写）：喂一个 fusion 是字符串的结果，
-        期望里那句「融合结果形态异常」**根本不出现**——因为实现把非字典的 fusion 悄悄换成 {}
-        再交给覆盖率块，警告条于是少了一条、覆盖率还显示 0/3 而不是交代"融合数据形态异常"。
-        这条用例在有人修好那行（把原始值传下去）后会**立刻变红**，届时请把断言翻成正向，
-        并在 commit 里写明修复了 deai_report.py:249 + :75 的死分支。"""
+    def test_dead_fusion_note_is_emitted_when_fusion_is_not_a_dict(self):
+        """✅ 绊马索已按裁决 A 翻成正向断言（u0c-fix）：上一单实测钉住
+        deai_report.py:249 把非字典 fusion 先过滤成 {} 再传下去 → :75/:76 死代码。
+        修法落地后（原始值传给 _coverage_block），喂 fusion="不是字典" 时：
+        ①「融合结果形态异常（收到 str），无风险分」必须进页首警告条；
+        ②覆盖率块必须走降级文案「融合数据形态异常」，不再谎报 0/3。"""
         r = _result()
         r["fusion"] = "不是字典"
         out = build_report_html(r, dict(META))
-        assert "融合结果形态异常" not in out, \
-            "实现已修好（融合形态异常能进警告条了）→ 请把本用例翻成正向断言并同步删除此注释"
-        assert "融合数据形态异常" not in out, "覆盖率块的降级文案同样不可达（同一根因）"
+        bars = re.findall(r'<div class="caveat">(.*?)</div>', out, re.S)
+        assert len(bars) == 2, f"应恰好 2 个 caveat div（免责句 + 警告条），实得 {len(bars)}"
+        warn = bars[1]
+        assert warn.count("融合结果形态异常") == 1, \
+            f"融合形态异常警告必须恰出现 1 次，实得 {warn.count('融合结果形态异常')}：{warn[:250]}"
+        assert "融合结果形态异常（收到 str）" in warn, \
+            f"警告必须点名实际收到的类型：{warn[:250]}"
+        assert "融合数据形态异常" in out, "覆盖率块必须走降级文案，不许静默显示 0/N"
+        assert "0/3" not in out, "融合形态异常时覆盖率不该再假装是 0/3 的正常计数"
 
     def _multi(self):
         """一份同时踩到多条异常路的输入（实测可得的最大集合，见类文档）。"""
         r = _result()
-        r["fusion"] = "不是字典"          # → ①（当前实现下不可达，另有用例如实记录）
+        r["fusion"] = "不是字典"          # → ①融合形态异常（u0c-fix 修死代码后此条已可达）
         r["reviewer"] = {"signal": "reviewer", "status": "ok",
                          "value": "字符串不是字典", "detail": "d"}   # → ④审校师证据形态异常
         r["style"] = ["不是字典"]         # → ③文体形态异常
@@ -548,7 +553,9 @@ class TestU0cWarningBarIntegrity:
         return r
 
     #: 硬编码：这份输入**应当**在警告条里出现的标记（每条恰一次）。
-    WANT = ("未登记在 _PATH_ORDER", "文体指标形态异常", "审校师证据形态异常")
+    #: u0c-fix：死代码修好后「融合结果形态异常」进入可达集合，WANT 由 3 条变 4 条。
+    WANT = ("未登记在 _PATH_ORDER", "文体指标形态异常", "审校师证据形态异常",
+            "融合结果形态异常")
 
     def test_every_expected_warning_appears_exactly_once(self):
         out = build_report_html(self._multi(), dict(META))
@@ -557,7 +564,7 @@ class TestU0cWarningBarIntegrity:
         warn = bars[1]
         for marker in self.WANT:
             assert warn.count(marker) == 1, f"「{marker}」出现 {warn.count(marker)} 次（应恰 1）：{warn[:250]}"
-        assert len(warn.split("；")) == 3, f"警告条应有 3 条，实得 {len(warn.split('；'))}：{warn}"
+        assert len(warn.split("；")) == 4, f"警告条应有 4 条，实得 {len(warn.split('；'))}：{warn}"
 
     def test_dropping_any_single_warning_turns_red(self):
         """完整性判据的另一面：**逐条点名**，摘掉任何一条都过不了（既有测试只查"有字"）。"""
@@ -566,9 +573,10 @@ class TestU0cWarningBarIntegrity:
         got = {m for m in self.WANT if m in warn}
         want = set(self.WANT)
         assert got == want, f"警告条不完整，缺失：{want - got}"
-        # 顺序闸按**实际 append 次序**钉（实测：_signals_table:115 早于 _reviewer_block:149，
-        # 后者又早于 _style_table:183）——顺序被改坏说明各段渲染次序动了。
-        order = ("未登记在 _PATH_ORDER", "审校师证据形态异常", "文体指标形态异常")
+        # 顺序闸按**实际 append 次序**钉（实测：_coverage_block:75 最先，随后
+        # _signals_table:115 早于 _reviewer_block:149，后者又早于 _style_table:183）
+        # ——顺序被改坏说明各段渲染次序动了。u0c-fix：融合条目由死变活，加入序列首位。
+        order = ("融合结果形态异常", "未登记在 _PATH_ORDER", "审校师证据形态异常", "文体指标形态异常")
         idx = [warn.index(m) for m in order]
         assert idx == sorted(idx), f"警告条目顺序错乱：{idx}｜{warn[:200]}"
 

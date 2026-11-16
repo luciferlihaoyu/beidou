@@ -351,6 +351,8 @@ def _risk_of(signal: str, env: dict) -> float | None:
         return round(100.0 / (1.0 + float(env["value"]) / 50.0), 2)
     if signal == "reviewer":
         v = env["value"]
+        if not isinstance(v, dict):  # u0c-fix 裁决B：畸形 value 降级为 None（这条没有），与本模块"形态异常绝不 500"契约对齐；不是 0.0——0.0 专留给两组皆空
+            return None
         ai = len(v.get("ai_features") or [])
         human = len(v.get("human_evidence") or [])
         if ai + human == 0:

@@ -237,7 +237,8 @@ def build_report_html(result: dict, meta: dict) -> str:
     """
     result = result or {}
     meta = meta or {}
-    fusion = result.get("fusion") if isinstance(result.get("fusion"), dict) else {}
+    fusion = result.get("fusion")  # u0c-fix：原始值传下去，形态判断归 _coverage_block（:74）——原先先过滤成 {} 会让它的 isinstance 分支变死代码
+    fusion_dict = fusion if isinstance(fusion, dict) else {}  # caveat 取值专用：非字典融合没有键可读
     notes: list[str] = []  # 形态异常/未登记路，汇总成页首警告条
     _known, _extras = _signal_paths(result)
     n_signals = len(_known) + len(_extras)
@@ -245,7 +246,7 @@ def build_report_html(result: dict, meta: dict) -> str:
     title = _e(meta.get("book_title")) or "（未命名作品）"
     where = f"项目 {_num(meta.get('project_id'))}｜第 {_num(meta.get('chapter_no'))} 章"
     stamp = _e(meta.get("generated_at")) if meta.get("generated_at") else ""
-    caveat = _e(fusion.get("caveat")) or "实验风险分不是 AI 生成概率"
+    caveat = _e(fusion_dict.get("caveat")) or "实验风险分不是 AI 生成概率"
 
     # 🔴 顺序要紧：notes 是**渲染各表时**才填的，所以警告条必须先算完各段、
     # 再插到页首。原先把 warn_html 写在 sections 字面量里、排在各表之前，
