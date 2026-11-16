@@ -343,14 +343,13 @@ ENDPOINT_LEAK_CASES = [
     ("post", "/api/ai-factory/projects/{pid}/jobs/{jid}/rewrite-partial", {"excerpt": "绝密正文：乙一私藏内容，外人不可读。"}),
     ("post", "/api/ai-factory/projects/{pid}/jobs/{jid}/finalize", {"content_text": "<p>定稿正文占位，长度足够过校验。</p>" * 2}),
     ("post", "/api/ai-factory/projects/{pid}/jobs/{jid}/review", {}),
-    # diagnose 是信息页形状（UX 契约）：归属不成立时**合法 200**，但 context_chars 必须
-    # 为 0 且响应不含他人标记——安全底线由这两条承载，见下方矩阵断言里的专项分支。
+    # diagnose：🔴 碧霄裁决（u0a 二轮）——归属不成立一律 **404**，与本族其余 8 处同形。
+    # （曾短暂实现「200 信息页 + ctx_chars=0」被驳回：撒谎形状 + 数值断言可被放宽 +
+    #  一族两种契约。orphan（chapter_id=NULL）仍走信息页 200，那是无出路提示非越权。）
     ("get", "/api/ai-factory/projects/{pid}/jobs/{jid}/diagnose", None),
     ("post", "/api/ai-factory/projects/{pid}/jobs/{jid}/generate", None),
 ]
 _EP_IDS = [p.rsplit("/", 1)[-1] for _, p, _ in ENDPOINT_LEAK_CASES]
-# 名字集合：这些端点拒绝时保持 200 信息页形状（安全底线改判 ctx==0 + 无标记）
-_INFO_PAGE_ENDPOINTS = {"diagnose"}
 
 
 async def _setup_foreign_job(world, mode):
@@ -385,14 +384,9 @@ def test_endpoints_reject_cross_user_chapter(world, method, path, body, mode):
     在归属点之前还有 `p.novel_id is None → 400「项目未关联小说」` 的业务守卫
     （test_ai_factory_pure.py 钉死的 UX 契约，不许为安全改动它）。所以：
       · no_novel 档合法结果 ∈ {400 业务守卫, 404 归属}（都被挡）；
-      · bound/rebound 档必须直达归属点拿 **404**——diagnose 除外，见下；
+      · bound/rebound 档必须直达归属点拿 **404**（diagnose 同形——碧霄裁决：一族一种
+        形状，拒绝不许伪装成 200 空壳；orphan 提示走的是 chapter_id=NULL 分支，不在本矩阵）；
       · 三档共同硬底线：响应体绝不含 LEAK_MARKERS（乙书/苏挽云/断玉记）。
-    🔴 diagnose 专项分支（u0a 定案，命名理由）：诊断是"信息页"形状——既有 UX 契约
-    要求它对任何任务状态都返回合法 200（orphan 提示、失败分类都在同一响应里），
-    把 404 强加给它会破坏该契约。因此它的安全底线改由两条承载：
-      ① context_chars == 0 —— 归属不成立时绝不进 _assemble_context（泄露通道关闭）；
-      ② 响应体不含 LEAK_MARKERS —— 书名/角色卡/正文一个字节都不外流。
-    其余端点维持 404/400 拦截判据不变。
     快速拒绝保障：测试世界无 AIConfig → 漏网路径最远停在 _pick_config 的瞬时 400
     （零网络），但那已经是泄露事故——404 才是归属正确的形状。
     """
@@ -404,14 +398,7 @@ def test_endpoints_reject_cross_user_chapter(world, method, path, body, mode):
     for marker in LEAK_MARKERS:
         assert marker not in resp.text, f"{url} [{mode}] 响应泄露他人元数据/正文：{marker}"
     assert resp.status_code < 500, f"{url} [{mode}] 意外 5xx：{resp.text[:150]}"
-    ep_name = path.rsplit("/", 1)[-1]
-    if ep_name in _INFO_PAGE_ENDPOINTS:
-        # diagnose：200 信息页 + ctx 体积必须为 0（上方已钉死无标记）
-        assert resp.status_code == 200, f"{url} [{mode}] 信息页形状应为 200，实得 {resp.status_code}"
-        assert resp.json().get("context_chars") == 0, (
-            f"{url} [{mode}] 归属不成立时 context_chars 必须为 0，实得 {resp.json().get('context_chars')}"
-        )
-    elif mode in ("bound", "rebound"):
+    if mode in ("bound", "rebound"):
         assert resp.status_code == 404, (
             f"{url} [{mode}] 应 404（该章无法证明属于本项目），实得 {resp.status_code}：{resp.text[:120]}"
         )

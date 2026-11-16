@@ -2396,22 +2396,24 @@ async def diagnose_job(
         # u0a：诊断路径的归属判据收敛到共享入口 ensure_chapter_in_project（旧写法
         # 在此内联复制了一份弱判据——`any(j.id == job.id ...)` 在 job.project_id 已
         # 校验后恒真，等于没判；裸 db.get(Chapter,...) 正是本族泄露点）。
-        # 但**不 raise**——诊断是信息页形状，orphan / 跨用户 / 无证据章一律保持
-        # 合法 200 + ctx_chars=0（既有 UX 契约由 test_u0a_attribution 矩阵钉死），
-        # 绝不把他人章喂进 _assemble_context。
-        try:
-            chapter = await ensure_chapter_in_project(p, job.chapter_id, db)
-            novel = await db.get(Novel, p.novel_id) if p.novel_id is not None else None
-            if novel is not None:
-                try:
-                    # 诊断只为量上下文体积：关掉手艺注入，否则 6,500 字卡块会
-                    # 虚增 ctx_chars（触发误判「上下文过大」）并污染诊断结论。
-                    ctx = await _assemble_context(p, novel, chapter, job, db, include_skill=False)
-                    ctx_chars = len(ctx)
-                except Exception as exc:  # noqa: BLE001  诊断本身不该抛错
-                    ctx_error = f"{exc.__class__.__name__}: {exc}"[:200]
-        except HTTPException:
-            pass  # 归属不成立 → 跳过组装，ctx_chars=0（信息页形状，见上）
+        # 🔴 碧霄裁决（u0a 二轮）：**拒绝一律 404**，与本族其余 8 处调用点同形。
+        # 曾实现过「200 信息页 + ctx_chars=0」形状，被驳回，理由记录在此以免复发：
+        #   ① "200 但内容为空"对调用方撒谎——越权请求看起来成功，前端无法区分
+        #      "没素材"与"没权限"；② ctx_chars==0 是数值断言，将来被放宽成
+        #      "<=阈值"泄露就静默回来；状态码断言放宽不了；③ 一族两种形状，
+        #      给后来人留"哪种才对"的争论。
+        # orphan（chapter_id 为 NULL）仍走下方信息页形状——那不是越权，是无出路
+        # 提示，orphan_hint 契约不动。
+        chapter = await ensure_chapter_in_project(p, job.chapter_id, db)
+        novel = await db.get(Novel, p.novel_id) if p.novel_id is not None else None
+        if novel is not None:
+            try:
+                # 诊断只为量上下文体积：关掉手艺注入，否则 6,500 字卡块会
+                # 虚增 ctx_chars（触发误判「上下文过大」）并污染诊断结论。
+                ctx = await _assemble_context(p, novel, chapter, job, db, include_skill=False)
+                ctx_chars = len(ctx)
+            except Exception as exc:  # noqa: BLE001  诊断本身不该抛错
+                ctx_error = f"{exc.__class__.__name__}: {exc}"[:200]
 
     info = classify_failure(job.last_error)
     # 失去关联章节的任务（章节被删过 → FK ondelete SET NULL）永远生成不了：
