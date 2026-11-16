@@ -35,6 +35,7 @@ dependency_overrides 打登录态。不打桩 db——假 DB 桩会把"多一次
 """
 
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 
@@ -523,3 +524,133 @@ def test_shared_entry_is_single_source():
     assert total == 0, f"router 层仍有 {total} 处裸 db.get(Chapter, job.chapter_id)：判据又被复制了"
     deps_src = (root / "deps.py").read_text(encoding="utf-8")
     assert "def ensure_chapter_in_project" in deps_src, "共享入口缺失"
+
+
+# ================================================================ u0a-tail：桩世界 A 腿攻击面（R1/R2）
+#
+# 🔴 本节直接调用 deps.ensure_chapter_in_project，**不走端点**。原因（复审 m5/m6/m8 三靶
+# 皆 0 红的病根）：端点层在归属点之前还有 `p.novel_id is None → 400` 业务守卫与 job 查询，
+# 替身 DB 端点测试根本轮不到桩腿的跨用户判定；而 `_has_chapter_job_stub` 无论怎么改
+# （恒真/恒假/_hit 放宽）既有全套测试全绿——这条腿决定 fix6/7/8/wire 那批用替身 DB 的
+# 端点的放行面，必须在这里裸钉。夹具全部手工构造 SimpleNamespace 行 + rows 字典桩
+# （FakeDB/SeqDB 形状，见 _has_chapter_job_stub docstring 判定序第 1 条），零网络、零建库。
+
+STUB_SECRET = "桩世界绝密正文：外人不可读。"
+
+
+class _StubRowsDb:
+    """rows 字典型表级桩（FakeDB/SeqDB/_BatchDB/wire_observe.SeqDB 同形状）。"""
+
+    def __init__(self, chapters, jobs):
+        from app.models import AiChapterJob as _ACJ
+        from app.models import Chapter as _CH
+
+        self.rows = {_CH: list(chapters), _ACJ: list(jobs)}
+
+    async def get(self, model, pk):
+        for r in self.rows.get(model, []):
+            if getattr(r, "id", None) == pk:
+                return r
+        return None
+
+
+def _stub_p(pid=1, uid=7, novel_id=None):
+    # SimpleNamespace 无 __table__ → stub_p 分支激活（deps.py 以 hasattr(p,"__table__") 判形）
+    return SimpleNamespace(id=pid, user_id=uid, novel_id=novel_id)
+
+
+def _stub_chapter(cid, novel_id, content=STUB_SECRET):
+    return SimpleNamespace(id=cid, novel_id=novel_id, title="桩章", content=content)
+
+
+def _stub_job(jid, project_id, chapter_id):
+    return SimpleNamespace(id=jid, project_id=project_id, chapter_id=chapter_id, status="pending")
+
+
+def _stub_call(p, cid, db):
+    from app.deps import ensure_chapter_in_project
+
+    async def _go():
+        return await ensure_chapter_in_project(p, cid, db)
+
+    return asyncio.run(_go())
+
+
+class TestStubLegAttacks:
+    """R1：桩世界 A 腿（_has_chapter_job_stub 的 same_book ∧ _hit）攻击档。期望值硬编码。"""
+
+    def test_stub_leg_rejects_foreign_project_job(self):
+        """m8 形状防线：桩世界里放一条 project_id 属**他人**的 job 行——即使章缺 novel_id
+        （same_book 护栏天然放行），job.project_id != p.id 也必须判否 → 404。
+        变异"桩腿恒真"或"_hit 不比对 project_id"在此必红。"""
+        from fastapi import HTTPException
+
+        ch = _stub_chapter(21, None)                      # 老桩形状：章行缺 novel_id
+        evil = _stub_job(99, 2, 21)                        # project_id=2 ≠ p.id=1（他人项目）
+        db = _StubRowsDb([ch], [evil])
+        with pytest.raises(HTTPException) as ei:
+            _stub_call(_stub_p(1, novel_id=None), 21, db)
+        assert ei.value.status_code == 404, f"他人 job 必须 404，实得 {ei.value.status_code}"
+
+    def test_stub_leg_same_book_guard_blocks_other_book_chapter(self):
+        """R1 护栏档：同项目有 job 证据，但那条 job 指向的是**另一本书**的章——
+        请求本卷之外的章（novel_id 不同且无该章 job）必须被 same_book 护栏 + _hit
+        粒度双重挡住 → 404。防"桩腿放宽成 or/存在任一 job 即放行"。"""
+        from fastapi import HTTPException
+
+        ch_own = _stub_chapter(21, 5)                      # 本项目书 N5 的章（同书护栏通过，但无该章 job）
+        ch_other = _stub_chapter(22, 6)                    # 别的书 N6 的章：与 p 不同书
+        job_for_22 = _stub_job(98, 1, 22)                  # 本项目 p=1 的 job，绑的却是 N6 章
+        job_for_21 = _stub_job(95, 1, 21)                  # 本项目 p=1 的 job，绑本卷章 21（合法出路证据）
+        db = _StubRowsDb([ch_own, ch_other], [job_for_21, job_for_22])
+        p = _stub_p(1, novel_id=None)                      # p.novel_id=None → B 腿不成立，只能走桩 A 腿
+        with pytest.raises(HTTPException) as ei:
+            _stub_call(p, 21, db)                          # 请求 N5 章：无 job → 404
+        assert ei.value.status_code == 404, f"无 job 的本卷章必须 404，实得 {ei.value.status_code}"
+        with pytest.raises(HTTPException) as ei2:          # N6≠N5=p.novel_id → same_book=False，即使 job 两条件全中也必须 404
+            _stub_call(p, 22, db)                          # （桩世界跨书防线：护栏在 _hit 之前把关）
+        assert ei2.value.status_code == 404, f"同项目不同书的章必须被 same_book 护栏挡住，实得 {ei2.value.status_code}"
+
+    def test_stub_leg_hit_requires_exact_chapter_id(self):
+        """_hit 的 chapter_id 侧：同项目 job 绑章 21，不得顺带放行同书的章 22 → 404。"""
+        from fastapi import HTTPException
+
+        ch21, ch22 = _stub_chapter(21, 5), _stub_chapter(22, 5)
+        db = _StubRowsDb([ch21, ch22], [_stub_job(97, 1, 21)])
+        with pytest.raises(HTTPException) as ei:
+            _stub_call(_stub_p(1, novel_id=None), 22, db)
+        assert ei.value.status_code == 404, f"job 证据只钉那一条章，实得 {ei.value.status_code}"
+
+    def test_db_get_exception_becomes_404_not_500(self):
+        """R2（m10 形状防线）：替身 db.get 主动抛异常 → 入口必须转成 HTTPException(404)，
+        不许裸异常冒成 500。摘掉 try/except 的变异在此必红。"""
+        from fastapi import HTTPException
+
+        class _BoomDb:
+            async def get(self, *a, **k):
+                raise RuntimeError("桩连 get() 都没备出")
+
+        with pytest.raises(HTTPException) as ei:
+            _stub_call(_stub_p(1, novel_id=5), 21, _BoomDb())
+        assert ei.value.status_code == 404, (
+            f"db.get 抛错必须保守拒绝成 404（非裸异常/500），实得 {ei.value.status_code}"
+        )
+
+    def test_falsy_chapter_id_never_reaches_stub_leg_or_db_get(self):
+        """R3（m7b 形状绊马索）：chapter_id=0 时，桩 db.get 故意**盲返回不等主键的行**
+        （复刻 ORM 投影退化形状）。若上游假值闸被改成 `is None`，0 会穿透并被盲桩喂回
+        的行放行 → 本条变红。现在 `if not chapter_id` 必须在任何取章之前直接 404。"""
+        from fastapi import HTTPException
+
+        blind = _stub_chapter(0, 5)                        # 盲桩：get(任意pk)都吐这一行
+        job0 = _stub_job(96, 1, 0)                         # orphan job 形状也一并备好（洞开时全链绿灯）
+
+        class _BlindDb(_StubRowsDb):
+            async def get(self, model, pk):
+                return blind                               # 不等主键，照吐
+
+        db = _BlindDb([blind], [job0])
+        for cid in (0, None):
+            with pytest.raises(HTTPException) as ei:
+                _stub_call(_stub_p(1, novel_id=5), cid, db)
+            assert ei.value.status_code == 404, f"chapter_id={cid!r} 必须在前置闸 404，实得 {ei.value.status_code}"

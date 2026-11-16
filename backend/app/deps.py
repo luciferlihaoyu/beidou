@@ -39,6 +39,11 @@ async def ensure_chapter_in_project(p: AiProject, chapter_id: int | None, db: As
     外键、不删历史章节——p.novel_id=N2 而历史章仍挂 N1，一律比对 novel_id 会把
     用户自己的旧章永久判死 404；AiChapterJob 证明该章属本项目，必须放行。
     """
+    # 🔴 m1 等价性的支撑闸（复审 m7b 实证）：本行必须是**假值判断** `if not chapter_id`。
+    # 下面 B 腿的 `is not None` 与旧写法 `p.novel_id and ...` 之所以语义等价，全靠这里
+    # 先把 0/None 拦死——若改成 `chapter_id is None`，id=0 会穿透并拿去 db.get；真库
+    # ORM 投影退化时 `db.get(Chapter, 0)` 可能盲返回不等主键的行 → id=0 放行（test_u0a
+    # ::test_falsy_chapter_id_never_reaches_stub_leg_or_db_get 以盲桩钉死此形状）。
     if not chapter_id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "章节不存在，或不属于本项目")
     # 桩兼容快路（AGENTS.md「假 DB 同形化」教训的正向规避）：本仓库大量替身会话用
@@ -46,8 +51,12 @@ async def ensure_chapter_in_project(p: AiProject, chapter_id: int | None, db: As
     # 模型类不是映射而 ArgumentError；execute 盲吐队列又会错位——所以 **p 是
     # SimpleNamespace 形状**（无 __table__，ORM 实例必有）时改走 duck-typed 取章
     # （桩的 rows[Chapter]），A 腿改按属性比对 job 行（rows[AiChapterJob]）。
-    # owner 合取在桩世界天然成立：替身世界的 novel/chapter/job 与 p 本就同库同源，
-    # 跨用户泄露场景只可能出现在真库矩阵测试里，那里必走下面的 ORM 路径。
+    # ⚠️ 勘误（u0a-tail 复审取证）：此处旧注释称"owner 合取在桩世界天然成立、跨用户
+    # 泄露只可能出现在真库矩阵"——归因**错**。桩世界同样能构造跨项目 job 行（间谍在
+    # 他人 project_id 下塞 job），防线不是"场景不可达"而是 `_has_chapter_job_stub._hit`
+    # 逐字比对 project_id ∧ chapter_id 两条件本身；由 test_u0a_attribution
+    # ::TestStubLegAttacks 直调入口钉死（复审 m5/m6/m8 三靶曾在此全绿，即因旧注释
+    # 所述的"天然成立"根本不存在）。
     stub_p = not hasattr(p, "__table__")
     try:
         chapter = await db.get(Chapter, chapter_id)
