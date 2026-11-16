@@ -487,3 +487,119 @@ class TestReviewFixes:
         assert "未登记" in joined, "未登记信号路没进页首警告条"
         # 警告条必须**在各节之前**（页首可见，不是埋在文体表里）
         assert out.index(bars[1]) < out.index("文体指标对照"), "形态警告条位置太靠后"
+
+
+# ================================================================ u0c 补判据（L / N）
+# 背景：独立评审用变异实验实测——把生产逻辑改坏，既有测试仍全绿。以下用例逐条补牙。
+# 期望值全部硬编码，不从实现 import 常量当基准（本项目铁律）。
+
+
+class TestU0cWarningBarIntegrity:
+    """契约 L：页首警告条的**完整性**。
+
+    既有 test_page_top_warning_bar_is_populated_after_render 只断言"警告条里出现了字"，
+    没断言"该出现的警告都出现了"——把其中任意一类从汇总里摘掉，页面照样有别的字、照样绿。
+    既有判据只说"警告条里有字"，本组钉的是"该有的每条都在"。
+    🔴 实测事实（2026-11-16，逐行打开生产代码核过，非推测）：`build_report_html` 里
+    `notes.append` 共 4 个点（deai_report.py:75 融合形态异常 / :115 未登记信号路 /
+    :149 审校师证据形态异常 / :183 文体指标形态异常），但**同一份输入最多只能触发 2 条**——
+    ①融合那条**永远进不了警告条**：调用点是 `deai_report.py:249`
+    `fusion = result.get("fusion") if isinstance(result.get("fusion"), dict) else {}`，
+    传给 `_coverage_block(fusion, ...)` 的 fusion **已被过滤成字典或 {}**，函数内
+    `if not isinstance(fusion, dict)` 恒 False → deai_report.py:75 是死代码（真 bug，已单独回报待裁决）。
+    ④审校师那条要求 reviewer.status=="ok"，与 ②③ 无冲突但和"三路都不理想"的夹具互斥。
+    所以本组按**实际可得的形状**钉：三类异常同时喂进去时，页面上必须出现
+    「应出现的每一条」且「不该出现的死条目不许假装出现过」。
+    """
+
+    def test_every_kind_of_anomaly_has_its_own_label_not_one_generic_word(self):
+        """既有判据 `test_malformed_sections_degrade_to_labels_not_500` 只断言了
+        `"形态异常" in out` 这**四个字**——实测：把三类具体文案（未登记路 / 审校师证据 /
+        文体指标）全删掉、只留融合那一句通用"形态异常"，那条老用例照样绿。
+        所以这里钉的是**每条警告必须自带身份**：光有"形态异常"这个笼统词不算数。"""
+        warn = re.findall(r'<div class="caveat">(.*?)</div>',
+                          build_report_html(self._multi(), dict(META)), re.S)[1]
+        assert warn.count("形态异常") == 2, f"应有且只有 2 处「形态异常」（审校师 + 文体），实得 {warn.count('形态异常')}：{warn}"
+        for marker in self.WANT:
+            assert marker in warn, f"缺少点名到路的警告「{marker}」：{warn[:220]}"
+
+    def test_dead_fusion_note_is_never_emitted_documents_the_real_bug(self):
+        """🔴 如实钉住当前实现的**缺陷形状**（不是为绿而写）：喂一个 fusion 是字符串的结果，
+        期望里那句「融合结果形态异常」**根本不出现**——因为实现把非字典的 fusion 悄悄换成 {}
+        再交给覆盖率块，警告条于是少了一条、覆盖率还显示 0/3 而不是交代"融合数据形态异常"。
+        这条用例在有人修好那行（把原始值传下去）后会**立刻变红**，届时请把断言翻成正向，
+        并在 commit 里写明修复了 deai_report.py:249 + :75 的死分支。"""
+        r = _result()
+        r["fusion"] = "不是字典"
+        out = build_report_html(r, dict(META))
+        assert "融合结果形态异常" not in out, \
+            "实现已修好（融合形态异常能进警告条了）→ 请把本用例翻成正向断言并同步删除此注释"
+        assert "融合数据形态异常" not in out, "覆盖率块的降级文案同样不可达（同一根因）"
+
+    def _multi(self):
+        """一份同时踩到多条异常路的输入（实测可得的最大集合，见类文档）。"""
+        r = _result()
+        r["fusion"] = "不是字典"          # → ①（当前实现下不可达，另有用例如实记录）
+        r["reviewer"] = {"signal": "reviewer", "status": "ok",
+                         "value": "字符串不是字典", "detail": "d"}   # → ④审校师证据形态异常
+        r["style"] = ["不是字典"]         # → ③文体形态异常
+        r["llm_judge"] = {"signal": "llm_judge", "status": "skipped",
+                          "value": None, "detail": "未接入"}         # → ②未登记路
+        return r
+
+    #: 硬编码：这份输入**应当**在警告条里出现的标记（每条恰一次）。
+    WANT = ("未登记在 _PATH_ORDER", "文体指标形态异常", "审校师证据形态异常")
+
+    def test_every_expected_warning_appears_exactly_once(self):
+        out = build_report_html(self._multi(), dict(META))
+        bars = re.findall(r'<div class="caveat">(.*?)</div>', out, re.S)
+        assert len(bars) == 2, f"应恰好 2 个 caveat div（免责句 + 警告条），实得 {len(bars)}"
+        warn = bars[1]
+        for marker in self.WANT:
+            assert warn.count(marker) == 1, f"「{marker}」出现 {warn.count(marker)} 次（应恰 1）：{warn[:250]}"
+        assert len(warn.split("；")) == 3, f"警告条应有 3 条，实得 {len(warn.split('；'))}：{warn}"
+
+    def test_dropping_any_single_warning_turns_red(self):
+        """完整性判据的另一面：**逐条点名**，摘掉任何一条都过不了（既有测试只查"有字"）。"""
+        warn = re.findall(r'<div class="caveat">(.*?)</div>',
+                          build_report_html(self._multi(), dict(META)), re.S)[1]
+        got = {m for m in self.WANT if m in warn}
+        want = set(self.WANT)
+        assert got == want, f"警告条不完整，缺失：{want - got}"
+        # 顺序闸按**实际 append 次序**钉（实测：_signals_table:115 早于 _reviewer_block:149，
+        # 后者又早于 _style_table:183）——顺序被改坏说明各段渲染次序动了。
+        order = ("未登记在 _PATH_ORDER", "审校师证据形态异常", "文体指标形态异常")
+        idx = [warn.index(m) for m in order]
+        assert idx == sorted(idx), f"警告条目顺序错乱：{idx}｜{warn[:200]}"
+
+
+class TestU0cUnknownStatusTripwire:
+    """契约 N：未知状态的标签文案兜底。绊马索性质，见各用例注释。"""
+
+    # 🔴 绊马索（AGENTS.md 明文要求就地注明）：**故意**用当前代码不该认识的状态串
+    # （"frobnicated" 不在 _STATUS_LABEL 的五键里）。一旦有人删掉兜底分支或改成
+    # KeyError/静默按 ok 渲染，这条立刻变红——它守的是"未来不许扩大状态枚举面而不给说法"。
+    def test_unknown_status_falls_back_without_crashing_and_shows_raw_value(self):
+        r = _result()
+        r["reviewer"]["status"] = "frobnicated"
+        out = build_report_html(r, dict(META))  # 不许抛异常
+        assert "未知状态（frobnicated）" in out, "未知状态没有显形成「未知状态（xxx）」"
+        seg = out[out.index("审校师证据"):]
+        assert "正常参与打分" not in seg, "未知状态被静默按 ok 渲染了"
+
+    # 🔴 绊马索同上：用最恶劣输入钉"原始串不许泄进 class 属性"（防属性逃逸）。
+    def test_unknown_status_raw_string_never_leaks_into_class_attr(self):
+        r = _result()
+        r["rule"]["status"] = 'x" onload="alert(1)'
+        out = build_report_html(r, dict(META))
+        assert 'class="st-x" onload=' not in out, "原始状态串未经转义就进了 class 属性（可执行入口）"
+        assert "&quot;" in out or "&#x27;" in out or '"' not in out.split('class="')[1][:40], \
+            "状态属性值应被转义封闭"
+
+    # 🔴 绊马索：文体表同样喂不存在的状态串，钉兜底覆盖到 style 一路。
+    def test_unknown_style_status_also_gets_explicit_label(self):
+        r = _result()
+        r["style"] = {"疲劳词密度": {"value": 3.2, "human_low": None, "human_high": None,
+                                      "deviation": None, "status": "not_a_real_status"}}
+        out = build_report_html(r, dict(META))
+        assert "未知状态（not_a_real_status）" in out, "文体表遇到未知状态没有走兜底"

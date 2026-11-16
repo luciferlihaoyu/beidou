@@ -547,3 +547,167 @@ def test_quote_verification_is_literal_at_character_level(quote, expect_verified
     assert feats[0]["quote_verified"] is expect_verified, (
         f"引文 {quote!r} 应判 verified={expect_verified}，实得 {feats[0]['quote_verified']}"
     )
+
+
+# ================================================================ u0c 补判据（M / E / S2）
+# 背景：独立评审用变异实验实测——把生产逻辑改坏，既有测试仍全绿（"有名字、零牙齿"）。
+# 期望值全部硬编码，不从实现 import 常量当基准。
+
+
+# ---------------- 契约 M：_risk_of 的「空输入 → 0.0」显式契约 ----------------
+# 现状：实现**恰好**返回 0.0，但没有任何测试钉住这个形状（把默认值改成 0.5 或让它抛异常，
+# 既有 35 条全绿）。以下三种畸形输入各钉一个硬编码期望值。
+
+def test_u0c_risk_of_empty_envelope_is_none_not_zero():
+    """完全空的信封（连 status 都没有）→ None（不参与），**不许是 0.0**。
+    0.0 = 「已检测且完美干净」；None = 「此路无话可说」。两者混同是把故障洗成合格。"""
+    from app.deai_signals import _risk_of
+
+    assert _risk_of("reviewer", {}) is None
+    assert _risk_of("reviewer", {"status": "ok", "value": None}) is None
+    assert _risk_of("mystery_path", {"status": "ok", "value": 1.0}) is None, \
+        "未登记信号名必须返回 None，不许猜一个分"
+
+
+def test_u0c_risk_of_reviewer_both_groups_empty_is_exactly_zero():
+    """审校师返回空（两组皆空数组 / value={} / 两组键缺失 / 值为 None）→ **恰好 0.0**。
+    这是显式约定「模型明确报告无特征 = 弱清洁证据」，不是巧合。"""
+    from app.deai_signals import _risk_of
+
+    cases = [
+        {"status": "ok", "value": {"ai_features": [], "human_evidence": []}},
+        {"status": "ok", "value": {}},
+        {"status": "ok", "value": {"ai_features": None, "human_evidence": None}},
+    ]
+    for env in cases:
+        got = _risk_of("reviewer", env)
+        assert got == 0.0, f"{env} 应得硬编码 0.0，实得 {got!r}"
+        assert isinstance(got, float), f"0.0 必须是 float，实得 {type(got).__name__}"
+
+
+def test_u0c_risk_of_malformed_value_raises_loudly_not_silently():
+    """🔴 实测到的当前行为（如实钉住，不美化）：`value` 是字符串/列表时 `_risk_of`
+    **抛 AttributeError**。这不是我们希望的形状，但它**现在是事实**，所以钉住它——
+    一旦有人把它改成静默返回某个默认分（比如 0.5），这条立刻红。
+    （融合层 fuse_signals 收到的是 rule_signal/perplexity_signal/reviewer_signal 的信封，
+    这三家产出的 value 只会是数字或两组字典，所以线上不会走到这里；但契约面必须有锁。）"""
+    from app.deai_signals import _risk_of
+
+    for bad in ("oops", [1, 2], 3):
+        with pytest.raises(AttributeError):
+            _risk_of("reviewer", {"status": "ok", "value": bad})
+
+
+# ---------------- 契约 E：logprobs 统计口径的降级形状 ----------------
+
+def test_u0c_perplexity_unsupported_shows_as_not_collected_and_scores_nothing():
+    """拿不到 logprobs（实测 MiniMax-M3 的形状）时：状态必须是 skipped（人话=不支持/未采集），
+    value 必须为 None，detail 必须点名 logprobs——**不许给个默认分糊上去**。"""
+    env = asyncio.run(perplexity_signal(_AI_TEXT, _FAKE_CONFIG, _raw_no_logprobs))
+    assert env["status"] == "skipped", f"应为 skipped，实得 {env['status']}"
+    assert env["value"] is None, f"降级档 value 必须是 None（哨兵分=伪造数据），实得 {env['value']!r}"
+    assert "logprobs" in env["detail"], "必须写明是 logprobs 不可得，而不是含糊一句"
+
+
+def test_u0c_skipped_perplexity_does_not_enter_fusion_weighting():
+    """反向确认「不得参与打分加权」：只有规则路可用时，融合分必须等于纯规则风险分，
+    困惑度那 0.2 权重**根本没进分母**。硬编码期望来自手工推演：
+    rule value=60 → risk=100-60=40；仅 1 路 → 0.5*40/0.5 = 40.0。"""
+    rule = {"signal": "rule", "status": "ok", "value": 60, "detail": "d"}
+    ppl = {"signal": "perplexity", "status": "skipped", "value": None, "detail": "无 logprobs"}
+    rev = {"signal": "reviewer", "status": "skipped", "value": None, "detail": "未调用"}
+    fused = fuse_signals(rule, ppl, rev)
+    assert fused["participating"] == ["rule"], f"skipped 路混进了参与路：{fused['participating']}"
+    assert fused["score"] == 40.0, f"纯规则路分数应为硬编码 40.0，实得 {fused['score']!r}"
+    assert "perplexity" in fused["detail"], "必须交代 perplexity 未参与"
+
+
+def test_u0c_real_logprobs_are_consumed_not_always_degraded():
+    """反向档（证明不是恒降级）：**假装有 logprobs** 的响应确实被采用并进了分数。
+    手工推演：logprob -0.2/-2.2 → mean=-1.2 → ppl=exp(1.2)=3.32；
+    risk = round(100/(1+3.32/50), 2) = 93.77；rule 60 → risk 40 →
+    (0.5*40 + 0.2*93.77)/0.7 = 55.3628… → round(...,1) = 55.4。"""
+    env = asyncio.run(perplexity_signal(_AI_TEXT, _FAKE_CONFIG, _raw_with_logprobs))
+    assert env["status"] == "ok", f"有 logprobs 却仍降级：{env['status']}"
+    assert env["value"] == 3.32, f"困惑度应取自真实 logprobs（手算 3.32），实得 {env['value']!r}"
+
+    rule = {"signal": "rule", "status": "ok", "value": 60, "detail": "d"}
+    rev = {"signal": "reviewer", "status": "skipped", "value": None, "detail": "未调用"}
+    fused = fuse_signals(rule, env, rev)
+    assert fused["participating"] == ["rule", "perplexity"]
+    assert fused["score"] == 55.4, f"两路融合分应为硬编码 55.4，实得 {fused['score']!r}"
+
+
+def test_u0c_default_off_probe_never_calls_the_endpoint():
+    """端点默认 probe_logprobs=False → config=None → 该路直接 skipped，
+    一次网络请求都不发（省钱 + 当前模型本来就探测不到）。"""
+    env = asyncio.run(perplexity_signal(_AI_TEXT, None, _raw_boom))
+    assert env["status"] == "skipped"
+    assert env["value"] is None
+    assert "未提供模型配置" in env["detail"]
+
+
+# ---------------- 契约 S2：「文本太短」阈值的边界 ----------------
+# 🔴 如实记录（实测 2026-11-16，grep 穷举两文件所得，非推测）：
+#   anti_llm.detect() 第 95 行 `if len(text) < 50`；anti_llm.dimension_values() 第 280 行同款 50；
+#   deai_signals.rule_signal() 不另设阈值，靠 detect() 的 issues[].type=="太短" 转 degenerate。
+#   → 两条路的**长度阈值实测同为 50**，本仓库这一对里**没有** 50 vs 60 的分叉。
+#   deai_signals.py:222 唯一的 60 是审校师提示词里「引文不超过 60 字」，与长度短路无关。
+#   因此下面钉的是**共同边界 50**（49 不够 / 50 刚好够 / 51 略超三档）。
+#   任一侧从 50 挪到 60，49/50 两档必红——这就是本条的牙。
+
+def _s2_text(n: int) -> str:
+    """构造**恰好 n 个字符**的文本（实测：len() 按码点计，中文一字算一）。
+    用函数造而不是手数字符串——手抄的长度会漂，漂移的用例等于没有用例。"""
+    base = "他把烟按灭在砖墙上。"  # 10 字
+    filler = "风从巷口灌进来卷起糖纸一片两片三片四片五片六片七片八片九片十片"
+    t = base * 4 + filler[: n - 40]
+    assert len(t) == n, f"夹具构造失败：要 {n} 字，实得 {len(t)}"
+    return t
+
+
+_S2_T49 = _s2_text(49)
+_S2_T50 = _s2_text(50)
+_S2_T51 = _s2_text(51)
+
+
+def test_u0c_short_text_boundary_is_exactly_fifty_chars():
+    """钉住**当前实际行为**：len<50 → detect 短路 score=100 + issues 含「太短」；
+    len==50 → 不再短路（走真检测）；len==51 同上。三档一起钉，阈值挪一档即红。"""
+
+    d49 = detect(_S2_T49)
+    assert d49["score"] == 100, "49 字应命中太短短路（哨兵 100）"
+    assert any(i.get("type") == "太短" for i in d49["issues"]), "49 字必须带「太短」issue 标记"
+
+    d50 = detect(_S2_T50)
+    # 注意：50 字这条干净文本 score **仍是 100**（无命中），但 issues 里不再有「太短」——
+    # 判据必须看 issues 标记而不是分数，否则短路和"真的干净"两种形状分不开。
+    assert not any(i.get("type") == "太短" for i in d50["issues"]), \
+        "50 字不该再被判太短——若这红了说明阈值被从 50 往上挪了"
+
+    d51 = detect(_S2_T51)
+    assert not any(i.get("type") == "太短" for i in d51["issues"]), "51 字（略超）同样不该短路"
+
+
+def test_u0c_rule_signal_inherits_the_same_boundary():
+    """检测路（deai_signals.rule_signal）与规则路口径一致性：49 字 → degenerate，
+    50 字 → ok。**两路共用同一个 50**，任何一侧单独挪阈值都会在这里露馅。"""
+    e49 = rule_signal(_S2_T49)
+    assert e49["status"] == "degenerate", f"49 字应为 degenerate（哨兵未真正检测），实得 {e49['status']}"
+    assert e49["value"] is None, "哨兵 100 不许作为 value 交给融合"
+
+    e50 = rule_signal(_S2_T50)
+    assert e50["status"] == "ok", f"50 字应正常参与打分，实得 {e50['status']}（阈值若被挪到 60 这里会红）"
+    assert isinstance(e50["value"], (int, float))
+
+
+def test_u0c_dimension_values_shares_the_boundary():
+    """dimension_values 的第 280 行也是 `< 50`：49 字 → 9 维全 None；50 字 → 至少一维有值。
+    这一档把 anti_llm 内部的**两处** 50 都各自钉住（detect 与 dimension_values 各一条腿）。"""
+    v49 = dimension_values(_S2_T49)
+    assert set(v49.keys()) == set(DIMENSION_NAMES)
+    assert all(x is None for x in v49.values()), "49 字时 9 维必须全部不可得（None），不许用 0 冒充"
+
+    v50 = dimension_values(_S2_T50)
+    assert any(x is not None for x in v50.values()), \
+        "50 字已越过阈值，至少要有一维算出值——若这红了说明 dimension_values 的 50 被挪到了 60"
