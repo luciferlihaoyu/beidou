@@ -34,7 +34,7 @@ from .. import schemas  # t4：产物契约校验 + 快照合并（纯校验层�
 from .. import skillwire
 from ..anti_llm import ANTI_LLM_RULES  # t5①：界面正文写作与夜跑/批量共用同一套反 AI 腔规则（只导入，不重抄副本）
 from ..db import get_db, SessionLocal
-from ..deps import get_ai_config, get_current_user
+from ..deps import ensure_chapter_in_project, get_ai_config, get_current_user
 import logging
 
 from ..failure_kinds import classify_failure, empty_output_error
@@ -2242,9 +2242,7 @@ async def generate_chapter(
     job = await db.get(AiChapterJob, job_id)
     if job is None or job.project_id != p.id or job.chapter_id is None:
         raise HTTPException(404, "章节任务不存在")
-    chapter = await db.get(Chapter, job.chapter_id)
-    if chapter is None:
-        raise HTTPException(404, "章节不存在")
+    chapter = await ensure_chapter_in_project(p, job.chapter_id, db)  # u0a：共享归属入口
     novel = await db.get(Novel, p.novel_id)
     assert novel is not None
 
@@ -2394,17 +2392,26 @@ async def diagnose_job(
 
     ctx_chars = 0
     ctx_error = ""
-    if p.novel_id is not None and job.chapter_id is not None:
-        chapter = await db.get(Chapter, job.chapter_id)
-        novel = await db.get(Novel, p.novel_id)
-        if chapter is not None and novel is not None:
-            try:
-                # 诊断只为量上下文体积：关掉手艺注入，否则 6,500 字卡块会
-                # 虚增 ctx_chars（触发误判「上下文过大」）并污染诊断结论。
-                ctx = await _assemble_context(p, novel, chapter, job, db, include_skill=False)
-                ctx_chars = len(ctx)
-            except Exception as exc:  # noqa: BLE001  诊断本身不该抛错
-                ctx_error = f"{exc.__class__.__name__}: {exc}"[:200]
+    if job.chapter_id is not None:
+        # u0a：诊断路径的归属判据收敛到共享入口 ensure_chapter_in_project（旧写法
+        # 在此内联复制了一份弱判据——`any(j.id == job.id ...)` 在 job.project_id 已
+        # 校验后恒真，等于没判；裸 db.get(Chapter,...) 正是本族泄露点）。
+        # 但**不 raise**——诊断是信息页形状，orphan / 跨用户 / 无证据章一律保持
+        # 合法 200 + ctx_chars=0（既有 UX 契约由 test_u0a_attribution 矩阵钉死），
+        # 绝不把他人章喂进 _assemble_context。
+        try:
+            chapter = await ensure_chapter_in_project(p, job.chapter_id, db)
+            novel = await db.get(Novel, p.novel_id) if p.novel_id is not None else None
+            if novel is not None:
+                try:
+                    # 诊断只为量上下文体积：关掉手艺注入，否则 6,500 字卡块会
+                    # 虚增 ctx_chars（触发误判「上下文过大」）并污染诊断结论。
+                    ctx = await _assemble_context(p, novel, chapter, job, db, include_skill=False)
+                    ctx_chars = len(ctx)
+                except Exception as exc:  # noqa: BLE001  诊断本身不该抛错
+                    ctx_error = f"{exc.__class__.__name__}: {exc}"[:200]
+        except HTTPException:
+            pass  # 归属不成立 → 跳过组装，ctx_chars=0（信息页形状，见上）
 
     info = classify_failure(job.last_error)
     # 失去关联章节的任务（章节被删过 → FK ondelete SET NULL）永远生成不了：
@@ -2907,9 +2914,7 @@ async def finalize_chapter(
     job = await db.get(AiChapterJob, job_id)
     if job is None or job.project_id != p.id or job.chapter_id is None:
         raise HTTPException(404, "章节任务不存在")
-    chapter = await db.get(Chapter, job.chapter_id)
-    if chapter is None:
-        raise HTTPException(404, "章节不存在")
+    chapter = await ensure_chapter_in_project(p, job.chapter_id, db)  # u0a：共享归属入口
 
     # 1. 正文落库（手写 HTML 转换 + 字数统计 + FTS 同步）
     # 重写已有正文的章节时，覆盖前自动快照（失败不阻塞），改砸了可回滚
@@ -3030,9 +3035,7 @@ async def review_chapter(
     job = await db.get(AiChapterJob, job_id)
     if job is None or job.project_id != p.id or job.chapter_id is None:
         raise HTTPException(404, "章节任务不存在")
-    chapter = await db.get(Chapter, job.chapter_id)
-    if chapter is None:
-        raise HTTPException(404, "章节不存在")
+    chapter = await ensure_chapter_in_project(p, job.chapter_id, db)  # u0a：共享归属入口
     text = strip_html(chapter.content).strip()
     if len(text) < 20:
         raise HTTPException(400, "章节还没有正文，无法审校")

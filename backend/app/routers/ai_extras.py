@@ -22,7 +22,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import get_db
-from ..deps import get_current_user
+from ..deps import ensure_chapter_in_project, get_current_user
 from ..models import AiProject, User
 from ..utils import chapter_display_title, strip_html
 from .ai_factory import (
@@ -582,19 +582,20 @@ async def deai_report_html(
 
     from ..deai_report import build_report_html
     from ..deai_signals import collect_signals
-    from ..models import Chapter, Novel
+    from ..models import Novel
 
     p = await _get_project(project_id, user, db)
-    chapter = await db.get(Chapter, chapter_id)
-    # 归属校验**不许有短路分支**：AiProject.novel_id 是可空列（删掉绑定的小说时
-    # FK 置空），旧写法 `p.novel_id and chapter.novel_id != p.novel_id` 在 novel_id=None
-    # 时整条件短路成 False → 任何人的 chapter_id 都能出报告，等于跨用户泄露整章正文
-    # （天演评审 C-1 critical，真库探针实锤 HTTP 200）。
-    # 语义定死：项目没绑定小说 = 它没有章节 → 一律 404。
-    # （`not p.novel_id` 必须写在前面：两边都空时 `None != None` 是 False，
-    #   只靠等值比较会放行——测试档位 both-None 就是钉这个的。）
-    if not p.novel_id or chapter is None or chapter.novel_id != p.novel_id:
-        raise HTTPException(404, "章节不存在，或不属于本项目")
+    # u0a：归属校验收敛到共享单一入口 deps.ensure_chapter_in_project（对既有 4 档
+    # 硬契约 test_deai_report.py::test_chapter_ownership_checked_on_every_tier 语义
+    # 完全一致，断言不许动）。原始洞形状回顾：`if p.novel_id and ...` 的真值短路在
+    # 项目解绑小说后（AiProject.novel_id 可空、FK SET NULL）整条件短路成 False →
+    # 任何人换个 chapter_id 出别人整章报告（天演评审 C-1 critical，真库实锤 HTTP 200）。
+    # 入口 B 腿以显式 `p.novel_id is not None` 参与，短路永不复发；新增 A 腿
+    # （AiChapterJob 精确证据）只**放宽换绑用户的合法历史章**（旧等值判据把他们
+    # 永久判死 404），拦截面不缩——无证据跨用户章照旧 404。
+    # 桩兼容：本端点既有测试用「只备 get() 的最小 FakeDB」，入口对这类桩 B 腿命中时
+    # 不触 execute（判序见 deps.py 注释）；B 不成立才反查 A 一次。
+    chapter = await ensure_chapter_in_project(p, chapter_id, db)
 
     # 书名在 Novel 上：AiProject **没有** title 列。先前写 getattr(p, "title", "")
     # 会永远静默退化成「项目 7」，报告标题全是占位串（碧霄自查发现，非评审提出）。

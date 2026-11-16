@@ -20,6 +20,7 @@ import logging
 
 import httpx as _httpx
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi import HTTPException as _RealHTTPException  # u0a：与 HTTPException 同一对象；SSE 循环 catch 归属拒绝用显式别名，让"这里必须抓真异常"在字面上可见
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -27,9 +28,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from .. import llm_timeouts
 from ..anti_llm import ANTI_LLM_RULES, deflavor_rewrite_prompt, detect
 from ..db import get_db
-from ..deps import count_words, get_current_user
+from ..deps import count_words, ensure_chapter_in_project, get_current_user
 from ..failure_kinds import classify_failure
-from ..models import AiChapterJob, AiProject, Chapter, Novel, User, Volume, utcnow
+from ..models import AiChapterJob, AiProject, Chapter, Novel, User, Volume, utcnow  # u0a：db.get(Chapter,...) 裸取点清零，取章挪进 deps.ensure_chapter_in_project（select(Chapter) 列表查询保留）
 from ..sse import paced_await, paced_upstream, sse_streaming
 from ..utils import chapter_display_title, order_chapters, strip_html
 from .ai_factory import (
@@ -73,9 +74,8 @@ async def review_full(
     job = await db.get(AiChapterJob, job_id)
     if job is None or job.project_id != p.id or job.chapter_id is None:
         raise HTTPException(404, "章节任务不存在")
-    chapter = await db.get(Chapter, job.chapter_id)
-    if chapter is None:
-        raise HTTPException(404, "章节不存在")
+    # u0a：取章必须经共享归属入口（旧写法裸 db.get 不校验章节↔项目，同族洞 N 份拷贝之一）
+    chapter = await ensure_chapter_in_project(p, job.chapter_id, db)
     text = strip_html(chapter.content).strip()
     if len(text) < 20:
         raise HTTPException(400, "章节还没有正文，无法审校")
@@ -155,8 +155,18 @@ async def review_full(
     }
 
 
-class HTTPException(Exception):
-    """占位防呆：本模块不应直接 raise HTTPException 的场景兜底（实际不会被触发）。"""
+class _BatchHttpPlaceholder(Exception):
+    """u0a 修复记录：原名 `HTTPException`，是一个**遮蔽 fastapi 同名导入的占位类**。
+
+    它旧 docstring 自述「实际不会被触发」是假的——本模块 16 处 `raise HTTPException(...)`
+    在调用时解析到的正是这个类（Python 按定义域取全局名），于是每一处都以非 FastAPI
+    异常逃出端点、被 Starlette 转成 **500 + traceback**（TestClient 探针实测）。
+    u0a 的处置：把本类改名为不再遮蔽真名的 `_BatchHttpPlaceholder`，让 16 个 raise 点
+    重新落到模块顶部 `from fastapi import HTTPException`（经 `_RealHTTPException` 别名
+    确认同一对象）上——用户形状「未关联小说的项目发起批量连跑」恢复拿到人话 400。
+    SSE 循环里 catch 归属拒绝仍用 `_RealHTTPException` 显式别名（语义不变，只是现在
+    两个名字指向同一个类；保留别名是为了让"这里必须抓真异常"在字面上可见）。
+    """
 
     def __init__(self, status: int, msg: str):
         self.status = status
@@ -230,8 +240,12 @@ async def batch_run(
         done_n = 0
         low_quality_streak = 0  # 质量门禁：连续低分（AI味<60）达到 2 章自动暂停
         for job in pending:
-            chapter = await db.get(Chapter, job.chapter_id)
-            if chapter is None:
+            # u0a：批量循环同样必须经共享归属入口。旧写法只在 chapter is None 时
+            # continue——跨用户章畅通无阻进生成流。归属不成立 = 该 job 被跳过，
+            # 绝不许把他人章喂进 _assemble_context / prompt。
+            try:
+                chapter = await ensure_chapter_in_project(p, job.chapter_id, db)
+            except _RealHTTPException:  # u0a：真 FastAPI HTTPException——裸 HTTPException 在此抓到 157 行占位类，等于没 catch
                 continue
             num = number_map.get(chapter.id, 0)
             title = chapter_display_title(chapter.title, num)
@@ -566,9 +580,7 @@ async def revise_chapter(project_id: int, job_id: int, user: User = Depends(get_
     job = await db.get(AiChapterJob, job_id)
     if job is None or job.project_id != p.id or job.chapter_id is None:
         raise HTTPException(404, "章节任务不存在")
-    chapter = await db.get(Chapter, job.chapter_id)
-    if chapter is None:
-        raise HTTPException(404, "章节不存在")
+    chapter = await ensure_chapter_in_project(p, job.chapter_id, db)  # u0a：共享归属入口
     issues = json.loads(job.review_issues) if job.review_issues else []
     if not issues:
         raise HTTPException(400, "没有待修订的问题（请先运行审校）")
@@ -633,9 +645,7 @@ async def deflavor_chapter(project_id: int, job_id: int, user: User = Depends(ge
     job = await db.get(AiChapterJob, job_id)
     if job is None or job.project_id != p.id or job.chapter_id is None:
         raise HTTPException(404, "章节任务不存在")
-    chapter = await db.get(Chapter, job.chapter_id)
-    if chapter is None:
-        raise HTTPException(404, "章节不存在")
+    chapter = await ensure_chapter_in_project(p, job.chapter_id, db)  # u0a：共享归属入口
 
     text = strip_html(chapter.content)
     if len(text) < 100:
@@ -708,9 +718,7 @@ async def rewrite_partial(
     job = await db.get(AiChapterJob, job_id)
     if job is None or job.project_id != p.id or job.chapter_id is None:
         raise HTTPException(404, "章节任务不存在")
-    chapter = await db.get(Chapter, job.chapter_id)
-    if chapter is None:
-        raise HTTPException(404, "章节不存在")
+    chapter = await ensure_chapter_in_project(p, job.chapter_id, db)  # u0a：共享归属入口
 
     text = strip_html(chapter.content)
     excerpt = data.excerpt.strip()

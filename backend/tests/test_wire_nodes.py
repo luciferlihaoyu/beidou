@@ -590,8 +590,14 @@ class TestReviewEndpointEndToEnd:
                     return job
                 if model.__name__ == "Chapter":
                     # 既服务待审校章，也服务 novel_texts 的章节查询
+                    # u0a 夹具形状补全（非断言放宽）：真库 Chapter.novel_id 是 NOT NULL 列，
+                    # 本桩此前漏了该属性，导致归属入口 ensure_chapter_in_project 的 B 腿
+                    # （p.novel_id is not None ∧ chapter.novel_id == p.novel_id）无法判定。
+                    # 补 novel_id=7 —— 与本夹具 project.novel_id / novel.id 同为 7，语义即
+                    # "这章属于本项目所绑定的那本书"，与真实世界一致；未动任何断言。
                     return SimpleNamespace(
                         id=21,
+                        novel_id=7,
                         title=chapter.title,
                         content=chapter.content,
                         sort_order=1,
