@@ -639,17 +639,56 @@ class TestHeadVersionByteGuard:
 
     @staticmethod
     def _git_show(ref: str) -> str | None:
+        """取 `<ref>` 版 skills.py 的**真字节**。
+
+        ⚠️ **跳过只允许用于「环境根本不具备条件」**，仅两种：
+        ① 机器上没有 git 可执行文件（`FileNotFoundError`）；
+        ② `REPO_ROOT` 根本不是 git 仓库（`git rev-parse --git-dir` 报
+           `not a git repository`，如装包后的副本 / sdist）。
+        **一旦确认这是个可用仓库**，取不到基线版就是缺陷本身——git 返回非零
+        （属主/权限 `detected dubious ownership`、ref 被删）或拿回空文件，
+        都必须让护栏**红**，且 message 带上 git stderr 前 200 字，
+        让下一个人一眼分清是「权限/属主」还是「ref 真的没了」。
+
+        历史实证（u0e）：旧实现把 `FileNotFoundError` 与「返回码非零」合在同一个
+        `except/pytest.skip` 里，于是以 root 身份跑时 git 报
+        `detected dubious ownership` 返回 128，被当成「环境没 git 历史」跳过——
+        两条守字节的用例悄悄停止守护，而闸仍报 `✅ 266 passed`、退出码 0。
+        跳过冒充通过，正是本项目最忌讳的一类失效。
+        """
+        show_cmd = ["git", "-C", str(REPO_ROOT), "show", f"{ref}:backend/app/routers/skills.py"]
         try:
-            out = subprocess.run(
-                ["git", "-C", str(REPO_ROOT), "show", f"{ref}:backend/app/routers/skills.py"],
+            # 先确认「是不是一个仓库」。注意**不能只看 rev-parse 的返回码**：
+            # `detected dubious ownership` 同样是 128，把它读成「不是仓库」
+            # 正是本函数要堵的那个口子，所以只认 stderr 里的 not-a-repository。
+            probe = subprocess.run(
+                ["git", "-C", str(REPO_ROOT), "rev-parse", "--git-dir"],
                 capture_output=True,
                 text=True,
                 timeout=60,
             )
+            if probe.returncode != 0 and "not a git repository" in (probe.stderr or "").lower():
+                pytest.skip(f"REPO_ROOT 不是 git 仓库：{(probe.stderr or '').strip()[:200]}")
+            out = subprocess.run(show_cmd, capture_output=True, text=True, timeout=60)
+        except FileNotFoundError as exc:
+            # 合法跳过之一：这台机器根本没有 git。
+            pytest.skip(f"环境无 git 可执行文件：{exc}")
         except (OSError, subprocess.SubprocessError) as exc:
-            pytest.skip(f"环境无 git 历史：{exc}")
-        if out.returncode != 0 or not out.stdout.strip():
-            pytest.skip(f"取不到 {ref} 版 skills.py")
+            # 超时、被信号杀等：不是「环境不具备」，不许静默跳过。
+            pytest.fail(f"git 调用异常（非「无 git / 非仓库」）：{exc!r}", pytrace=False)
+        stderr_head = (out.stderr or "").strip()[:200]
+        if out.returncode != 0:
+            pytest.fail(
+                f"仓库可用，但取不到 {ref} 版 skills.py：`git show {ref}` 返回 "
+                f"{out.returncode}。git stderr 前 200 字：{stderr_head or '<空>'}",
+                pytrace=False,
+            )
+        if not out.stdout.strip():
+            pytest.fail(
+                f"仓库可用，但 {ref} 版 skills.py 取回为空。"
+                f"git stderr 前 200 字：{stderr_head or '<空>'}",
+                pytrace=False,
+            )
         return out.stdout
 
     @staticmethod
