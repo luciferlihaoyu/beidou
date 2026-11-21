@@ -26,6 +26,7 @@ let resp: any = null;
 let revoked = 0;
 let clicked = 0;
 let downloadName = "";
+let clickThrows = false;
 
 (globalThis as any).localStorage = {
   getItem: () => "tk-123",
@@ -42,7 +43,7 @@ let downloadName = "";
 };
 (globalThis as any).document = {
   createElement: () => {
-    const a: any = { href: "", download: "", click: () => { clicked++; downloadName = a.download; } };
+    const a: any = { href: "", download: "", click: () => { clicked++; if (clickThrows) throw new Error("click 抛错（模拟）"); downloadName = a.download; } };
     return a;
   },
 };
@@ -73,7 +74,7 @@ console.log("成功路径：URL/鉴权头/文件名/清理");
   ok("带 Authorization: Bearer tk-123", c?.init?.headers?.Authorization === "Bearer tk-123", String(c?.init?.headers?.Authorization));
   ok("默认不带 with_reviewer", !!c && !c.url.includes("with_reviewer"), c?.url);
   ok("默认不带 probe_logprobs", !!c && !c.url.includes("probe_logprobs"), c?.url);
-  ok("文件名只用 chapterId 数字", downloadName === "去AI味报告-第42章.html", downloadName);
+  ok("不传 chapterNo 时退回用 chapterId 命名", downloadName === "去AI味报告-第42章.html", downloadName);
   ok("触发了一次点击", clicked === 1, String(clicked));
   ok("revokeObjectURL 已清理", revoked === 1, String(revoked));
 }
@@ -114,6 +115,31 @@ console.log("\ndetail 读不出来：退回带状态码的兜底文案");
     msg = e instanceof Error ? e.message : String(e);
   }
   ok("兜底文案含状态码", msg.includes("500") && msg.includes("报告生成失败"), msg);
+}
+
+console.log("\n项二新断言：传章号时文件名必须用章号，不能用主键");
+{
+  resp = makeResp(200, null);
+  downloadName = "";
+  await downloadDeaiReport(7, 47, { chapterNo: 3 });
+  ok("主键 47 + 章号 3 → 文件名用第3章", downloadName === "去AI味报告-第3章.html", downloadName);
+  ok("文件名不含主键 47", !downloadName.includes("47"), downloadName);
+}
+
+console.log("\n项一新断言：a.click() 抛错时临时 URL 仍需被撤销（finally）");
+{
+  resp = makeResp(200, null);
+  const revokedBefore = revoked;
+  clickThrows = true;
+  let threw = false;
+  try {
+    await downloadDeaiReport(7, 42);
+  } catch {
+    threw = true;
+  }
+  clickThrows = false;
+  ok("click 抛错时异常上扱", threw, String(threw));
+  ok("click 抛错时 revokeObjectURL 仍被调用 1 次", revoked === revokedBefore + 1, `revoked=${revoked} before=${revokedBefore}`);
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

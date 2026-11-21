@@ -560,7 +560,7 @@ export interface AiProject {
   outline_llm: string | null;
   chapter_llm: string | null;
   /** 章节分段流水线档位（u1）：off=整章一次调用；standard=写作/审校/修订；deep=规划/编排/写作/审校/修订 */
-  chapter_pipeline: "off" | "standard" | "deep" | null;
+  chapter_pipeline: "off" | "standard" | "deep";
   summary_llm: string | null;
   review_llm: string | null;
   author_intent: string;
@@ -1041,7 +1041,12 @@ export async function downloadExportPack(projectId: number): Promise<void> {
 export async function downloadDeaiReport(
   projectId: number,
   chapterId: number,
-  opts?: { withReviewer?: boolean; probeLogprobs?: boolean },
+  opts?: {
+    withReviewer?: boolean;
+    probeLogprobs?: boolean;
+    /** 章号（后端 chapter.sort_order，与报告标题/文件名同一口径）。缺省时退回 chapterId，见下方文件名注释 */
+    chapterNo?: number;
+  },
 ): Promise<void> {
   const token = getToken();
   // 两个开关只在为 true 时带上：保持 URL 简短，也便于将来加参数
@@ -1062,14 +1067,27 @@ export async function downloadDeaiReport(
     throw new ApiError(resp.status, message);
   }
   const blob = await resp.blob();
-  // 文件名只用 chapterId 数字：章节标题可能含 / \ : 等 Windows 非法字符，且含用户输入
-  const filename = `去AI味报告-第${chapterId}章.html`;
+  // u6-项二：文件名优先用章号 chapter.sort_order（与后端
+  // backend/app/routers/ai_extras.py:629 `"chapter_no": chapter.sort_order`、629/638 行同口径）。
+  // 不再直接拿 chapterId：那是数据库主键，章号 3 的主键可能是 47，
+  // 会把文件叫成「第47章」。为什么还保留回退：现有调用点
+  // ChapterGenPanel 手上只有 AiChapterJob（字段 chapter_id/chapter_title），
+  // 未加载 Chapter[]、拿不到 sort_order；在它补上章号前不能直接抛错，
+  // 只能退回主键保命——退回时这个数字不是章号，不要当章号读。
+  // 章节标题不参与命名：可能含 / \ : 等 Windows 非法字符，且含用户输入
+  const chapterLabel = typeof opts?.chapterNo === "number" ? opts.chapterNo : chapterId;
+  const filename = `去AI味报告-第${chapterLabel}章.html`;
+  // u6-项一：临时 URL 必须在 finally 里撤销——a.click() 或后续任何一步抛错都不能漏掉 revoke，
+  // 否则 blob URL 泄漏。url 在 try 之前创建，finally 里能安全引用。
   const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = filename;
-  a.click();
-  URL.revokeObjectURL(url);
+  try {
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    a.click();
+  } finally {
+    URL.revokeObjectURL(url);
+  }
 }
 
 // ---------- 后台批量连跑（窗口可关） ----------
