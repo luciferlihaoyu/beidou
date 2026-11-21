@@ -1669,6 +1669,9 @@ def _job_out(job: AiChapterJob, chapter: Chapter | None, number: int) -> dict:
     return {
         "id": job.id,
         "chapter_id": job.chapter_id,
+        # 章号（本书内的真实序号，来自调用方 order_chapters 后的位置），**不是**主键。
+        # 前端下载报告时用它命名文件（"第 N 章"）；没有它就只能退回显示主键，那对用户是错的数字。
+        "chapter_no": number,
         "chapter_title": chapter_display_title(chapter.title, number) if chapter else "（已删除）",
         "status": job.status,
         "outline": job.outline,

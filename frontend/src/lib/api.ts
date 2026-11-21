@@ -632,6 +632,9 @@ export const aiFactoryApi = {
 export interface AiChapterJob {
   id: number;
   chapter_id: number | null;
+  /** 本书内真实章号（后端 order_chapters 后的位置），**不是**主键；下载报告文件名的"第 N 章"用它。
+   * 旧数据可能没有该字段，缺省时调用方退回 chapter_id（那会显示错的数字，故仅作兜底）。 */
+  chapter_no?: number;
   chapter_title: string;
   status: string; // pending|writing|reviewing|needs_fix|done|failed
   outline: string;

@@ -352,12 +352,11 @@ export default function ChapterGenPanel({
   async function runDownloadDeai(chapterId: number) {
     setDeaiReportBusy(true);
     try {
-      // u6-项二：本面板拿不到章号，所以传不出 chapterNo。
-      // 手上只有 AiChapterJob（chapter_id / chapter_title），章号 chapter.sort_order
-      // 在 Chapter 类型里，而本组件从未加载章节列表（jobs 里也没有这个字段）。
-      // 这里不编造来源；downloadDeaiReport 会退回用 chapterId 命名。
-      // 要根治需后端在 job 投影里补 chapter_no（后端改动，不在 u6 范围）。
+      // 章号取自后端 job 投影的 chapter_no（真章号，非主键）。旧行缺该字段时才退回，
+      // 退回会让文件名显示主键——那是错的数字，所以只在真拿不到时发生。
+      const jobForDeai = jobs.find((j) => j.chapter_id === chapterId);
       await downloadDeaiReport(project.id, chapterId, {
+        chapterNo: jobForDeai?.chapter_no,
         withReviewer: deaiWithReviewer,
         probeLogprobs: deaiProbeLogprobs,
       });
