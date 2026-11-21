@@ -23,7 +23,7 @@ import {
   AlertTriangle,
   Unlock,
 } from "lucide-react";
-import { aiFactoryApi, aiFactoryBg, aiFactoryFailApi, aiFactoryM2, aiFactoryM3, aiFactoryM6, aiFactoryM7, aiFactoryM9, streamPost, type AiChapterJob, type AiProject, type BgBatchStatus, type HookAlert } from "@/lib/api";
+import { aiFactoryApi, aiFactoryBg, aiFactoryFailApi, aiFactoryM2, aiFactoryM3, aiFactoryM6, aiFactoryM7, aiFactoryM9, streamPost, downloadDeaiReport, type AiChapterJob, type AiProject, type BgBatchStatus, type HookAlert } from "@/lib/api";
 import { M3Toolbar, RetentionPanel } from "@/components/FactoryM3";
 import FailureDiagnoseDialog from "@/components/FailureDiagnoseDialog";
 import { Button } from "@/components/ui/button";
@@ -342,6 +342,24 @@ export default function ChapterGenPanel({
       toast.error(e instanceof Error ? e.message : "去味失败");
     } finally {
       setDeflavoringId(null);
+    }
+  }
+
+  // ---------- 单章 AI 味检测报告下载（fetch + Bearer；直开 <a href> 会 401） ----------
+  const [deaiReportBusy, setDeaiReportBusy] = useState(false);
+  const [deaiWithReviewer, setDeaiWithReviewer] = useState(false);
+  const [deaiProbeLogprobs, setDeaiProbeLogprobs] = useState(false);
+  async function runDownloadDeai(chapterId: number) {
+    setDeaiReportBusy(true);
+    try {
+      await downloadDeaiReport(project.id, chapterId, {
+        withReviewer: deaiWithReviewer,
+        probeLogprobs: deaiProbeLogprobs,
+      });
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "报告生成失败");
+    } finally {
+      setDeaiReportBusy(false);
     }
   }
 
@@ -733,6 +751,33 @@ export default function ChapterGenPanel({
                   )}
                   去味
                 </Button>
+              )}
+              {j.chapter_id !== null && (j.status === "done" || j.status === "needs_fix") && (
+                <span className="ml-1 inline-flex flex-wrap items-center gap-1 align-middle">
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-7 px-2 text-xs"
+                    disabled={deaiReportBusy}
+                    title="下载单章 AI 味检测报告（自包含 HTML：双击可开、Ctrl+P 存 PDF）"
+                    onClick={() => void runDownloadDeai(j.chapter_id as number)}
+                  >
+                    {deaiReportBusy ? (
+                      <Loader2 className="mr-1 h-3 w-3 animate-spin" />
+                    ) : (
+                      <FileEdit className="mr-1 h-3 w-3" />
+                    )}
+                    AI 味报告
+                  </Button>
+                  <label className="flex items-center gap-1 text-[10px] text-muted-foreground" title="多一次模型调用：规则+审校师两路参与打分">
+                    <input type="checkbox" className="h-3 w-3" checked={deaiWithReviewer} onChange={(e) => setDeaiWithReviewer(e.target.checked)} />
+                    含审校师（多一次模型调用，覆盖率 1/3 → 2/3）
+                  </label>
+                  <label className="flex items-center gap-1 text-[10px] text-muted-foreground" title="多一次网络往返；当前模型探测不到 logprobs，通常仍只有规则一路">
+                    <input type="checkbox" className="h-3 w-3" checked={deaiProbeLogprobs} onChange={(e) => setDeaiProbeLogprobs(e.target.checked)} />
+                    探测困惑度（多一次网络往返；当前模型不支持，通常仍是 1/3）
+                  </label>
+                </span>
               )}
               {j.review_score !== null && j.review_score !== undefined && (
                 <span

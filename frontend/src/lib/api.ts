@@ -1030,6 +1030,48 @@ export async function downloadExportPack(projectId: number): Promise<void> {
   URL.revokeObjectURL(url);
 }
 
+// ---------- AI 工厂：单章 AI 味检测报告 ----------
+
+/** 触发浏览器下载单章 AI 味检测报告 HTML（GET /api/ai-factory/projects/{id}/deai-report）。
+ *
+ * 为什么必须走 fetch 而不是给个 <a href>：后端 `get_current_user` 要 Authorization 头，
+ * 浏览器地址栏直开不带该头 → 401。此契约由 backend/tests/test_deai_report.py 的
+ * 「无 Authorization → 401」用例钉住。
+ */
+export async function downloadDeaiReport(
+  projectId: number,
+  chapterId: number,
+  opts?: { withReviewer?: boolean; probeLogprobs?: boolean },
+): Promise<void> {
+  const token = getToken();
+  // 两个开关只在为 true 时带上：保持 URL 简短，也便于将来加参数
+  const qs = new URLSearchParams({ chapter_id: String(chapterId) });
+  if (opts?.withReviewer) qs.set("with_reviewer", "true");
+  if (opts?.probeLogprobs) qs.set("probe_logprobs", "true");
+  const resp = await fetch(`/api/ai-factory/projects/${projectId}/deai-report?${qs.toString()}`, {
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  });
+  if (!resp.ok) {
+    let message = `报告生成失败 (${resp.status})`;
+    try {
+      const data = await resp.json();
+      if (typeof data.detail === "string") message = data.detail;
+    } catch {
+      /* ignore */
+    }
+    throw new ApiError(resp.status, message);
+  }
+  const blob = await resp.blob();
+  // 文件名只用 chapterId 数字：章节标题可能含 / \ : 等 Windows 非法字符，且含用户输入
+  const filename = `去AI味报告-第${chapterId}章.html`;
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
 // ---------- 后台批量连跑（窗口可关） ----------
 export interface BgBatchStatus {
   running: boolean;

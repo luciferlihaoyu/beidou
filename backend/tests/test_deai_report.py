@@ -638,3 +638,18 @@ def test_u0d_degenerate_has_dedicated_label_not_unknown_status():
     assert "未知状态" not in html, "degenerate 掉进了「未知状态」兜底：状态→文案映射漏登记"
     assert "哨兵值·未真正检测" in html, "degenerate 没有自己的说法"
     assert "1/3" in html, "覆盖率分母仍应是 3 路（degenerate 不额外计分）"
+
+
+# ---------- u2 契约测试：deai-report 无 Authorization 必须 401 ----------
+# 目的：钉死「前端必须走 fetch+token，不能给个 <a href> 让浏览器直开」这个前提。
+# 端点签名是 `user: User = Depends(get_current_user)`，地址栏直开不带 Authorization → 401。
+def test_deai_report_without_authorization_is_401():
+    from fastapi.testclient import TestClient
+
+    from app.main import app
+
+    client = TestClient(app, raise_server_exceptions=False)
+    resp = client.get("/api/ai-factory/projects/1/deai-report?chapter_id=1")
+    assert resp.status_code == 401, (
+        f"无 Authorization 期望 401（前端必须 fetch+Bearer），实际 {resp.status_code}: {resp.text[:200]}"
+    )
