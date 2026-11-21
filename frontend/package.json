@@ -11,6 +11,7 @@
     "test:punct": "node scripts/test-punct-rules.ts",
     "test:theme": "node scripts/test-editor-theme.ts",
     "test:route": "node scripts/test-model-route.ts",
+    "test:download": "node scripts/test-deai-download.ts",
     "test:stream": "node scripts/test-stream-diagnostics.ts"
   },
   "dependencies": {
