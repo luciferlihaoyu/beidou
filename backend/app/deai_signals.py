@@ -115,6 +115,11 @@ async def _raw_completion(config: Any, payload: dict) -> dict:
 _PPL_MAX_CHARS = 6000  # 送入上限：再长就只打前 6000 字（一次检测不该烧掉整本的钱）
 _PPL_MAX_TOKENS = 4000
 
+#: 困惑度**覆盖率门槛**：与原文对齐的那段 span 内 token 字符数 / 送入文本字数 ≥ 此值，
+#: 这个分数才算「代表全文」；低于此值一律 status="degenerate"（拒绝打分）。
+#: **未标定，保守取值；宁可拒绝打分也不出不可信的数**（0.9 是工程约定，不是统计结论）。
+_PPL_MIN_COVERAGE = 0.9
+
 
 def _score_payload(config: Any, text: str) -> tuple[dict, int, bool]:
     """困惑度请求体：**探测与计算合为一发**。
@@ -161,6 +166,55 @@ def _logprobs_usable(choice: Any) -> bool:
     return all(isinstance(t, dict) and isinstance(t.get("logprob"), (int, float)) for t in content)
 
 
+def _token_texts(content: list) -> list[str] | None:
+    """把 logprobs.content 的 token 字符串抽出来，用于重建复述文本。
+
+    任一条不是 dict、或缺 "token"、或不是字符串 → None（无法对齐，调用方判 degenerate）。
+    """
+    out: list[str] = []
+    for t in content:
+        if not isinstance(t, dict):
+            return None
+        piece = t.get("token")
+        if not isinstance(piece, str):
+            return None
+        out.append(piece)
+    return out
+
+
+def _aligned_span(sent: str, token_texts: list[str]) -> tuple[list[int], int] | None:
+    """在模型输出里定位「与原文对应」的那段 span（按 token 边界），返回 (保留下标, 字符数)。
+
+    锚定：用 sent[:20] 与 sent[-20:] 在重建文本里找首尾；找不到 → None（保守方向=拒绝打分）。
+    前置客套话（「好的，以下是复述：」）与后置（「希望有帮助！」）都落在 span 之外，
+    **不参与平均**——那些不在原文里的 token 困惑度极高，一起平均会把分数抬成假的。
+    """
+    joined = "".join(token_texts)
+    head, tail = sent[:20], sent[-20:]
+    if not sent or not head or not tail:
+        return None
+    start = joined.find(head)
+    stop_at = joined.rfind(tail)
+    if start < 0 or stop_at < 0:
+        return None
+    end = stop_at + len(tail)
+    if end <= start:
+        return None
+    kept: list[int] = []
+    chars = 0
+    pos = 0
+    for idx, piece in enumerate(token_texts):
+        p_start, p_end = pos, pos + len(piece)
+        pos = p_end
+        if not piece or p_end <= start or p_start >= end:
+            continue
+        kept.append(idx)
+        chars += min(p_end, end) - max(p_start, start)
+    if not kept or chars <= 0:
+        return None
+    return kept, chars
+
+
 async def perplexity_signal(
     text: str, config: Any, raw_completion: RawCompletion = _raw_completion
 ) -> dict:
@@ -192,15 +246,57 @@ async def perplexity_signal(
             "（能力探测确认 choices[0] 上没有可用的 logprobs 字段；"
             "实测 2026-11-13：天枢 MiniMax-M3 的 choice 键只有 finish_reason/index/message）",
         )
-    lps = [float(t["logprob"]) for t in choice["logprobs"]["content"]]
+    content = choice["logprobs"]["content"]
+    sent = text[:_PPL_MAX_CHARS]
+    finish = choice.get("finish_reason")
+    # 输入侧截断的既有披露必须保留（两侧截断要能同时说出来）。
+    side = (
+        f"送入 {sent_chars} 字"
+        + ("（输入侧已截断，此分只代表被截断的部分）" if truncated else "（输入侧未截断）")
+    )
+    # B｜输出侧截断/过滤：logprobs 覆盖不到全文 → 不许出分（旧实现只看输入侧 truncated）。
+    if finish != "stop":
+        label = (
+            "输出侧被 max_tokens 截断（finish_reason=length）"
+            if finish == "length"
+            else f"输出侧非正常结束（finish_reason={finish!r}）"
+        )
+        return _envelope(
+            "perplexity",
+            "degenerate",
+            None,
+            f"{label}，logprobs 覆盖不到全文；{side}；本次不出分（保守方向：拒绝打分）",
+        )
+    # A｜覆盖率门槛：只让与原文对应的 span 内 token 参与平均，覆盖率不够就拒绝打分。
+    token_texts = _token_texts(content)
+    span = _aligned_span(sent, token_texts) if token_texts is not None else None
+    if span is None:
+        return _envelope(
+            "perplexity",
+            "degenerate",
+            None,
+            "无法对齐复述与原文，可能存在前后缀污染"
+            f"（token 里没有字符串，或原文首尾锚点在输出里定位不到）；{side}；本次不出分",
+        )
+    kept, span_chars = span
+    coverage = span_chars / len(sent)
+    if coverage < _PPL_MIN_COVERAGE:
+        return _envelope(
+            "perplexity",
+            "degenerate",
+            None,
+            f"复述覆盖率 {coverage:.2f} 低于门槛 {_PPL_MIN_COVERAGE}"
+            f"（span 内 {span_chars} 字 / 原文 {len(sent)} 字），平均 logprob 只代表这一小段，"
+            f"拿它当全文证据等于让小子集冒充全文；{side}；本次不出分",
+        )
+    lps = [float(content[i]["logprob"]) for i in kept]
     ppl = math.exp(-sum(lps) / len(lps))
     return _envelope(
         "perplexity",
         "ok",
         round(ppl, 2),
         f"困惑度 = exp(-平均 logprob)，取自模型**逐字复述被检文本**的响应 logprobs"
-        f"（{len(lps)} 个 token；送入 {sent_chars} 字"
-        + ("，超长已截断，此分只代表被截断的部分）" if truncated else "）")
+        f"（{len(lps)} 个 token，覆盖率 {coverage:.2f}；" + side
         + "；值来自真实响应，未使用任何字数/句长启发式",
     )
 

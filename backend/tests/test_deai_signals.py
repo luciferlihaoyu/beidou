@@ -76,7 +76,12 @@ async def _raw_no_logprobs(config, payload):
 
 
 async def _raw_with_logprobs(config, payload):
-    return _lp_response([{"token": "夜", "logprob": -0.2}, {"token": "风", "logprob": -2.2}])
+    # u0d：模型输出必须与**送入文本**可对齐（新覆盖率门槛 0.9），否则新实现会判 degenerate。
+    # 桩改成把请求里的全文分两段复述回来（覆盖率 1.00），logprob 仍是 -0.2 / -2.2。
+    sent = payload["messages"][-1]["content"]
+    half = max(1, len(sent) // 2)
+    return _lp_response([{"token": sent[:half], "logprob": -0.2},
+                         {"token": sent[half:], "logprob": -2.2}])
 # mean(-0.2, -2.2) = -1.2 → ppl = exp(1.2) = 3.3201… → round 3.32
 
 
@@ -202,7 +207,17 @@ def _capture_raw(logprobs):
 
     async def raw(config, payload):
         seen.append(payload)
-        return _lp_response(logprobs)
+        # u0d：同上——把送入文本按 token 段复述回来（覆盖率 1.00），logprob 取夹具给的数值。
+        sent = payload["messages"][-1]["content"]
+        lps = [float(t["logprob"]) for t in logprobs]
+        step = max(1, len(sent) // len(lps))
+        toks = []
+        pos = 0
+        for i, lp in enumerate(lps):
+            end = len(sent) if i == len(lps) - 1 else min(len(sent), pos + step)
+            toks.append({"token": sent[pos:end], "logprob": lp})
+            pos = end
+        return _lp_response(toks)
 
     return raw, seen
 
@@ -712,3 +727,127 @@ def test_u0c_dimension_values_shares_the_boundary():
     v50 = dimension_values(_S2_T50)
     assert any(x is not None for x in v50.values()), \
         "50 字已越过阈值，至少要有一维算出值——若这红了说明 dimension_values 的 50 被挪到了 60"
+
+
+# ================================================================ u0d：困惑度覆盖率门槛 / 输出侧截断 / 客套话污染
+# 期望值全部**硬编码**（手工推演），不从实现 import 常量当基准。
+# 夹具正文 100 字，便于按字符精确控制覆盖率（0.9 / 0.89 / 0.5 都是整数字符）。
+
+import math  # noqa: E402
+
+_PPL100 = "烟" * 100
+_PPL_PREFIX = "好的，以下是复述："   # 9 字模型客套话：不含「烟」，不锚定原文
+_PPL_SUFFIX = "希望有帮助！"        # 6 字模型客套话
+
+
+def _char_logprobs(text, logprob=-1.0):
+    """把一段复述文本切成**单字符 token**，每个 token 同一 logprob（手工可控）。"""
+    return [{"token": ch, "logprob": logprob} for ch in text]
+
+
+def _resp_with(tokens, finish_reason="stop"):
+    return {"choices": [{"finish_reason": finish_reason, "index": 0,
+                         "message": {"role": "assistant",
+                                     "content": "".join(str(t.get("token", "")) for t in tokens)},
+                         "logprobs": {"content": tokens}}]}
+
+
+def _raw_const(tokens, finish_reason="stop"):
+    async def raw(config, payload):
+        return _resp_with(tokens, finish_reason)
+    return raw
+
+
+def test_u0d_full_coverage_is_ok_with_hardcoded_value():
+    """① 全覆盖 → ok，且值等于手算 exp(-mean)。
+    前 50 token logprob -0.2、后 50 token -2.2 → mean=-1.2 → exp(1.2)=3.3201… → 3.32。"""
+    toks = [{"token": "烟", "logprob": (-0.2 if i < 50 else -2.2)} for i in range(100)]
+    env = asyncio.run(perplexity_signal(_PPL100, _FAKE_CONFIG, _raw_const(toks)))
+    assert env["status"] == "ok", f"全覆盖却降级：{env['status']}／{env['detail']}"
+    assert env["value"] == 3.32
+    assert "覆盖率" in env["detail"], "ok 档必须交代覆盖率，否则读者以为覆盖了全文无从判断"
+
+
+def test_u0d_coverage_half_is_degenerate_with_none():
+    """② 覆盖率 0.5（模型只复述一半）→ degenerate 且 value is None（拒绝打分，不给小样本的数）。"""
+    toks = (_char_logprobs(_PPL_PREFIX, -8.0) + _char_logprobs("烟" * 50, -1.0)
+            + _char_logprobs(_PPL_SUFFIX, -8.0))
+    env = asyncio.run(perplexity_signal(_PPL100, _FAKE_CONFIG, _raw_const(toks)))
+    assert env["status"] == "degenerate", f"半覆盖仍以 {env['status']} 出场（带 0.2 权重进融合）"
+    assert env["value"] is None, f"覆盖率不足却仍给出 value={env['value']!r}"
+    assert "0.50" in env["detail"] and "门槛" in env["detail"], f"未点明覆盖率与门槛：{env['detail']}"
+
+
+def test_u0d_coverage_boundary_is_exactly_ninety_percent():
+    """③ 门槛两侧：90/100=0.90 刚好通过（ok，exp(1.0)=2.72）；89/100=0.89 判 degenerate。"""
+    at = _char_logprobs(_PPL_PREFIX, -8.0) + _char_logprobs("烟" * 90, -1.0)
+    ok = asyncio.run(perplexity_signal(_PPL100, _FAKE_CONFIG, _raw_const(at)))
+    assert ok["status"] == "ok", f"0.90 恰在门槛上却被判 {ok['status']}"
+    assert ok["value"] == 2.72
+    below = _char_logprobs(_PPL_PREFIX, -8.0) + _char_logprobs("烟" * 89, -1.0)
+    bad = asyncio.run(perplexity_signal(_PPL100, _FAKE_CONFIG, _raw_const(below)))
+    assert bad["status"] == "degenerate", f"0.89 低于门槛却仍是 {bad['status']}"
+    assert bad["value"] is None
+
+
+def test_u0d_output_side_length_truncation_is_degenerate_and_disclosed():
+    """④ finish_reason=="length" → degenerate，detail 必须点明**输出侧**被 max_tokens 截断；
+    且输入侧截断的既有披露不得被挤掉（长文本时两侧都要说出来）。"""
+    toks = [{"token": "烟", "logprob": -1.0} for _ in range(100)]
+    env = asyncio.run(perplexity_signal(_PPL100, _FAKE_CONFIG, _raw_const(toks, "length")))
+    assert env["status"] == "degenerate", f"输出侧截断仍给 {env['status']}"
+    assert env["value"] is None
+    assert "输出侧" in env["detail"] and "max_tokens" in env["detail"], env["detail"]
+
+    long_toks = [{"token": "烟", "logprob": -1.0} for _ in range(6000)]
+    both = asyncio.run(perplexity_signal("烟" * 30000, _FAKE_CONFIG, _raw_const(long_toks, "length")))
+    assert both["status"] == "degenerate"
+    assert "输出侧" in both["detail"] and "输入侧" in both["detail"], \
+        f"两侧截断必须同时披露：{both['detail']}"
+
+
+def test_u0d_politeness_affixes_do_not_pollute_the_value():
+    """⑤ 前缀「好的，以下是复述：」+ 后缀「希望有帮助！」**不得**参与平均。
+    值必须与无污染版一致（都用 -1.0 的正文 → 2.72）；若一起平均会被高困惑 token 抬起来。"""
+    clean_toks = _char_logprobs("烟" * 100, -1.0)
+    clean = asyncio.run(perplexity_signal(_PPL100, _FAKE_CONFIG, _raw_const(clean_toks)))
+    dirty_toks = (_char_logprobs(_PPL_PREFIX, -8.0) + _char_logprobs("烟" * 100, -1.0)
+                  + _char_logprobs(_PPL_SUFFIX, -8.0))
+    dirty = asyncio.run(perplexity_signal(_PPL100, _FAKE_CONFIG, _raw_const(dirty_toks)))
+    assert clean["status"] == dirty["status"] == "ok"
+    assert clean["value"] == dirty["value"] == 2.72, \
+        f"客套话污染了值：干净 {clean['value']} vs 带前后缀 {dirty['value']}"
+    # 反例钉死：把客套话一起平均会得到完全不同的数（「1.10 被抬到 2.72」那一类污染）
+    lps = [-8.0] * len(_PPL_PREFIX) + [-1.0] * 100 + [-8.0] * len(_PPL_SUFFIX)
+    naive = round(math.exp(-sum(lps) / len(lps)), 2)
+    assert naive != 2.72, "污染版居然等于干净版——这条反例失去意义"
+
+
+def test_u0d_tokens_without_strings_are_degenerate_not_scored():
+    """⑥ token 里没有字符串（无法重建复述文本）→ degenerate，detail 写明无法对齐。"""
+    toks = [{"logprob": -1.0} for _ in range(100)]
+    env = asyncio.run(perplexity_signal(_PPL100, _FAKE_CONFIG, _raw_const(toks)))
+    assert env["status"] == "degenerate", f"无法对齐仍给 {env['status']}"
+    assert env["value"] is None
+    assert "无法对齐" in env["detail"], env["detail"]
+
+
+def test_u0d_degenerate_never_enters_fusion():
+    """⑦ degenerate 必须与 skipped 同等：不参与加权、不计入分母。
+    手算：rule 60 → risk 40.0(w0.5)；reviewer 2AI/1人味 → risk 66.67(w0.3)；
+    (0.5*40 + 0.3*66.67)/0.8 = 50.0012 → 50.0（与 perplexity=skipped 版逐字节同分）。"""
+    rule = {"signal": "rule", "status": "ok", "value": 60, "detail": "d"}
+    rev = {"signal": "reviewer", "status": "ok",
+           "value": {"ai_features": [{"quote": "a", "why": "w"}, {"quote": "b", "why": "w"}],
+                     "human_evidence": [{"quote": "c", "why": "w"}]},
+           "detail": "d"}
+    degen = {"signal": "perplexity", "status": "degenerate", "value": None,
+             "detail": "复述覆盖率 0.50 低于门槛 0.9，本次不出分"}
+    fused = fuse_signals(rule, degen, rev)
+    assert fused["participating"] == ["rule", "reviewer"], fused["participating"]
+    assert fused["score"] == 50.0, f"degenerate 混进了加权：{fused['score']!r}"
+    assert "perplexity=degenerate" in fused["detail"]
+    assert fused["weights"] == {"rule": 0.5, "reviewer": 0.3}
+    # 与 skipped 版本同分（同等对待的正面证据）
+    assert fuse_signals(rule, {"signal": "perplexity", "status": "skipped",
+                               "value": None, "detail": "x"}, rev)["score"] == fused["score"]

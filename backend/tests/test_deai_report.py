@@ -611,3 +611,30 @@ class TestU0cUnknownStatusTripwire:
                                       "deviation": None, "status": "not_a_real_status"}}
         out = build_report_html(r, dict(META))
         assert "未知状态（not_a_real_status）" in out, "文体表遇到未知状态没有走兜底"
+
+
+# ================================================================ u0d：degenerate 必须有自己的文案
+
+def test_u0d_degenerate_has_dedicated_label_not_unknown_status():
+    """⑧ 困惑度新增的 degenerate（覆盖率不足/输出侧截断/无法对齐）**不许**掉进
+    「未知状态（xxx）」兜底——那张状态→文案映射必须登记它，否则读者看到的是一句
+    内部术语而不是人话；覆盖率分母也仍是 3 路（与 skipped 同等，不额外计分）。"""
+    import sys
+    from pathlib import Path as _Path
+    sys.path.insert(0, str(_Path(__file__).resolve().parent.parent))
+    from app.deai_report import build_report_html
+
+    result = {
+        "rule": {"signal": "rule", "status": "ok", "value": 60, "detail": "本地确定性规则检测"},
+        "perplexity": {"signal": "perplexity", "status": "degenerate", "value": None,
+                       "detail": "复述覆盖率 0.50 低于门槛 0.9，本次不出分"},
+        "reviewer": {"signal": "reviewer", "status": "skipped", "value": None, "detail": "未调用"},
+        "style": {},
+        "fusion": {"score": 40.0, "participating": ["rule"], "weights": {"rule": 0.5},
+                   "detail": "仅 1 路参与（rule）；未参与：perplexity=degenerate、reviewer=skipped",
+                   "caveat": "实验风险分不是 AI 生成概率"},
+    }
+    html = build_report_html(result, {"project_id": 1, "chapter_no": 1})
+    assert "未知状态" not in html, "degenerate 掉进了「未知状态」兜底：状态→文案映射漏登记"
+    assert "哨兵值·未真正检测" in html, "degenerate 没有自己的说法"
+    assert "1/3" in html, "覆盖率分母仍应是 3 路（degenerate 不额外计分）"
