@@ -3118,7 +3118,7 @@ class ProjectSettingsIn(BaseModel):
     target_chapter_words: int | None = Field(default=None, ge=200, le=20000)
     # u1：章节分段流水线档位。用 Literal 是故意的：非法值由 pydantic 直接 422，
     # 路由层不再手写 if 校验。消费方 nightly.py:141 / chapter_stages.py:139 读它。
-    chapter_pipeline: Literal["off", "standard", "deep"] | None = None
+    chapter_pipeline: Literal["off", "standard", "deep"] = Field(default="off", description="章节分段流水线档位：off/standard/deep。不接受 null——列是 TEXT NOT NULL，显式 null 由 pydantic 挡成 422")
 
 
 @router.put("/projects/{project_id}")
