@@ -120,6 +120,18 @@ _PPL_MAX_TOKENS = 4000
 #: **未标定，保守取值；宁可拒绝打分也不出不可信的数**（0.9 是工程约定，不是统计结论）。
 _PPL_MIN_COVERAGE = 0.9
 
+#: 困惑度**对齐段长度上界**：span 字符数 / 送入文本字数 ≤ 此值（u0d-fix）。
+#: 超过说明对齐段比原文还长 ⇒ 中间插入了原文之外的内容，junk 的 token 会进平均值。
+#: **一律 degenerate，不许把 >1 的值钳到 1.00 放行**——钳掉等于把 junk 静默吸收，绕过还在原地。
+#: **未标定，保守取值**（1.05 只是「排版级重述」的余量，不是统计结论）。
+_PPL_MAX_COVERAGE = 1.05
+
+#: 对齐段**之后**允许残留的字符上界（模型收尾客套话的余量，u0d-fix）。
+#: 超过即 degenerate：「原文复述两遍」「原文 + junk + 再复现尾部锚点」的第一份都是忠实的，
+#: 只靠覆盖率上界看不住尾部堆料，必须由这条拒评。
+#: **未标定，保守取值**（既有夹具里合法的收尾「希望有帮助！」= 6 字）。
+_PPL_MAX_EDGE_CHARS = 20
+
 
 def _score_payload(config: Any, text: str) -> tuple[dict, int, bool]:
     """困惑度请求体：**探测与计算合为一发**。
@@ -182,37 +194,70 @@ def _token_texts(content: list) -> list[str] | None:
     return out
 
 
-def _aligned_span(sent: str, token_texts: list[str]) -> tuple[list[int], int] | None:
+def _aligned_span(sent: str, token_texts: list[str]) -> tuple[list[int], int, int] | None:
     """在模型输出里定位「与原文对应」的那段 span（按 token 边界），返回 (保留下标, 字符数)。
 
-    锚定：用 sent[:20] 与 sent[-20:] 在重建文本里找首尾；找不到 → None（保守方向=拒绝打分）。
+    返回 (参与平均的 token 下标, span 字符数, span 之后残留的字符数)；定位失败 → None
+    （保守方向=拒绝打分）。
+
+    锚定口径（u0d-fix，审查反证后改）：
+    - 头锚点 ``sent[:20]`` 取**第一次**出现（``find``，不是 ``rfind``）；
+    - 尾锚点 ``sent[-20:]`` 只在**头锚点之后**找，且取「第一个让覆盖率够门槛」的出现，
+      不全文 rfind 取最后一次。旧写法取最后一次，于是「原文 + junk + 再复现一次尾部锚点」
+      能把 junk 一并圈进 span，junk 的 token 进了平均值，还被印成覆盖率 3.73。
+    - 「头锚点之后**第一个够门槛**」而不是「头锚点之后第一个」：同质文本里首尾锚点字面
+      相同（既有夹具 "烟"*100），纯 first-match 会把 span 截在 40 字上（覆盖率 0.40）。
+      真实文本尾锚点唯一，两者完全等价；同质文本下这条与旧 rfind 等价（不会把合格段
+      误判成不足）。没有任何一次出现够门槛时退回最后一次，好让下游如实报「覆盖率不足」。
+    - span 之后的残留字数一并返回：长篇残留（重复复述/尾部堆 junk）同样拒评，
+      阈值见 ``_PPL_MAX_EDGE_CHARS``。
+
     前置客套话（「好的，以下是复述：」）与后置（「希望有帮助！」）都落在 span 之外，
     **不参与平均**——那些不在原文里的 token 困惑度极高，一起平均会把分数抬成假的。
+    参与平均的 token 必须**完全落在 span 内**：跨段边界的 token 一律排除（不做半字计入）。
     """
     joined = "".join(token_texts)
     head, tail = sent[:20], sent[-20:]
     if not sent or not head or not tail:
         return None
-    start = joined.find(head)
-    stop_at = joined.rfind(tail)
-    if start < 0 or stop_at < 0:
+    start = joined.find(head)          # 头锚点：**第一次**出现（不是 rfind）
+    if start < 0:
         return None
-    end = stop_at + len(tail)
+    head_end = start + len(head)
+
+    def _occurrences(from_pos: int) -> list[int]:
+        out: list[int] = []
+        p = joined.find(tail, from_pos)
+        while p >= 0:
+            out.append(p)
+            p = joined.find(tail, p + 1)
+        return out
+
+    # 尾锚点：只在**头锚点之后**找；短文本首尾锚点重叠时退一步到 start+1。
+    occ = _occurrences(head_end) or _occurrences(start + 1)
+    if not occ:
+        return None
+    end = 0
+    for p in occ:                      # 取「最长但不超过上界」的那次出现（上界内的最后一次）
+        if (p + len(tail) - start) / len(sent) <= _PPL_MAX_COVERAGE:
+            end = p + len(tail)
     if end <= start:
-        return None
+        # 每一次出现都超上界 → 报最后一次，让下游按「对齐段比原文长」如实拒评
+        end = occ[-1] + len(tail)
     kept: list[int] = []
     chars = 0
     pos = 0
     for idx, piece in enumerate(token_texts):
         p_start, p_end = pos, pos + len(piece)
         pos = p_end
-        if not piece or p_end <= start or p_start >= end:
+        # 只统计**完全落在 span 内**的 token：跨段边界的 token 排除（不做半字计入）
+        if not piece or p_start < start or p_end > end:
             continue
         kept.append(idx)
-        chars += min(p_end, end) - max(p_start, start)
+        chars += p_end - p_start
     if not kept or chars <= 0:
         return None
-    return kept, chars
+    return kept, chars, len(joined) - end
 
 
 async def perplexity_signal(
@@ -278,7 +323,7 @@ async def perplexity_signal(
             "无法对齐复述与原文，可能存在前后缀污染"
             f"（token 里没有字符串，或原文首尾锚点在输出里定位不到）；{side}；本次不出分",
         )
-    kept, span_chars = span
+    kept, span_chars, trailing = span
     coverage = span_chars / len(sent)
     if coverage < _PPL_MIN_COVERAGE:
         return _envelope(
@@ -288,6 +333,25 @@ async def perplexity_signal(
             f"复述覆盖率 {coverage:.2f} 低于门槛 {_PPL_MIN_COVERAGE}"
             f"（span 内 {span_chars} 字 / 原文 {len(sent)} 字），平均 logprob 只代表这一小段，"
             f"拿它当全文证据等于让小子集冒充全文；{side}；本次不出分",
+        )
+    if coverage > _PPL_MAX_COVERAGE:
+        return _envelope(
+            "perplexity",
+            "degenerate",
+            None,
+            f"对齐段比原文长（实际 {coverage:.2f}），疑似中间插入了原文之外的内容"
+            f"（span 内 {span_chars} 字 / 原文 {len(sent)} 字，上界 {_PPL_MAX_COVERAGE}）；"
+            f"junk 的 token 会被算进平均值，那等于让不属于这篇文本的内容冒充它的困惑度；"
+            f"{side}；本次不出分",
+        )
+    if trailing > _PPL_MAX_EDGE_CHARS:
+        return _envelope(
+            "perplexity",
+            "degenerate",
+            None,
+            f"对齐段之后仍有 {trailing} 字原文之外的内容（上界 {_PPL_MAX_EDGE_CHARS} 字），"
+            f"疑似重复复述整段或尾部插入了原文之外的文字；这些 token 进平均会把分数抬成假的，"
+            f"而平均值就是这篇文本困惑度的全部依据；{side}；本次不出分",
         )
     lps = [float(content[i]["logprob"]) for i in kept]
     ppl = math.exp(-sum(lps) / len(lps))
@@ -442,9 +506,17 @@ def _risk_of(signal: str, env: dict) -> float | None:
     if env.get("status") != "ok" or env.get("value") is None:
         return None
     if signal == "rule":
-        return round(100.0 - float(env["value"]), 2)
+        try:
+            return round(100.0 - float(env["value"]), 2)
+        except (TypeError, ValueError):
+            # u0d-fix 裁决B：畸形/不可解析的 value 降级为 None（保守：不猜数），
+            # 与 reviewer 分支同款——本模块「形态异常绝不 500」的契约不因哪一路而破例。
+            return None
     if signal == "perplexity":
-        return round(100.0 / (1.0 + float(env["value"]) / 50.0), 2)
+        try:
+            return round(100.0 / (1.0 + float(env["value"]) / 50.0), 2)
+        except (TypeError, ValueError):
+            return None
     if signal == "reviewer":
         v = env["value"]
         if not isinstance(v, dict):  # u0c-fix 裁决B：畸形 value 降级为 None（这条没有），与本模块"形态异常绝不 500"契约对齐；不是 0.0——0.0 专留给两组皆空

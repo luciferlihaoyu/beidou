@@ -851,3 +851,140 @@ def test_u0d_degenerate_never_enters_fusion():
     # 与 skipped 版本同分（同等对待的正面证据）
     assert fuse_signals(rule, {"signal": "perplexity", "status": "skipped",
                                "value": None, "detail": "x"}, rev)["score"] == fused["score"]
+
+
+# ================================================================ u0d-fix：构造性绕过（覆盖率 > 1 必须拒评）
+# 审查反证：旧 _aligned_span 用 rfind 取**最后一次**出现、且 chars 无上界钳制，
+# 于是「原文 + junk + 再复现尾部锚点」这类构造样本能以 ok 出场并印出 >1 的覆盖率
+# ——junk 的 token 被算进了平均值，而平均值是"这篇文本的困惑度"的全部依据。
+# 期望值全部硬编码（手工推演）。
+
+import re  # noqa: E402
+
+_FIX_DISTINCT = "".join(f"{i:02d}" for i in range(50))   # 100 字；首锚点与尾锚点互不相同
+_FIX_JUNK = "这段文字完全不属于原文，用来模拟中间插入的内容。" * 8
+assert len(_FIX_DISTINCT) == 100 and _FIX_DISTINCT[:20] != _FIX_DISTINCT[-20:]
+
+
+def _fix_cov(env):
+    """从 detail 里把覆盖率数字取出来（detail 是唯一对外披露覆盖率的通道）。"""
+    m = re.search(r"覆盖率 ([\d.]+)", env["detail"])
+    return float(m.group(1)) if m else None
+
+
+@pytest.mark.parametrize(
+    "label,recon,reason",
+    [
+        # A1 复述原文 + 塞 junk + 末尾再复现一次尾部锚点（旧实测 coverage 2.90）
+        ("A1", _FIX_DISTINCT + _FIX_JUNK + _FIX_DISTINCT[-20:], "对齐段之后"),
+        # A2 把原文复述两遍（旧实测 coverage 2.00）
+        ("A2", _FIX_DISTINCT + _FIX_DISTINCT, "对齐段之后"),
+        # A3 原文首 20 字 + 中间 junk + 尾部锚点（旧实测 coverage 1.97）
+        ("A3", _FIX_DISTINCT[:20] + _FIX_JUNK + _FIX_DISTINCT[-20:], "比原文长"),
+    ],
+)
+def test_u0d_fix_constructed_bypass_is_degenerate(label, recon, reason):
+    """🔴 本单验收核心：三个构造样本一律拒评（status=degenerate、value is None）。
+
+    两个方向都要堵：中间插 junk → 对齐段比原文长（A3）；尾部堆 junk/重复 → 对齐段之后
+    仍有大量原文之外的文字（A1/A2）。**不许**把 >1 的覆盖率钳到 1.00 就当没事——
+    那等于把 junk 静默吸收，绕过仍在原地。
+    """
+    toks = _char_logprobs(recon, -1.0)
+    env = asyncio.run(perplexity_signal(_FIX_DISTINCT, _FAKE_CONFIG, _raw_const(toks)))
+    assert env["status"] == "degenerate", \
+        f"{label} 仍以 {env['status']} 出场（value={env['value']!r}，覆盖率 {_fix_cov(env)}）"
+    assert env["value"] is None, f"{label} 拒评却仍给出 value={env['value']!r}"
+    assert reason in env["detail"], f"{label} 未点明拒绝理由：{env['detail']}"
+
+
+def test_u0d_fix_faithful_copy_still_ok_with_coverage_one():
+    """② 正常逐字复述 → 仍 ok、覆盖率 1.00，值等于手算 exp(-mean)。
+
+    100 字单字符 token：前 50 个 -0.2、后 50 个 -2.2 → mean=-1.2 → exp(1.2)=3.3201…→3.32。
+    """
+    toks = [{"token": ch, "logprob": (-0.2 if i < 50 else -2.2)}
+            for i, ch in enumerate(_FIX_DISTINCT)]
+    env = asyncio.run(perplexity_signal(_FIX_DISTINCT, _FAKE_CONFIG, _raw_const(toks)))
+    assert env["status"] == "ok", f"逐字复述却被判 {env['status']}／{env['detail']}"
+    assert env["value"] == math.exp(1.2).__round__(2) == 3.32
+    assert _fix_cov(env) == 1.00, f"逐字复述覆盖率必须是 1.00，实测 {_fix_cov(env)}"
+
+
+def test_u0d_fix_coverage_upper_bound_both_sides():
+    """③ 上界两侧：1.05 恰在门槛上 → ok；1.06 → degenerate（不许钳到 1.00 放行）。
+
+    构造：原文 100 字，中间插 5 字 / 6 字 junk → 对齐段 105 / 106 字。
+    """
+    at = _FIX_DISTINCT[:20] + "XYZWQ" + _FIX_DISTINCT[20:]      # 105 字
+    ok = asyncio.run(perplexity_signal(_FIX_DISTINCT, _FAKE_CONFIG,
+                                       _raw_const(_char_logprobs(at, -1.0))))
+    assert _fix_cov(ok) == 1.05, f"夹具没造出 1.05：{_fix_cov(ok)}／{ok['detail']}"
+    assert ok["status"] == "ok", f"1.05 恰在上界却被判 {ok['status']}／{ok['detail']}"
+
+    over = _FIX_DISTINCT[:20] + "XYZWQ7" + _FIX_DISTINCT[20:]   # 106 字
+    bad = asyncio.run(perplexity_signal(_FIX_DISTINCT, _FAKE_CONFIG,
+                                        _raw_const(_char_logprobs(over, -1.0))))
+    assert bad["status"] == "degenerate", f"1.06 超过上界却仍是 {bad['status']}"
+    assert bad["value"] is None
+    assert "1.06" in bad["detail"] and "比原文长" in bad["detail"], bad["detail"]
+
+
+def test_u0d_fix_lower_bound_still_degenerate():
+    """③（下半）0.90 → ok、0.89 → degenerate；与既有 u0d 口径一致，确认改动没松动下界。"""
+    at = _char_logprobs(_PPL_PREFIX, -8.0) + _char_logprobs("烟" * 90, -1.0)
+    ok = asyncio.run(perplexity_signal(_PPL100, _FAKE_CONFIG, _raw_const(at)))
+    assert ok["status"] == "ok" and ok["value"] == 2.72, f"0.90 松动：{ok['detail']}"
+    below = _char_logprobs(_PPL_PREFIX, -8.0) + _char_logprobs("烟" * 89, -1.0)
+    bad = asyncio.run(perplexity_signal(_PPL100, _FAKE_CONFIG, _raw_const(below)))
+    assert bad["status"] == "degenerate" and bad["value"] is None
+    assert _fix_cov(bad) == 0.89, f"0.89 档覆盖率读数不对：{_fix_cov(bad)}"
+
+
+def test_u0d_fix_repeat_twice_alignment_is_the_first_copy_only():
+    """④ A2「复述两遍」：对齐段必须落在**第一份**，参与平均的 token 只来自第一份。
+
+    第一份 100 token 全 -1.0（→ exp(1.0)=2.72），第二份 100 token 全 -8.0。
+    只统计第一份 ⇒ 手算 2.72；若把第二份一起平均 ⇒ exp((100*1+100*8)/200)=e^4.5≈90.02。
+    与 ① 的关系：A2 的 envelope 仍是 degenerate（尾部残留了一整份，见 ①），
+    所以这里钉的是**对齐本身**——对齐段之外的内容永远不许进平均。
+    """
+    from app.deai_signals import _aligned_span
+
+    sent = _FIX_DISTINCT
+    toks = (_char_logprobs(sent, -1.0) + _char_logprobs(sent, -8.0))
+    kept, chars, trailing = _aligned_span(sent, [t["token"] for t in toks])
+    assert chars == len(sent) == 100, f"对齐段应恰为第一份 100 字，实测 {chars}"
+    assert trailing == len(sent), f"第一份之后的残留应为 100 字，实测 {trailing}"
+    assert max(kept) < len(sent), f"参与平均的 token 越过了第一份：max(kept)={max(kept)}"
+    lps = [toks[i]["logprob"] for i in kept]
+    assert len(lps) == 100
+    assert round(math.exp(-sum(lps) / len(lps)), 2) == 2.72, \
+        f"混入了第二份（-8.0）：{round(math.exp(-sum(lps) / len(lps)), 2)}"
+
+
+def test_u0d_fix_risk_of_malformed_values_all_degrade_to_none():
+    """⑤ `_risk_of` 三路畸形 value 一律返回 None、不抛异常（保守：不猜数）。
+
+    实测旧行为：rule 'abc' → ValueError；perplexity {} → TypeError。
+    当前这条**不可从外部触达**（唯一调用点的值来自 math.exp()），属潜伏缺陷，
+    修它是为了防止将来有人把它接出去。
+    """
+    from app.deai_signals import _risk_of
+
+    malformed = [
+        ("rule", "abc"),
+        ("rule", {}),
+        ("rule", []),
+        ("perplexity", {}),
+        ("perplexity", []),
+        ("perplexity", "abc"),
+        ("reviewer", 7),
+        ("reviewer", "abc"),
+    ]
+    for signal, value in malformed:
+        got = _risk_of(signal, {"signal": signal, "status": "ok", "value": value})
+        assert got is None, f"{signal} 遇畸形 value={value!r} 应降级为 None，实测 {got!r}"
+    # 正常值不许被一起降级（防过宽）
+    assert _risk_of("rule", {"status": "ok", "value": 60}) == 40.0
+    assert _risk_of("perplexity", {"status": "ok", "value": 50}) == 50.0
