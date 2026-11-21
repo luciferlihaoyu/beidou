@@ -26,7 +26,7 @@ from datetime import datetime, timezone
 
 import httpx
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -3098,6 +3098,26 @@ async def review_chapter(
 # ---------- 项目设置（auto_mode / 上下文窗口 / 模型路由）----------
 
 
+# ── 这些列 NOT NULL，而下面的字段类型允许 None：显式 null 必须在这里挡成 422 ──
+# 来源：`PRAGMA table_info(ai_projects)` 实测 notnull=1；与 `update_project` 的通用 setattr 组合会让 null 变成 500。
+# 具体链路：请求体显式传 null → model_dump(exclude_unset=True) 带上该键 → setattr(p, field, None)
+#   → sqlite `IntegrityError: NOT NULL constraint failed: ai_projects.<col>` → HTTP 500。
+# 集中在下面一处拦，而不是逐个把 10 个字段类型改掉：把「哪些列 NOT NULL」这个事实写在一处并注明来源，
+# 将来新增字段时只需对一眼这里；散落在字段类型里反而看不出这是同一件事。
+_NOT_NULL_SETTINGS_FIELDS: tuple[str, ...] = (
+    "auto_mode",                # BOOLEAN      NOT NULL  default 0
+    "author_intent",            # TEXT         NOT NULL  default ''
+    "current_focus",            # TEXT         NOT NULL  default ''
+    "kb_query",                 # VARCHAR(200) NOT NULL  default ''
+    "auto_kb_sync",             # BOOLEAN      NOT NULL  default 1
+    "platform",                 # VARCHAR(20)  NOT NULL  default ''
+    "custom_words",             # VARCHAR(500) NOT NULL  default ''
+    "nightly_enabled",          # BOOLEAN      NOT NULL  default 0
+    "nightly_chapters",         # INTEGER      NOT NULL  default 3
+    "context_recent_chapters",  # INTEGER      NOT NULL  default 2
+)
+
+
 class ProjectSettingsIn(BaseModel):
     auto_mode: bool | None = None
     author_intent: str | None = Field(default=None, max_length=2000)
@@ -3119,6 +3139,23 @@ class ProjectSettingsIn(BaseModel):
     # u1：章节分段流水线档位。用 Literal 是故意的：非法值由 pydantic 直接 422，
     # 路由层不再手写 if 校验。消费方 nightly.py:141 / chapter_stages.py:139 读它。
     chapter_pipeline: Literal["off", "standard", "deep"] = Field(default="off", description="章节分段流水线档位：off/standard/deep。不接受 null——列是 TEXT NOT NULL，显式 null 由 pydantic 挡成 422")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_explicit_null_for_not_null_columns(cls, data):
+        """显式传 null 的 10 个 NOT NULL 设置字段一律拒（FastAPI 对请求体校验失败回 422）。
+
+        只处理「键出现在请求体里」的情形：键没出现就一律放行，`exclude_unset` 语义原样保留
+        （不传=不改）。故意抛错而不是静默忽略——静默忽略会让调用方以为清空成功、实际没清。
+        """
+        if not isinstance(data, dict):
+            return data
+        for field in _NOT_NULL_SETTINGS_FIELDS:
+            if field in data and data[field] is None:
+                raise ValueError(
+                    f"{field}: 该列不允许空（NOT NULL），如需清空请传空串/0/false"
+                )
+        return data
 
 
 @router.put("/projects/{project_id}")
