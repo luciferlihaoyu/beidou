@@ -64,6 +64,8 @@ export default function ModelRouteDialog({
     review_llm: "",
   });
   const [saving, setSaving] = useState(false);
+  /** u1：章节分段流水线档位（不是模型路由，故与 ROUTES 分开） */
+  const [pipeline, setPipeline] = useState<"off" | "standard" | "deep">("off");
 
   // 打开时载入配置 + 当前路由值
   useEffect(() => {
@@ -75,6 +77,8 @@ export default function ModelRouteDialog({
       summary_llm: project.summary_llm ?? "",
       review_llm: project.review_llm ?? "",
     } as Record<RouteKey, string>);
+    const cp = project.chapter_pipeline;
+    setPipeline(cp === "standard" || cp === "deep" ? cp : "off");
     aiConfigApi
       .list()
       .then((cs) => {
@@ -169,7 +173,10 @@ export default function ModelRouteDialog({
   async function save() {
     setSaving(true);
     try {
-      const p = await aiFactoryM2.updateProject(project.id, { ...values });
+      const p = await aiFactoryM2.updateProject(project.id, {
+        ...values,
+        chapter_pipeline: pipeline,
+      });
       onSaved(p);
       toast.success("模型路由已更新，立即生效");
       onOpenChange(false);
@@ -205,6 +212,30 @@ export default function ModelRouteDialog({
               {renderSelect(r.key)}
             </div>
           ))}
+          <div className="border-t border-border pt-3">
+            <div className="grid grid-cols-[120px_1fr] items-start gap-3">
+              <div>
+                <p className="text-sm font-medium">章节分段流水线</p>
+                <p className="text-[11px] text-muted-foreground">整章一次写完 vs 分环节接力</p>
+              </div>
+              <div>
+                <select
+                  className="h-9 w-full rounded-md border border-border bg-background px-3 text-sm"
+                  value={pipeline}
+                  onChange={(e) => setPipeline(e.target.value as "off" | "standard" | "deep")}
+                >
+                  <option value="off">关闭（默认）</option>
+                  <option value="standard">标准</option>
+                  <option value="deep">深度</option>
+                </select>
+                <p className="mt-1 text-[11px] leading-5 text-muted-foreground">
+                  关闭 = 整章一次模型调用。标准 = 写作 → 审校 → 修订，约 <span className="text-foreground">3 次</span>调用。
+                  深度 = 规划 → 编排 → 写作 → 审校 → 修订，约 <span className="text-foreground">5 次</span>调用（最贵，质量最高）。
+                  段间只传上一段产出、全量上下文不重传；中断后可断点续跑，已完成段不再计费。
+                </p>
+              </div>
+            </div>
+          </div>
           {Object.keys(failed).length > 0 && (
             <p className="rounded-md bg-muted px-3 py-2 text-[11px] leading-5 text-muted-foreground">
               有配置的模型清单没取到（多为端点暂时不可达）。你的路由选择<span className="text-foreground">没有被改动</span>，

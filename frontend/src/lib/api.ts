@@ -559,6 +559,8 @@ export interface AiProject {
   setup_llm: string | null;
   outline_llm: string | null;
   chapter_llm: string | null;
+  /** 章节分段流水线档位（u1）：off=整章一次调用；standard=写作/审校/修订；deep=规划/编排/写作/审校/修订 */
+  chapter_pipeline: "off" | "standard" | "deep" | null;
   summary_llm: string | null;
   review_llm: string | null;
   author_intent: string;

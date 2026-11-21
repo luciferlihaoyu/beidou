@@ -16,6 +16,7 @@ M2：逐章生成（SSE 流式，上下文预算制组装）+ 定稿（状态文
 """
 
 from __future__ import annotations
+from typing import Literal
 
 import json
 import re
@@ -720,6 +721,7 @@ def _project_out(p: AiProject, novel: Novel | None = None, chapter_count: int = 
         "tokens_completion": p.tokens_completion or 0,
         "nightly_enabled": p.nightly_enabled,
         "nightly_chapters": p.nightly_chapters,
+        "chapter_pipeline": getattr(p, "chapter_pipeline", "") or "off",
         "nightly_last_run": json.loads(p.nightly_last_run) if p.nightly_last_run else None,
         "chapter_count": chapter_count,
         "created_at": p.created_at.isoformat(),
@@ -3114,6 +3116,9 @@ class ProjectSettingsIn(BaseModel):
     summary_llm: str | None = None
     review_llm: str | None = None
     target_chapter_words: int | None = Field(default=None, ge=200, le=20000)
+    # u1：章节分段流水线档位。用 Literal 是故意的：非法值由 pydantic 直接 422，
+    # 路由层不再手写 if 校验。消费方 nightly.py:141 / chapter_stages.py:139 读它。
+    chapter_pipeline: Literal["off", "standard", "deep"] | None = None
 
 
 @router.put("/projects/{project_id}")
