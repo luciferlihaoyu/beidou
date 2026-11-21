@@ -1,6 +1,6 @@
-"""u1-fix2：10 个 NOT NULL 设置字段显式 null 一律被拒（422 形状）。
+"""u1-fix2：NOT NULL 设置字段（当前 11 个）显式 null 一律被拒（422 形状）。
 
-背景（实测口径）：`PRAGMA table_info(ai_projects)` 实测下列 10 列 notnull=1，
+背景（实测口径）：`PRAGMA table_info(ai_projects)` 实测下列列 notnull=1（u5 起为 11 列，含 context_extra_chapters），
 与 `models.py` 的非 Optional 类型标注一致（Mapped[bool]/Mapped[str]/Mapped[int] ⇒ nullable=False）：
 
   auto_mode(BOOLEAN) / author_intent(TEXT) / current_focus(TEXT) / kb_query(VARCHAR(200)) /
@@ -12,7 +12,7 @@
 塞进 NOT NULL 列 → sqlite `IntegrityError: NOT NULL constraint failed` → HTTP 500。
 
 本文件钉住三件事（期望值全部硬编码，不从实现 import 任何常量）：
-  ① 这 10 个字段各自显式传 None，必须在 pydantic 构造层被拒（FastAPI 对请求体校验失败即 422），
+  ① 这些字段各自显式传 None，必须在 pydantic 构造层被拒（FastAPI 对请求体校验失败即 422），
      且错误 message/loc 点名该字段——不能是"别的字段先炸了"的假通过；
   ② 反向对拍：**键不出现**时构造必须成功，且 `model_dump(exclude_unset=True)` 不含它们
      （这条防把 `exclude_unset` 语义改坏，/把"堵 null"变成"全字段必填"）；
@@ -34,7 +34,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 import app.routers.ai_factory as factory
 from app.models import AiProject, Base, User
 
-# 「PRAGMA table_info(ai_projects) 实测 notnull=1」的那 10 列，按字段名硬编码（不从实现 import）
+# 「PRAGMA table_info(ai_projects) 实测 notnull=1」的那批列，按字段名硬编码（不从实现 import）
 NOT_NULL_FIELDS = (
     "auto_mode",
     "author_intent",
@@ -99,7 +99,7 @@ async def _read_platform(sl, pid) -> str:
         return fresh.platform
 
 
-# ---------- ① 10 个字段逐个显式传 None：必须在 pydantic 层被拒 ----------
+# ---------- ① 每个字段逐个显式传 None：必须在 pydantic 层被拒 ----------
 
 
 @pytest.mark.parametrize("field", NOT_NULL_FIELDS)
@@ -127,7 +127,7 @@ def test_explicit_null_rejected_for_each_field(field):
 
 
 def test_omitted_keys_still_allowed_and_excluded_from_dump():
-    """只传一个可空字段：10 个 NOT NULL 字段的键都没出现，构造必须成功且 dump 不含它们。
+    """只传一个可空字段：NOT NULL 字段的键都没出现，构造必须成功且 dump 不含它们。
 
     这条防的是"堵 null 顺手把 exclude_unset 语义改坏"——一旦改成给这些字段设必填/设
     非 None 默认值，全量 PUT 会把用户没动的列一起冲掉。

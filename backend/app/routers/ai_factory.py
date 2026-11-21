@@ -3102,11 +3102,10 @@ async def review_chapter(
 # 来源：`PRAGMA table_info(ai_projects)` 实测 notnull=1；与 `update_project` 的通用 setattr 组合会让 null 变成 500。
 # 具体链路：请求体显式传 null → model_dump(exclude_unset=True) 带上该键 → setattr(p, field, None)
 #   → sqlite `IntegrityError: NOT NULL constraint failed: ai_projects.<col>` → HTTP 500。
-# 集中在下面一处拦，而不是逐个把 10 个字段类型改掉：把「哪些列 NOT NULL」这个事实写在一处并注明来源，
+# 集中在下面一处拦，而不是逐个把 11 个字段类型改掉：把「哪些列 NOT NULL」这个事实写在一处并注明来源，
 # 将来新增字段时只需对一眼这里；散落在字段类型里反而看不出这是同一件事。
-# ⚠️ 已知陈旧口径（u5 遗留，未在本单授权范围内改）：下方 `_reject_explicit_null_for_not_null_columns`
-# 的 docstring 与 tests/test_u1_settings_null_rejected.py 的模块 docstring 仍写「10 个 / 10 列」，
-# 实际已是 11 项——以本元组为唯一事实来源。
+# 以本元组为唯一事实来源：字段数改了就改这里，别在 docstring 里另写一份数字（本仓有过
+# 「注释说 10、实际 11」的陈旧口径，假注释比没注释更坏）。
 _NOT_NULL_SETTINGS_FIELDS: tuple[str, ...] = (
     "auto_mode",                # BOOLEAN      NOT NULL  default 0
     "author_intent",            # TEXT         NOT NULL  default ''
@@ -3151,7 +3150,7 @@ class ProjectSettingsIn(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def _reject_explicit_null_for_not_null_columns(cls, data):
-        """显式传 null 的 10 个 NOT NULL 设置字段一律拒（FastAPI 对请求体校验失败回 422）。
+        """显式传 null 的 11 个 NOT NULL 设置字段一律拒（FastAPI 对请求体校验失败回 422）。
 
         只处理「键出现在请求体里」的情形：键没出现就一律放行，`exclude_unset` 语义原样保留
         （不传=不改）。故意抛错而不是静默忽略——静默忽略会让调用方以为清空成功、实际没清。
