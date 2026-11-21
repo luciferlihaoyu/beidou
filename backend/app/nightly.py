@@ -32,7 +32,7 @@ from .routers.ai_factory import (
     _update_state_files,
     maybe_auto_continue_outline,
 )
-from .deps import count_words
+from .deps import count_words, load_chapter_in_project
 from .models import User
 from .utils import chapter_display_title, order_chapters, strip_html
 
@@ -323,7 +323,9 @@ async def run_nightly_for_project(project_id: int, user_id: int) -> dict:
         results: list[dict] = []
         low_streak = 0
         for job in pending:
-            chapter = await db.get(Chapter, job.chapter_id)
+# u5：取章必须带归属作用域（Chapter.novel_id == p.novel_id）。改前的 db.get(Chapter, id)
+# 只按主键取，是 deps.py 头注那个「拿别人的章 id 就能读写」的写入侧残余。取不到仍 continue。
+            chapter = await load_chapter_in_project(db, p, job.chapter_id)
             if chapter is None:
                 continue
             num = number_map.get(chapter.id, 0)
@@ -478,7 +480,9 @@ async def run_batch_background(project_id: int, user_id: int, count: int, job_id
                 if entry.get("stop_requested"):
                     entry["results"].append({"ok": False, "error": "已手动停止", "reason_code": "stopped"})
                     break
-                chapter = await db.get(Chapter, job.chapter_id)
+# u5：取章必须带归属作用域（Chapter.novel_id == p.novel_id）。改前的 db.get(Chapter, id)
+# 只按主键取，是 deps.py 头注那个「拿别人的章 id 就能读写」的写入侧残余。取不到仍 continue。
+                chapter = await load_chapter_in_project(db, p, job.chapter_id)
                 if chapter is None:
                     continue
                 num = number_map.get(chapter.id, 0)

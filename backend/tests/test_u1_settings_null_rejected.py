@@ -46,6 +46,7 @@ NOT_NULL_FIELDS = (
     "nightly_enabled",
     "nightly_chapters",
     "context_recent_chapters",
+    "context_extra_chapters",
 )
 
 # 同一批字段的合法值：用来证明校验不是"一刀切全拒"（正对照，防止过度拦截）
@@ -60,6 +61,7 @@ VALID_VALUES = {
     "nightly_enabled": True,
     "nightly_chapters": 3,
     "context_recent_chapters": 2,
+    "context_extra_chapters": [3, 5],
 }
 
 

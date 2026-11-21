@@ -3104,6 +3104,9 @@ async def review_chapter(
 #   → sqlite `IntegrityError: NOT NULL constraint failed: ai_projects.<col>` → HTTP 500。
 # 集中在下面一处拦，而不是逐个把 10 个字段类型改掉：把「哪些列 NOT NULL」这个事实写在一处并注明来源，
 # 将来新增字段时只需对一眼这里；散落在字段类型里反而看不出这是同一件事。
+# ⚠️ 已知陈旧口径（u5 遗留，未在本单授权范围内改）：下方 `_reject_explicit_null_for_not_null_columns`
+# 的 docstring 与 tests/test_u1_settings_null_rejected.py 的模块 docstring 仍写「10 个 / 10 列」，
+# 实际已是 11 项——以本元组为唯一事实来源。
 _NOT_NULL_SETTINGS_FIELDS: tuple[str, ...] = (
     "auto_mode",                # BOOLEAN      NOT NULL  default 0
     "author_intent",            # TEXT         NOT NULL  default ''
@@ -3115,6 +3118,11 @@ _NOT_NULL_SETTINGS_FIELDS: tuple[str, ...] = (
     "nightly_enabled",          # BOOLEAN      NOT NULL  default 0
     "nightly_chapters",         # INTEGER      NOT NULL  default 3
     "context_recent_chapters",  # INTEGER      NOT NULL  default 2
+    # u5：第 11 项。models.py:369 同形（Mapped[str] 非 Optional ⇒ NOT NULL default '[]'），
+    # 改前它不在本元组里，而 update_project 对它另有特判 `json.dumps(value or [])` ——
+    # 显式 null 于是被**静默**写成 "[]"：不报错、不落 500，用户配置无声消失（比 500 更难发现）。
+    # 与上面 10 列同口径拒 null；**特判逻辑保留不动**——清空的正确姿势是传 []（走 value or []）。
+    "context_extra_chapters",  # TEXT         NOT NULL  default '[]'  (chapter id JSON)
 )
 
 

@@ -83,6 +83,47 @@ async def ensure_chapter_in_project(p: AiProject, chapter_id: int | None, db: As
     raise HTTPException(status.HTTP_404_NOT_FOUND, "章节不存在，或不属于本项目")
 
 
+async def load_chapter_in_project(db: AsyncSession, p: AiProject, chapter_id: int | None) -> Chapter | None:
+    """u5：**数据层**取章入口——按 `Chapter.id == chapter_id` ∧ `Chapter.novel_id == p.novel_id` 取。
+
+    与 ensure_chapter_in_project 的分工（两者别互相替代）：
+    - ensure_chapter_in_project 面向 **HTTP**：查不到抛 404（不暴露资源是否存在），判据含
+      AiChapterJob 项目直接证据，因此允许「解绑/换绑后的历史章」；
+    - 本函数面向 **后台循环**（nightly.py 两处写入侧取点）：查不到返回 None，调用方自己
+      `continue`——夜间语义是「跳过这一章，不中断整轮」，抛 404 异常在这里语义不对；
+    - 作用域只认**当前绑定** `Chapter.novel_id == p.novel_id` 一条合取，不掺 job 证据：
+      写侧只该写「本项目这本书」的章。
+
+    为什么需要这一族：本文件头注自述的原始洞就是「拿别人的章 id 就能读写」。读取侧已收敛到
+    共享入口，而 nightly 的两处**写入侧**取点（改前是 `await db.get(Chapter, job.chapter_id)`，
+    只按主键取、不校验归属）从未接入。可达性**如实口径、不夸大**：全仓 AiChapterJob 仅 4 处
+    创建（chapter_split.py:136 / ai_import.py:143 / ai_factory.py:1331 / :1513），全部用服务端
+    刚建出来的新章 id，**当前不存在把任务挂到他人章节上的通路**（潜伏形状、非现网可利用）；
+    一旦将来出现「把已有章节挂进任务」的功能，没有这道作用域就是通的。
+
+    `p.novel_id is None`（未绑/解绑）或 `chapter_id` 为假值 → 直接 None，不查库（与
+    ensure_chapter_in_project 的假值守卫同口径：绝不让 id=0 拿去 db.get 盲命中）。
+    """
+    if not chapter_id or p.novel_id is None:
+        return None
+    if isinstance(db, AsyncSession):
+        # 真库：作用域直接进 SQL（主键唯一，最多一行；不带 novel_id 的行根本不会被复制出库）
+        return (
+            await db.execute(
+                select(Chapter).where(Chapter.id == chapter_id, Chapter.novel_id == p.novel_id).limit(1)
+            )
+        ).scalars().first()
+    # 桩世界兜底腿（AGENTS.md「假 DB 的桩会把真故障同形化」的正向规避）：本仓既有的夜间集成
+    # 用例用**队列式 SeqDB**（execute 按调用顺序消费预设结果，见 test_fix8_outline_continue.py:53），
+    # 在夜间路径上多一次 execute 会让 jobs/chapters/volumes 三条查询整体错位、把合法章读成空——
+    # 实测取证：本函数第一版只写 execute 查询时，那两条既有用例直接红（2 failed, 304 passed），
+    # 而本单不许改既有断言。因此对非 AsyncSession 的替身只走 get + 内存侧归属合取。
+    chapter = await db.get(Chapter, chapter_id)
+    if chapter is None or getattr(chapter, "novel_id", None) != p.novel_id:
+        return None
+    return chapter
+
+
 async def _has_chapter_job_stub(p, chapter_id: int, db) -> bool:
     """SimpleNamespace 桩世界的 A 腿：只读桩的内存行，绝不插新查询。
 

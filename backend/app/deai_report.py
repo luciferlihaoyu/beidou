@@ -28,7 +28,7 @@ _STATUS_LABEL = {
     "uncalibrated": "未标定",
     # 评审 B-2：太短哨兵那一路**没有真正检测过**，必须在报告里有自己的说法，
     # 不许混进"未启用"（未启用是配置问题，哨兵是数据不够）。
-    "degenerate": "哨兵值·未真正检测",
+    "degenerate": "未真正检测（原因见详情）",
 }
 _SEVERITY_LABEL = {"high": "高", "medium": "中", "low": "低"}
 _PATH_NAME = {"rule": "规则", "perplexity": "困惑度", "reviewer": "审校师"}

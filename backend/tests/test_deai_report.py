@@ -636,7 +636,7 @@ def test_u0d_degenerate_has_dedicated_label_not_unknown_status():
     }
     html = build_report_html(result, {"project_id": 1, "chapter_no": 1})
     assert "未知状态" not in html, "degenerate 掉进了「未知状态」兜底：状态→文案映射漏登记"
-    assert "哨兵值·未真正检测" in html, "degenerate 没有自己的说法"
+    assert "未真正检测（原因见详情）" in html, "degenerate 没有自己的说法"
     assert "1/3" in html, "覆盖率分母仍应是 3 路（degenerate 不额外计分）"
 
 
