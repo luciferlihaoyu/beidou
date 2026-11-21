@@ -58,6 +58,12 @@ async def lifespan(app: FastAPI):
     yield
     backup_task.cancel()
     xj_sync_task.cancel()
+    # 必须 await 收尾：cancel() 只是"发出取消请求"，被取消的任务要等下一次事件循环调度
+    # 才真正结束。这里若直接返回，关服瞬间两条循环仍是 pending —— 本仓实测后果是同进程
+    # 反复建拆 TestClient 的测试会卡死在 anyio blocking portal 的 join()。
+    # return_exceptions=True 让 CancelledError 被 gather 收集而不是抛回本协程，
+    # 免得把正常关服变成一次异常。
+    await asyncio.gather(backup_task, xj_sync_task, return_exceptions=True)
 
 
 app = FastAPI(title="北斗 · AI 网文创作平台", lifespan=lifespan)
