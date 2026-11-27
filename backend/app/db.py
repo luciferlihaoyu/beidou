@@ -26,7 +26,7 @@ SessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=
 
 
 async def _apply_sqlite_pragmas(target_engine) -> dict:
-    """把库切到 WAL 并核对等锁时长，**返回实测值**（启动日志与自检都用它，不猜）。
+    """把库切到 WAL 并核对等锁时长，**返回实测值**（供启动自检，不猜）。
 
     为什么必须 WAL：本项目原来的日志模式是 ``delete``（回滚日志），**同一时刻只允许一个写入者**，
     写入期间连读都被挡。夜间生成实测单段 13~120s，那段时间用户保存设置就撞锁——
@@ -47,16 +47,34 @@ async def get_db():
         yield session
 
 
+def _log_sqlite_pragmas(pragmas: dict) -> None:
+    """把并发设置的上报**单独成函数**，好让"失败必须可见"这条被测试咬住。
+
+    本仓没有配置 application logger 的级别（默认 WARNING），所以 ``logger.info`` 平时
+    在 `docker logs` 里看不到——成功时不可见没关系，**失败时不可见就是灾难**：
+    库会静默退回"同一时刻只允许一个写入者"，夜间生成期间保存设置继续 500。
+    因此切换失败一律走 ``logger.warning``。
+    """
+    mode = str((pragmas or {}).get("journal_mode", "")).strip().lower()
+    if mode != "wal":
+        logger.warning(
+            "SQLite 未能切到 WAL（实测 journal_mode=%r）：并发写入退化为单写者，"
+            "生成期间保存设置仍可能 500；请核对库文件权限与是否有长事务占用",
+            mode,
+        )
+    else:
+        logger.info(
+            "sqlite 并发设置：journal_mode=%s busy_timeout=%sms（等锁上限 %ss）",
+            mode, (pragmas or {}).get("busy_timeout"), DB_LOCK_TIMEOUT_S,
+        )
+
+
 async def init_db():
     from . import models  # noqa: F401  确保模型已注册
     from .security import hash_password
 
     # A1：并发设置先落地（WAL 是持久属性，必须在别的连接开始长事务之前设）
-    pragmas = await _apply_sqlite_pragmas(engine)
-    logger.info(
-        "sqlite 并发设置：journal_mode=%s busy_timeout=%sms（等锁上限 %ss）",
-        pragmas["journal_mode"], pragmas["busy_timeout"], DB_LOCK_TIMEOUT_S,
-    )
+    _log_sqlite_pragmas(await _apply_sqlite_pragmas(engine))
 
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)

@@ -51,3 +51,31 @@ def test_pragmas_switch_to_wal_and_report_measured_mode(tmp_path):
         assert readback.lower() == "wal", f"新连接读回仍是 {readback!r}"
     finally:
         _run(eng.dispose())
+
+
+def test_wal_failure_is_visible_as_warning(caplog):
+    """切不成 WAL 时必须能在日志里被看见。
+
+    这条守的是**"失败无声"**：本仓没有配置 application logger 级别（默认 WARNING），
+    所以成功走 INFO 在 docker logs 里根本看不到。若失败也走 INFO，
+    库静默退回单写者、生成期间继续 500，而日志一片安静——比没修更糟。
+    """
+    import logging as _logging
+
+    with caplog.at_level(_logging.INFO, logger="app.db"):
+        db._log_sqlite_pragmas({"journal_mode": "delete", "busy_timeout": 30000})
+    assert any(r.levelno == _logging.WARNING for r in caplog.records), "切不成 WAL 却没有 WARNING"
+
+    caplog.clear()
+    with caplog.at_level(_logging.INFO, logger="app.db"):
+        db._log_sqlite_pragmas({"journal_mode": "wal", "busy_timeout": 30000})
+    assert not any(r.levelno >= _logging.WARNING for r in caplog.records), "成功时不该告警"
+
+
+def test_wal_failure_warning_survives_unknown_mode(caplog):
+    """回报为空/怪值时也必须告警（"没拿到"不等于"成功了"）。"""
+    import logging as _logging
+
+    with caplog.at_level(_logging.INFO, logger="app.db"):
+        db._log_sqlite_pragmas({})
+    assert any(r.levelno == _logging.WARNING for r in caplog.records)
