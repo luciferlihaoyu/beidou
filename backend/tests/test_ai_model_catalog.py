@@ -21,6 +21,7 @@ key、也不给上游留任何依赖。``app.routers.ai`` 里是 ``import httpx`
       python3 -m pytest tests/test_ai_model_catalog.py -q
 """
 
+import json
 from types import SimpleNamespace
 
 import httpx
@@ -167,9 +168,8 @@ async def test_config_id_fills_credentials_and_sends_clicked_model(env):
     # key 来自 DB
     assert sent.headers["authorization"] == f"Bearer {DB_KEY}"
     # model 是用户点的那一个，不是配置里存的 stored-default-model
-    import json as _json
 
-    assert _json.loads(sent.content)["model"] == "model-from-catalog"
+    assert json.loads(sent.content)["model"] == "model-from-catalog"
 
 
 @pytest.mark.asyncio
@@ -253,9 +253,8 @@ async def test_legacy_base_url_and_api_key_still_works(env):
     # /v1 后缀被规范化掉，不会拼成 /v1/v1/chat/completions
     assert str(sent.url) == f"{BASE_URL_DRY}/v1/chat/completions"
     assert sent.headers["authorization"] == f"Bearer {DRY_KEY}"
-    import json as _json
 
-    assert _json.loads(sent.content)["model"] == "legacy-model"
+    assert json.loads(sent.content)["model"] == "legacy-model"
 
 
 @pytest.mark.asyncio
@@ -265,7 +264,6 @@ async def test_saved_config_test_route_still_works(env):
         f"/api/ai/configs/{env.ids.mine_config}/test", json={}, headers=_auth(env.token_owner)
     )
     assert r.status_code == 200, r.text
-    import json as _json
 
     # 这条路用配置里存的 model
-    assert _json.loads(env.shim.requests[0].content)["model"] == "stored-default-model"
+    assert json.loads(env.shim.requests[0].content)["model"] == "stored-default-model"
