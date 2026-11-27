@@ -456,13 +456,29 @@ async def _stream_openai(
 
 
 class TestIn(BaseModel):
-    base_url: str
-    api_key: str
+    """测试连通性的入参。
+
+    两种用法（与 ``POST /api/ai/models`` 同一口径）：
+    - 传 ``config_id``：``base_url`` / ``api_key`` 从数据库里已保存的配置取
+      （模型清单里逐个「测试」走这条路，不必把 key 再送回前端）；
+    - 传 ``base_url`` + ``api_key``：dry-run，适合「还没保存配置就先试一下」。
+
+    显式传入的 ``base_url`` / ``api_key`` **优先于** DB 值——这样用户能用新 key
+    先测通再保存，不必为了试一次就把草稿写进库。
+    """
+
+    base_url: str | None = None
+    api_key: str | None = None
     model: str
+    config_id: int | None = None
 
 
 @router.post("/test")
-async def test_connection(data: TestIn, user: User = Depends(get_current_user)):
+async def test_connection(
+    data: TestIn,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
     """测试接口连通性（非流式，限制输出长度）。地址带 /v1 后缀也没关系，会自动规范化。
 
     失败时给出可操作提示（复用 failure_kinds 分类），成功时回报模型名与耗时——
@@ -470,7 +486,20 @@ async def test_connection(data: TestIn, user: User = Depends(get_current_user)):
     """
     from ..failure_kinds import classify_failure
 
-    url = _normalize_base(data.base_url) + "/v1/chat/completions"
+    base_url = (data.base_url or "").strip()
+    api_key = (data.api_key or "").strip()
+    if data.config_id is not None:
+        config = await db.get(AIConfig, data.config_id)
+        if config is None or config.user_id != user.id:
+            raise HTTPException(404, "配置不存在")
+        if not base_url:
+            base_url = (config.base_url or "").strip()
+        if not api_key:
+            api_key = (config.api_key or "").strip()
+    if not base_url or not api_key:
+        raise HTTPException(400, "请提供 config_id，或同时提供 base_url 与 api_key")
+
+    url = _normalize_base(base_url) + "/v1/chat/completions"
     payload = {
         "model": data.model,
         "messages": [{"role": "user", "content": "回复「连接成功」四个字即可。"}],
@@ -486,7 +515,8 @@ async def test_connection(data: TestIn, user: User = Depends(get_current_user)):
     started = time.monotonic()
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.post(url, json=payload, headers={"Authorization": f"Bearer {data.api_key}"})
+            # 天枢前置 Cloudflare 会拦裸 python-urllib UA（403 error code: 1010）；httpx 默认 UA 实测可通，勿改用 urllib/裸 requests。
+            resp = await client.post(url, json=payload, headers={"Authorization": f"Bearer {api_key}"})
     except httpx.TimeoutException:
         raise fail(504, f"连接超时（30 秒未响应）：{url}")
     except httpx.HTTPError as exc:
@@ -591,7 +621,7 @@ async def test_saved_config(config_id: int, user: User = Depends(get_current_use
     if not config.api_key:
         raise HTTPException(400, "该配置没有保存 API Key，请编辑并填写")
     return await test_connection(
-        TestIn(base_url=config.base_url, api_key=config.api_key, model=config.model), user
+        TestIn(base_url=config.base_url, api_key=config.api_key, model=config.model), user, db
     )
 
 

@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { DatabaseBackup, Download, KeyRound, Loader2, MoreHorizontal, PenLine, Plug, Plus, RefreshCw, Sparkles, Star, Trash2, X } from "lucide-react";
+import { ChevronDown, ChevronUp, DatabaseBackup, Download, KeyRound, Loader2, MoreHorizontal, PenLine, Plug, Plus, RefreshCw, Search, Sparkles, Star, Trash2, X } from "lucide-react";
 import { toast } from "sonner";
 import AppShell from "@/components/AppShell";
 import { api, xuanjiApi, type AIConfig, type IntegrationState, type XuanjiTree } from "@/lib/api";
+import { filterModels, testResultLabel, testResultTone, type ModelTestResult } from "@/lib/modelCatalog";
 import { relTime } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -54,6 +55,20 @@ const PRESETS = [
   { name: "OpenAI", base_url: "https://api.openai.com", model: "gpt-4o-mini" },
 ];
 
+/** 行内测试结果的配色（语气 → class）。ok 绿 / fail 红 / testing 灰。 */
+function testToneClass(tone: ReturnType<typeof testResultTone>): string {
+  switch (tone) {
+    case "ok":
+      return "text-green-600 dark:text-green-400";
+    case "fail":
+      return "text-destructive";
+    case "testing":
+      return "text-muted-foreground";
+    default:
+      return "";
+  }
+}
+
 export default function Account() {
   const [configs, setConfigs] = useState<AIConfig[]>([]);
   const [open, setOpen] = useState(false);
@@ -63,6 +78,14 @@ export default function Account() {
   const [testingId, setTestingId] = useState<number | null>(null);
   const [models, setModels] = useState<string[]>([]);
   const [modelsLoading, setModelsLoading] = useState(false);
+  // 模型清单面板（原实现只把 78 个模型塞进 max-h-32 小滚动条：看不见、搜不到、测不了）
+  const [testResults, setTestResults] = useState<Record<string, ModelTestResult>>({});
+  const [modelQuery, setModelQuery] = useState("");
+  const [catalogOpen, setCatalogOpen] = useState(false);
+  /** 批量测试进度；null = 没在批量测。串行分批（每批 3 个）逐行回填。 */
+  const [bulkTesting, setBulkTesting] = useState<{ done: number; total: number } | null>(null);
+  /** 搜索过滤后的清单（纯函数在 lib/modelCatalog.ts，测试可单跑）。 */
+  const catalogModels = useMemo(() => filterModels(models, modelQuery), [models, modelQuery]);
   const [pw, setPw] = useState({ old_password: "", new_password: "", confirm: "" });
   const [pwSaving, setPwSaving] = useState(false);
   const [integ, setInteg] = useState<IntegrationState | null>(null);
@@ -339,6 +362,10 @@ export default function Account() {
   function openDialog(item: AIConfig | null) {
     setEditing(item);
     setModels([]);
+    setTestResults({});
+    setModelQuery("");
+    setCatalogOpen(false);
+    setBulkTesting(null);
     setForm(
       item
         ? { name: item.name, base_url: item.base_url, api_key: "", model: item.model, is_default: item.is_default }
@@ -434,12 +461,18 @@ export default function Account() {
       }
       const r = await api.post<{ models: string[] }>("/api/ai/models", payload);
       if (r.models.length === 0) {
+        setCatalogOpen(false);
         toast.info("接口没有返回模型列表，请手动填写模型名");
       } else {
+        // 新的清单 = 旧的测试结果全部作废（否则会显示上一次拉取的"ok"误导读数）
+        setTestResults({});
         setModels(r.models);
-        toast.success(`获取到 ${r.models.length} 个模型，点模型输入框选择`);
+        setCatalogOpen(true); // 拉取成功后自动展开，用户不必再点一次
+        toast.success(`获取到 ${r.models.length} 个模型，可搜索、逐个测试或选用`);
       }
     } catch (e) {
+      // 拉取失败：面板保持关闭，且**绝不清空**用户已手填的模型名（form.model 一个字都不动）
+      setCatalogOpen(false);
       toast.error((e as Error).message);
     } finally {
       setModelsLoading(false);
@@ -460,6 +493,82 @@ export default function Account() {
       toast.error((e as Error).message);
     } finally {
       setModelsLoading(false);
+    }
+  }
+
+  /** 模型清单里逐行「测试」：一条真实调用（会产生费用），只在用户点击时发生。
+   *
+   * 凭据来源与 ``fetchModels`` 同一口径：
+   * - 已保存配置 → 只传 ``config_id``，key 由后端从 DB 取（不必把 key 再送回前端）；
+   * - 未保存配置 → 传 ``base_url`` + ``api_key``（dry-run）。
+   * 缺 key 时**一个请求都不发**（发出去只会拿空 key 撞上游，再把 401 显示成"Key 无效"）。
+   */
+  async function testModelRow(model: string): Promise<void> {
+    const key = form.api_key.trim();
+    const savedId = editing?.id ?? null;
+    if (!savedId && !key) {
+      toast.error("请先填写 API Key");
+      return;
+    }
+    if (savedId && !editing?.has_key && !key) {
+      toast.error("请先填写 API Key");
+      return;
+    }
+    setTestResults((prev) => ({ ...prev, [model]: { state: "testing" } }));
+    try {
+      const payload: { model: string; config_id?: number; base_url?: string; api_key?: string } = { model };
+      if (savedId) {
+        payload.config_id = savedId;
+      } else {
+        payload.base_url = form.base_url;
+        payload.api_key = key;
+      }
+      const r = await api.post<{ reply: string; model: string; latency_ms: number }>("/api/ai/test", payload);
+      setTestResults((prev) => ({ ...prev, [model]: { state: "ok", ms: r.latency_ms, reply: r.reply } }));
+    } catch (e) {
+      // 后端已把失败分类成「病因 + 建议」，这里原样留给行内 title
+      setTestResults((prev) => ({ ...prev, [model]: { state: "fail", message: (e as Error).message } }));
+    }
+  }
+
+  /** 选用某个模型：只改表单，保存后才生效（不偷偷落库）。 */
+  function selectModel(model: string) {
+    setForm({ ...form, model });
+    toast.success(`已选用 ${model}，保存后生效`);
+  }
+
+  /** 全部测试：对**端点返回的全部模型**逐个真实调用（搜索框只影响显示，不缩小范围）。
+   *
+   * 必须二次确认——一次 78 连发是真金白银；确认后按每批 3 个串行推进，
+   * 逐行回填结果，过程中按钮禁用并显示 `已测 k/N`。
+   */
+  async function testAllModels(): Promise<void> {
+    const key = form.api_key.trim();
+    const savedId = editing?.id ?? null;
+    if (!savedId && !key) {
+      toast.error("请先填写 API Key");
+      return;
+    }
+    if (savedId && !editing?.has_key && !key) {
+      toast.error("请先填写 API Key");
+      return;
+    }
+    const targets = models;
+    if (targets.length === 0) return;
+    if (!window.confirm(`将对该端点的 ${targets.length} 个模型各发一次真实调用（会产生费用），继续？`)) return;
+
+    const BATCH = 3; // 并发上限 3：不把端点打满，也不至于串行到几十分钟
+    let done = 0;
+    setBulkTesting({ done, total: targets.length });
+    try {
+      for (let i = 0; i < targets.length; i += BATCH) {
+        const batch = targets.slice(i, i + BATCH);
+        await Promise.all(batch.map((m) => testModelRow(m)));
+        done += batch.length;
+        setBulkTesting({ done, total: targets.length });
+      }
+    } finally {
+      setBulkTesting(null);
     }
   }
 
@@ -951,21 +1060,105 @@ export default function Account() {
                 </Button>
               </div>
               {models.length > 0 ? (
-                <div className="max-h-32 overflow-y-auto rounded border border-input bg-muted/30 p-1">
-                  {models.map((m) => (
+                <div className="space-y-1">
+                  {/* 头部：总数 + 搜索 + 全部测试 + 收起/展开。
+                      原实现只有一个小滚动条，78 个模型既看不到数量也搜不了。 */}
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-xs tnum text-muted-foreground">共 {models.length} 个模型</span>
+                    <div className="relative">
+                      <Search className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+                      <Input
+                        value={modelQuery}
+                        onChange={(e) => setModelQuery(e.target.value)}
+                        placeholder="搜索模型…"
+                        className="h-7 w-36 pl-7 text-xs"
+                      />
+                    </div>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="h-7 px-2 text-xs tnum"
+                      onClick={() => void testAllModels()}
+                      disabled={bulkTesting !== null || modelsLoading}
+                    >
+                      {bulkTesting ? `已测 ${bulkTesting.done}/${bulkTesting.total}` : "全部测试"}
+                    </Button>
                     <button
                       type="button"
-                      key={m}
-                      onClick={() => setForm({ ...form, model: m })}
-                      className={
-                        "block w-full truncate rounded px-2 py-1 text-left text-xs tnum transition-colors hover:bg-muted " +
-                        (form.model === m ? "bg-primary/10 font-medium text-primary" : "text-foreground/80")
-                      }
-                      title={m}
+                      className="ml-auto inline-flex items-center gap-0.5 text-xs text-muted-foreground transition-colors hover:text-foreground"
+                      onClick={() => setCatalogOpen((v) => !v)}
                     >
-                      {m}
+                      {catalogOpen ? (
+                        <>
+                          <ChevronUp className="h-3.5 w-3.5" />
+                          收起
+                        </>
+                      ) : (
+                        <>
+                          <ChevronDown className="h-3.5 w-3.5" />
+                          展开
+                        </>
+                      )}
                     </button>
-                  ))}
+                  </div>
+                  {catalogOpen && (
+                    <div className="max-h-[45vh] overflow-y-auto rounded-md border border-input bg-muted/20">
+                      {catalogModels.length === 0 ? (
+                        <p className="px-2 py-3 text-xs text-muted-foreground">没有匹配「{modelQuery}」的模型</p>
+                      ) : (
+                        catalogModels.map((m) => {
+                          const result = testResults[m];
+                          const tone = testResultTone(result);
+                          return (
+                            <div
+                              key={m}
+                              className={
+                                "flex items-center gap-2 border-b border-input/60 px-2 py-1 last:border-b-0 " +
+                                (form.model === m ? "bg-primary/5" : "")
+                              }
+                            >
+                              <span className="min-w-0 flex-1 truncate text-xs tnum" title={m}>
+                                {m}
+                              </span>
+                              {tone !== "none" && (
+                                <span
+                                  // 错误摘要有 60 字（中文≈600px），不夹住会把整行撑出对话框
+                                  className={"inline-block max-w-[45%] shrink-0 truncate text-[11px] " + testToneClass(tone)}
+                                  title={result?.state === "fail" ? result.message : undefined}
+                                >
+                                  {tone === "testing" ? (
+                                    <Loader2 className="h-3 w-3 animate-spin" />
+                                  ) : (
+                                    testResultLabel(result)
+                                  )}
+                                </span>
+                              )}
+                              <Button
+                                type="button"
+                                variant="ghost"
+                                size="sm"
+                                className="h-6 shrink-0 px-1.5 text-[11px]"
+                                onClick={() => void testModelRow(m)}
+                                disabled={tone === "testing" || bulkTesting !== null}
+                              >
+                                测试
+                              </Button>
+                              <Button
+                                type="button"
+                                variant={form.model === m ? "secondary" : "outline"}
+                                size="sm"
+                                className="h-6 shrink-0 px-1.5 text-[11px]"
+                                onClick={() => selectModel(m)}
+                              >
+                                选用
+                              </Button>
+                            </div>
+                          );
+                        })
+                      )}
+                    </div>
+                  )}
                 </div>
               ) : (
                 <p className="text-[11px] text-muted-foreground">

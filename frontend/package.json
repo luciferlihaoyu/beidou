@@ -12,7 +12,8 @@
     "test:theme": "node scripts/test-editor-theme.ts",
     "test:route": "node scripts/test-model-route.ts",
     "test:download": "node scripts/test-deai-download.ts",
-    "test:stream": "node scripts/test-stream-diagnostics.ts"
+    "test:stream": "node scripts/test-stream-diagnostics.ts",
+    "test:catalog": "node scripts/test-model-catalog.ts"
   },
   "dependencies": {
     "@hookform/resolvers": "^5.2.2",
