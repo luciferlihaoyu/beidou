@@ -1,15 +1,45 @@
+import logging
+
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase
 
 from .config import settings
+
+logger = logging.getLogger(__name__)
+
+#: 等锁上限（秒）。SQLite 驱动默认 5s：夜间生成占着写锁时，用户在页面上保存设置会直接 500。
+#: 写锁只在**提交瞬间**持有，30s 足够覆盖排队；真正的并发修法是 WAL（见 _apply_sqlite_pragmas）。
+DB_LOCK_TIMEOUT_S = 30
 
 
 class Base(DeclarativeBase):
     pass
 
 
-engine = create_async_engine(settings.db_url, echo=False)
+def _make_engine(url: str):
+    """按统一口径造引擎。测试也用这个函数——避免"测试引擎参数与生产不同"造成误绿。"""
+    return create_async_engine(url, echo=False, connect_args={"timeout": DB_LOCK_TIMEOUT_S})
+
+
+engine = _make_engine(settings.db_url)
 SessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+
+async def _apply_sqlite_pragmas(target_engine) -> dict:
+    """把库切到 WAL 并核对等锁时长，**返回实测值**（启动日志与自检都用它，不猜）。
+
+    为什么必须 WAL：本项目原来的日志模式是 ``delete``（回滚日志），**同一时刻只允许一个写入者**，
+    写入期间连读都被挡。夜间生成实测单段 13~120s，那段时间用户保存设置就撞锁——
+    2026-11-26 一小时日志实测 5 次 500（``database is locked``，如 ``PUT /api/ai/configs/2``）。
+    WAL 让读不挡写、写不挡读，残留的短时竞争由 ``busy_timeout`` 兜。
+
+    ⚠️ 这是**持久属性**（写进库文件头），设一次即可；每次启动再设只是幂等确认。
+    ⚠️ 不改 ``synchronous``：WAL 下默认仍是 FULL，掉电安全性不降级（换速度的取舍留给以后）。
+    """
+    async with target_engine.connect() as conn:
+        mode = (await conn.exec_driver_sql("PRAGMA journal_mode=WAL")).scalar()
+        busy = (await conn.exec_driver_sql("PRAGMA busy_timeout=30000")).scalar()
+    return {"journal_mode": mode, "busy_timeout": busy}
 
 
 async def get_db():
@@ -20,6 +50,13 @@ async def get_db():
 async def init_db():
     from . import models  # noqa: F401  确保模型已注册
     from .security import hash_password
+
+    # A1：并发设置先落地（WAL 是持久属性，必须在别的连接开始长事务之前设）
+    pragmas = await _apply_sqlite_pragmas(engine)
+    logger.info(
+        "sqlite 并发设置：journal_mode=%s busy_timeout=%sms（等锁上限 %ss）",
+        pragmas["journal_mode"], pragmas["busy_timeout"], DB_LOCK_TIMEOUT_S,
+    )
 
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)

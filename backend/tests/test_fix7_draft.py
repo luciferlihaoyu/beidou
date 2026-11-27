@@ -583,9 +583,33 @@ class TestMigration:
             async def __aexit__(self, *exc):
                 return False
 
+        # A1 起 init_db 先落 SQLite 并发设置（WAL + 等锁），需要 engine.connect()。
+        # 这里只补桩**形状**，不放松任何断言——PRAGMA 是否真的生效由
+        # tests/test_a1_sqlite_concurrency.py 用真引擎 + 另开连接回读来守。
+        class FakePragmaResult:
+            def __init__(self, value):
+                self._value = value
+
+            def scalar(self):
+                return self._value
+
+        class FakePragmaConn:
+            async def exec_driver_sql(self, sql):
+                return FakePragmaResult("wal" if "journal_mode" in sql else 30000)
+
+        class FakePragmaCtx:
+            async def __aenter__(self):
+                return FakePragmaConn()
+
+            async def __aexit__(self, *exc):
+                return False
+
         class FakeEngine:
             def begin(self):
                 return FakeCtx()
+
+            def connect(self):
+                return FakePragmaCtx()
 
         monkeypatch.setattr(db_mod, "engine", FakeEngine())
 
