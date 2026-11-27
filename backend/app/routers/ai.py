@@ -467,9 +467,9 @@ class TestIn(BaseModel):
     先测通再保存，不必为了试一次就把草稿写进库。
     """
 
-    base_url: str | None = None
-    api_key: str | None = None
-    model: str
+    base_url: str | None = Field(default=None, max_length=300)
+    api_key: str | None = Field(default=None, max_length=300)
+    model: str = Field(min_length=1, max_length=200)
     config_id: int | None = None
 
 
@@ -488,6 +488,9 @@ async def test_connection(
 
     base_url = (data.base_url or "").strip()
     api_key = (data.api_key or "").strip()
+    # db 仅此分支使用（函数默认值让既有测试无需传 db）：
+    # tests/test_ai_factory_pure.py 以 ``test_connection(TestIn(...), None)`` 两参调用，
+    # db 落到 ``Depends(get_db)`` 默认值上；不传 config_id 时**绝不触库**，故那处调用无需改动。
     if data.config_id is not None:
         config = await db.get(AIConfig, data.config_id)
         if config is None or config.user_id != user.id:
@@ -496,6 +499,10 @@ async def test_connection(
             base_url = (config.base_url or "").strip()
         if not api_key:
             api_key = (config.api_key or "").strip()
+            if not api_key:
+                # 该配置库里根本没存 key，用户也没给新 key：别再用「请提供 config_id…」
+                # 那句误导人的话——它让人以为是没传参，实际是配置本身缺 key。
+                raise HTTPException(400, "该配置没有保存 API Key，请先在配置里填写")
     if not base_url or not api_key:
         raise HTTPException(400, "请提供 config_id，或同时提供 base_url 与 api_key")
 

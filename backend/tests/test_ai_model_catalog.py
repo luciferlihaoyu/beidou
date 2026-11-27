@@ -105,7 +105,15 @@ async def env(tmp_path, monkeypatch):
             api_key=DB_KEY,
             model="stored-default-model",
         )
-        s.add_all([mine, theirs])
+        # 盲区 B 的靶子：库里 key 是空串的配置（用户新建时没填 key 就保存了）
+        no_key = AIConfig(
+            user_id=owner.id,
+            name="空 Key 端点",
+            base_url=BASE_URL_DB,
+            api_key="",
+            model="stored-default-model",
+        )
+        s.add_all([mine, theirs, no_key])
         await s.commit()
         ids = SimpleNamespace(
             owner=owner.id,
@@ -114,6 +122,7 @@ async def env(tmp_path, monkeypatch):
             other_name="catalog_other",
             mine_config=mine.id,
             theirs_config=theirs.id,
+            no_key_config=no_key.id,
         )
 
     async def fake_get_db():
@@ -235,6 +244,41 @@ async def test_blank_strings_are_treated_as_absent(env):
     )
     assert r.status_code == 400, r.text
     assert env.shim.requests == []
+
+
+# ---------------------------------------------------------------- 3b. 库里没有 key
+
+
+@pytest.mark.asyncio
+async def test_config_with_empty_key_is_400_and_sends_nothing(env):
+    """配置存在但库里没有 key、用户也没给新 key → 400 且**零外呼**。
+
+    为什么必须零外呼：发出去就是拿空 key 撞上游，回来的 401 会被显示成
+    「API Key 无效或没有权限」——把「配置本身没存 key」误报成「你的 key 是错的」，
+    用户会去反复重填一个本来就正确的 key。文案也要点明是配置缺 key（m4）。
+    """
+    r = await env.client.post(
+        "/api/ai/test",
+        json={"config_id": env.ids.no_key_config, "model": "m1"},
+        headers=_auth(env.token_owner),
+    )
+    assert r.status_code == 400, r.text
+    detail = r.json()["detail"]
+    assert "API Key" in detail, detail
+    assert "config_id" not in detail, f"不能再用那句误导人的通用文案：{detail}"
+    assert env.shim.requests == [], "库里没 key 时不许真的发出去"
+
+
+@pytest.mark.asyncio
+async def test_config_with_empty_key_accepts_explicit_new_key(env):
+    """库里没 key，但用户这次填了新 key（先试再存的路径）→ 照常发，用新 key。"""
+    r = await env.client.post(
+        "/api/ai/test",
+        json={"config_id": env.ids.no_key_config, "api_key": DRY_KEY, "model": "m1"},
+        headers=_auth(env.token_owner),
+    )
+    assert r.status_code == 200, r.text
+    assert env.shim.requests[0].headers["authorization"] == f"Bearer {DRY_KEY}"
 
 
 # ---------------------------------------------------------------- 4. 旧用法兼容
